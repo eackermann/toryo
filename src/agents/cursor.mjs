@@ -41,7 +41,7 @@ export const cursor = {
     return { installed: v.code === 0, path: bin, version: v.stdout.trim().split("\n")[0] };
   },
 
-  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, mountable = canMount }) {
+  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, mountable = canMount, canLaunch }) {
     const bin = which(cfg.bin ?? this.defaultBin) ?? which("cursor-agent") ?? "agent";
     const command = cfg.command ?? [bin];
     let chat = sessionId;
@@ -61,6 +61,7 @@ export const cursor = {
     let usage = null;
     let started = false;
     const proc = await runAgentProcess({
+      canLaunch,
       command,
       args,
       cwd,
@@ -101,7 +102,7 @@ export const cursor = {
     if (!text.trim()) text = lastAssistant;
     if (!error && proc.code !== 0 && !proc.aborted)
       error = `Cursor exited with code ${proc.code}: ${proc.stderr.trim().split("\n").slice(-3).join(" ")}`;
-    return { text, sessionId: chat, usage, error, askMode: askMode || undefined, aborted: proc.aborted, timedOut: proc.timedOut };
+    return { text, sessionId: chat, usage, error, askMode: askMode || undefined, aborted: proc.aborted, held: proc.held, timedOut: proc.timedOut };
   },
 };
 

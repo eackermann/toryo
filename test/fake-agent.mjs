@@ -15,7 +15,8 @@
  * null for none. `empty` ends the turn with no message; for Claude,
  * `zeroTurns` does too, reporting num_turns 0, and `hookDrop: "<text>"`
  * reports "Prompt dropped by a hook: <text>" first. `resultText` puts text
- * in that last result event (diagnostics after a drop).
+ * in that last result event (diagnostics after a drop). `delayMs` waits before
+ * the session starts; `workMs` waits after it has started (a turn at work).
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -83,6 +84,7 @@ if (rule?.hang) {
 } else {
   if (rule?.delayMs) await new Promise((r) => setTimeout(r, rule.delayMs));
   start();
+  if (rule?.workMs) await new Promise((r) => setTimeout(r, rule.workMs));
   if (rule?.fail) {
     process.stderr.write("fake failure\n");
     process.exit(1);

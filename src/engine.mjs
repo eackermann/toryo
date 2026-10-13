@@ -74,6 +74,10 @@ export class Engine extends EventEmitter {
     this.desk = defaultDesk();
     this.deskProblem = null;
     this.queueSeq = 0;
+    // While acting on a turn's outcome (#actOnOutcome): rooms whose saves wait for one save at the end, and the turn
+    // whose outcome it is (questions asked then remember it, so acting on it again after a restart doesn't ask twice).
+    this.outcomeRooms = new Set();
+    this.outcomeSource = null;
     this.lockPaths = new Map();
   }
 
@@ -103,6 +107,14 @@ export class Engine extends EventEmitter {
       this.events.set(id, this.store.loadEvents(id));
       this.#recover(room);
     }
+    // Turns whose end was recorded but whose outcome Toryo hadn't acted on when it stopped: act on them now, once,
+    // with every room loaded and before anything starts.
+    this.recovering = true;
+    try {
+      for (const room of this.rooms.values()) if (room.pendingOutcome) this.#reconcile(room);
+    } finally {
+      this.recovering = false;
+    }
     if (detect) await this.refreshAgents();
     if (this.usagePollMs > 0 && !this.usageTimer) {
       this.usageTimer = setInterval(() => this.refreshUsage().catch(() => {}), this.usagePollMs);
@@ -110,6 +122,33 @@ export class Engine extends EventEmitter {
     }
     // Rooms that weren't paused pick up where they were (for example, following the Codex app's turn).
     this.#pumpAll();
+  }
+
+  /**
+   * Act, once, on the outcome of a turn whose end was recorded just before Toryo stopped (room.pendingOutcome): what
+   * the room would have done next (queue the review, ask you the builder's question, retry…). The turn's own record
+   * (its text, status, error) and what the room kept (the Codex app turn it follows, lost or uncertain) say it all.
+   */
+  #reconcile(room) {
+    const turnId = room.pendingOutcome.turnId;
+    const ev = this.events.get(room.id).find((e) => e.id === turnId);
+    if (!ev?.req) {
+      room.pendingOutcome = null;
+      return this.#save(room);
+    }
+    const kept = room.appTurn?.marker === (ev.req.attach?.marker ?? `[Toryo ${ev.id}]`) ? room.appTurn : null;
+    const run = { turnId: ev.id, roomId: room.id, agent: ev.agent, req: ev.req, dispatch: ev.dispatch, startedAt: ev.startedAt, activity: [], appLost: Boolean(kept?.lost), uncertain: Boolean(kept?.uncertain) };
+    this.#actOnOutcome(room, turnId, () => {
+      // Said once, even if Toryo stops again before this is saved.
+      if (!this.events.get(room.id).some((e) => e.type === "system" && e.reconciled === turnId))
+        this.#append(room, { type: "system", text: `Toryo stopped just as ${this.label(ev.agent)}'s turn ended. It carries on from that turn now.`, forAgents: false, level: "info", reconciled: turnId });
+      if (ev.state === "done") {
+        this.#commitDispatch(room, ev.agent, run);
+        this.#markReplies(room, ev.agent, ev.id);
+        this.#noteOutcomes(room, ev.req, run, ev);
+      }
+      this.#afterTurn(room, ev, run);
+    });
   }
 
   /** A request that follows a Codex app turn already handed to the app, instead of sending it again. */
@@ -359,6 +398,9 @@ export class Engine extends EventEmitter {
    * A call made while it runs (a turn ending as another starts) makes it look once more; it's never nested.
    */
   #schedule() {
+    // Nothing starts while Toryo is still bringing its rooms back after a restart (see init), or before a turn's
+    // outcome is saved (#actOnOutcome, which looks again once it is).
+    if (this.recovering || this.outcomeRooms.size) return;
     if (this.scheduling) {
       this.scheduleAgain = true;
       return;
@@ -498,28 +540,40 @@ export class Engine extends EventEmitter {
     }
     const interrupted = [];
     let followed = false;
+    let uncertain = false;
     // A desk from the last round kept accepted app work in `following`.
     if (!room.appTurn && room.following?.length) room.appTurn = this.#appTurnFrom(room, room.following[0]);
     if (room.appTurn) room.appTurn.req = bind(room.appTurn.req);
     delete room.following;
+    // A turn whose end was recorded but whose outcome Toryo hadn't acted on yet when it stopped: acted on once all
+    // rooms are loaded (#reconcile, from init). Still running means it hadn't ended: it's handled below.
+    const pending = room.pendingOutcome && this.events.get(room.id).find((e) => e.id === room.pendingOutcome.turnId && e.type === "turn" && e.state !== "running");
+    room.pendingOutcome = pending ? room.pendingOutcome : null;
+    // First what the room keeps (the app turn it follows, the turns it offers again), on disk; only then the end of
+    // the turns that were running. A stop in between then can't lose a kept turn: its event is still "running".
+    const ended = [];
     for (const ev of this.events.get(room.id)) {
       if (ev.type === "turn" && ev.state === "running") {
         // The Codex app keeps working while Toryo is down: follow the same turn again rather than sending it twice.
         // (A turn Toryo stopped before handing it to the app is offered again like any other.)
-        if (ev.agent === "codexapp" && ev.req && ev.submitted !== false) {
-          this.#patch(room, ev, { state: "interrupted", endedAt: nowIso(), error: "Toryo restarted; it follows this turn in the app again below." }, false);
+        if (ev.agent === "codexapp" && ev.req && (ev.submitted !== false || ev.submitting)) {
+          ended.push([ev, "Toryo restarted; it follows this turn in the app again below."]);
           room.appTurn ??= this.#appTurnFrom(room, this.#followReq(bind(ev.req), ev));
-          followed = true;
+          // Toryo stopped while handing it over: the app may or may not have it. Watch for it; never send it twice.
+          if (!ev.submitted && ev.submitting) {
+            room.appTurn.uncertain = true;
+            uncertain = true;
+          } else followed = true;
           continue;
         }
-        this.#patch(room, ev, { state: "interrupted", endedAt: nowIso(), error: "Toryo stopped during this turn." }, false);
-        if (ev.req && !this.#stale(room, bind(ev.req))) interrupted.push(bind(ev.req));
+        ended.push([ev, "Toryo stopped during this turn."]);
+        // Offered again once: a stop during an earlier recovery may already have queued it (`replaces`).
+        if (ev.req && !this.#stale(room, bind(ev.req)) && !room.queue.some((q) => q.replaces === ev.id)) interrupted.push({ ...bind(ev.req), replaces: ev.id });
       }
     }
     // Checks that were running: run them again (they change nothing).
     const gate = room.activeGate && !this.#stale(room, bind(room.activeGate)) ? { ...bind(room.activeGate), id: shortId("q") } : null;
     room.activeGate = null;
-    if (followed) this.#system(room, "Toryo restarted while the Codex app was working. It's following that turn again; nothing is sent twice.");
     if (interrupted.length) {
       room.queue = [
         ...interrupted.map((req) => ({
@@ -532,15 +586,24 @@ export class Engine extends EventEmitter {
         ...room.queue,
       ];
       room.paused = true;
+    }
+    if (gate) room.queue = [gate, ...room.queue];
+    // Requests queued before 13 Oct have no time: they keep their order among themselves, after nothing older.
+    for (const q of room.queue) q.queuedAt ??= this.#stamp();
+    this.store.saveRoom(room);
+    for (const [ev, error] of ended) this.#patch(room, ev, { state: "interrupted", endedAt: nowIso(), error }, false);
+    if (followed) this.#system(room, "Toryo restarted while the Codex app was working. It's following that turn again; nothing is sent twice.");
+    if (uncertain) {
+      const text =
+        "Toryo stopped while it was handing a message to the Codex app, so it can't tell whether the app has it. It's watching the thread for it and sends nothing else there meanwhile: if the app sends it, Toryo follows that turn as usual. If you know it never arrived, choose “Stop waiting for it” (or press Stop twice) and send it again.";
+      this.#system(room, text, { level: "warn" });
+      this.#notify("The Codex app may not have Toryo's message", `“${room.title}”: Toryo is watching the thread for it.`);
+    }
+    if (interrupted.length) {
       const who = [...new Set(interrupted.map((r) => this.label(r.agent)))].join(" and ");
       this.#system(room, `Toryo restarted while ${who} ${interrupted.length > 1 ? "were" : "was"} working. Resume to run the interrupted turn again.`);
     }
-    if (gate) {
-      room.queue = [gate, ...room.queue];
-      this.#system(room, "Toryo restarted while the checks were running. They run again.");
-    }
-    // Requests queued before 13 Oct have no time: they keep their order among themselves, after nothing older.
-    for (const q of room.queue) q.queuedAt ??= this.#stamp();
+    if (gate) this.#system(room, "Toryo restarted while the checks were running. They run again.");
     this.#save(room);
   }
 
@@ -626,6 +689,7 @@ export class Engine extends EventEmitter {
         turnId: r.turnId,
         agent: r.agent,
         kind: r.req.kind,
+        phase: r.phase,
         startedAt: r.startedAt,
         activity: r.activity,
       })),
@@ -1550,7 +1614,11 @@ export class Engine extends EventEmitter {
       // Only for agents whose turns can't be cancelled (the Codex app): stop following the turn.
       abandon: new AbortController(),
       activity: [],
-      startedAt: nowIso(),
+      // Following a Codex app turn again after a restart: it started when the app was given it, not now.
+      startedAt: req.attach?.since ?? nowIso(),
+      // preparing (snapshot, prompt) → sending (handing it to the Codex app) → in-app (the app has it, not yet
+      // started) → working. Headless agents go from preparing to working when they start.
+      phase: req.attach ? "in-app" : "preparing",
       requeue: false,
     };
     this.running.set(turnId, run);
@@ -1558,12 +1626,22 @@ export class Engine extends EventEmitter {
       console.error("[toryo] turn crashed:", error);
       this.running.delete(turnId);
       const ev = this.events.get(room.id).find((e) => e.id === turnId);
+      // A turn the Codex app already has stays kept; following it again waits for you (it's never sent again). One that
+      // was being handed over may have reached the app: kept too, and watched for (#appUncertain). The room keeps it on
+      // disk before the turn's end is recorded, so a stop in between can't lose it.
+      if (room.pendingOutcome?.turnId === turnId) room.pendingOutcome = null;
+      const keep = Boolean(ev?.submitted || ev?.submitting || (room.appTurn && room.appTurn.marker === (req.attach?.marker ?? `[Toryo ${turnId}]`)));
+      const unsure = keep && !ev?.submitted && Boolean(ev?.submitting) && !req.attach;
+      if (keep) {
+        room.appTurn ??= this.#appTurnFrom(room, this.#followReq(req, ev));
+        if (unsure) room.appTurn.uncertain = true;
+        this.store.saveRoom(room);
+      }
       if (ev) this.#patch(room, ev, { state: "failed", endedAt: nowIso(), error: String(error?.message ?? error) });
       if (this.shuttingDown) return;
-      // A turn the Codex app already has stays kept; following it again waits for you (it's never sent again).
-      if (ev?.submitted || (room.appTurn && room.appTurn.marker === (req.attach?.marker ?? `[Toryo ${turnId}]`))) {
-        room.appTurn ??= this.#appTurnFrom(room, this.#followReq(req, ev));
-        this.#appLost(room, ev ?? { error: String(error?.message ?? error) });
+      if (keep) {
+        if (unsure) this.#appUncertain(room);
+        else this.#appLost(room, ev ?? { error: String(error?.message ?? error) });
       } else if (!this.#stale(room, req))
         this.#wait(room, { kind: "error", from: req.agent, question: `${this.label(req.agent)}'s turn crashed in Toryo: ${firstLine(error?.message ?? error)}`, recommendation: "Retry", retryReq: { ...req } });
       this.#save(room);
@@ -1651,6 +1729,12 @@ export class Engine extends EventEmitter {
     } else prompt = prompt.replace("{{SNAPSHOT}}", "");
     writeFileSync(join(dir, "prompt.md"), (usesSystemPrompt ? `<!-- system prompt (appended) -->\n${pre}\n\n<!-- prompt -->\n` : "") + prompt);
 
+    // Held while it was being prepared (Pause everything, a hold): it was never sent, so it goes back to the front of
+    // the queue as it was, with its messages still unread, and goes when the restriction lifts. (A room's own Pause
+    // lets the turn it's on finish, preparing included.) Following a turn the Codex app already has is never held.
+    const heldBy = req.attach || run.abandon.signal.aborted || run.controller.signal.aborted ? [] : this.blockersFor(req);
+    if (heldBy.length) return this.#deferTurn(room, run, ev, heldBy);
+
     // Stopped while the snapshot was taken: an unsent turn isn't handed over at all. Following a turn the
     // Codex app already has carries on after a first stop; only letting it go (abandon) ends it.
     const skip = run.abandon.signal.aborted || (run.controller.signal.aborted && !req.attach);
@@ -1671,15 +1755,33 @@ export class Engine extends EventEmitter {
       // The agent has the turn: keep its session at once (a restart resumes it) and mark the messages delivered.
       onStarted: ({ sessionId } = {}) => {
         if (sessionId) room.sessions[req.agent] = sessionId;
+        if (run.phase !== "working") {
+          run.phase = "working";
+          // For the Codex app: when it took the message up, as opposed to when it was given it.
+          if (req.agent === "codexapp" && !ev.pickedUpAt) this.#patch(room, ev, { pickedUpAt: nowIso() });
+        }
         this.#commitDispatch(room, req.agent, run);
+        this.#save(room);
+      },
+      // About to hand the message to the Codex app: from here until it says it has it, a crash leaves it uncertain
+      // whether the app got it, and a restart mustn't send it again (see #recover).
+      onSubmitting: () => {
+        run.phase = "sending";
+        this.#patch(room, ev, { submitting: true });
         this.#save(room);
       },
       // The Codex app accepted the message: keep the turn (on disk) until it ends; it's followed, never sent again.
       onSubmitted: () => {
-        room.appTurn = this.#appTurnFrom(room, this.#followReq(req, ev));
-        this.#patch(room, ev, { submitted: true });
+        if (run.phase === "preparing" || run.phase === "sending") run.phase = "in-app";
+        if (room.appTurn?.marker !== `[Toryo ${turnId}]`) room.appTurn = this.#appTurnFrom(room, this.#followReq(req, ev));
+        if (!ev.submitted) this.#patch(room, ev, { submitted: true, submittedAt: nowIso() });
         this.#save(room);
       },
+      // The Codex app opens a thread to make it send a queued message, but not while it's held or everything is paused.
+      canOpen: () => !this.blockersFor({ agent: req.agent }).length,
+      // Asked right before the agent is actually launched (or the message handed to the app), after anything the
+      // adapter awaited first (Cursor's create-chat): held since the turn began means it goes back unsent.
+      canLaunch: () => !this.blockersFor(req).length,
       onActivity: (item) => {
         if (item.kind === "limits") {
           if (this.#setLimits(req.agent, item.limits, "stream")) this.emit("state");
@@ -1693,6 +1795,9 @@ export class Engine extends EventEmitter {
       },
     });
 
+    // Held right before launch: nothing reached the agent. Back to the queue, as at the start of the turn.
+    if (result.held && !this.shuttingDown) return this.#deferTurn(room, run, ev, this.blockersFor(req));
+
     if (this.shuttingDown) {
       // Leave the turn marked as running; the next start re-queues it.
       this.running.delete(turnId);
@@ -1704,6 +1809,13 @@ export class Engine extends EventEmitter {
     const files = before && after ? await this.snapshots.changes(project, before.commit, after.commit) : [];
     this.running.delete(turnId);
     if (result.sessionId) room.sessions[req.agent] = result.sessionId;
+    // Handing the message to the Codex app ended without an answer (it ran out of time, or was stopped): the app may
+    // have it. Keep the thread, and follow the turn by its marker if the app sends it; never send it again by itself.
+    if (result.uncertain && !room.appTurn) {
+      room.appTurn = this.#appTurnFrom(room, this.#followReq(req, ev));
+      room.appTurn.uncertain = true;
+      run.uncertain = true;
+    }
     // A Cursor chat that had an Ask-mode turn keeps Ask mode: remember it, so its next turn that writes starts a new chat.
     if (result.askMode && result.sessionId) (room.askMode ??= {})[req.agent] = result.sessionId;
     // Usually the reading the turn already streamed; that one isn't news.
@@ -1725,7 +1837,7 @@ export class Engine extends EventEmitter {
     // keeps it, and following it again waits for you.
     if (room.appTurn && room.appTurn.marker === (req.attach?.marker ?? `[Toryo ${turnId}]`)) {
       if (state === "done" || run.abandon.signal.aborted) room.appTurn = null;
-      else {
+      else if (!run.uncertain) {
         room.appTurn.lost = true;
         run.appLost = true;
       }
@@ -1740,6 +1852,11 @@ export class Engine extends EventEmitter {
       stats.output += result.usage.output ?? 0;
     }
     if (result.cost) stats.cost += result.cost;
+    // Before the turn's end is recorded: the room notes that this turn has ended and its outcome is being acted on,
+    // with what it keeps (the Codex app turn it follows, or lets go). If Toryo stops before that outcome's effects are
+    // saved (below), the next start acts on it, once (#reconcile). If it stops before this, the turn is still running.
+    room.pendingOutcome = { turnId };
+    this.store.saveRoom(room);
     this.#patch(room, ev, {
       state,
       endedAt: nowIso(),
@@ -1758,13 +1875,32 @@ export class Engine extends EventEmitter {
     });
     if (req.access !== "write" && files.length && state === "done")
       this.#system(room, `Files changed during ${this.label(req.agent)}'s read-only turn (by it or someone else): ${files.slice(0, 8).map((f) => f.path).join(", ")}${files.length > 8 ? "…" : ""}`, { level: "warn" });
-    if (state === "done") this.#markReplies(room, req.agent, turnId);
-    if (state === "done") this.#noteOutcomes(room, req, run, ev);
-    this.#afterTurn(room, ev, run);
+    this.#actOnOutcome(room, turnId, () => {
+      if (state === "done") this.#markReplies(room, req.agent, turnId);
+      if (state === "done") this.#noteOutcomes(room, req, run, ev);
+      this.#afterTurn(room, ev, run);
+    });
+  }
+
+  /**
+   * Act on a turn's outcome (`fn`) as one step: the room's "outcome pending" marker is cleared first, its saves wait,
+   * and nothing new starts until the room is saved once, with the outcome's effects and the cleared marker together.
+   * A stop before that save leaves the marker, and the next start acts on the outcome again (#reconcile); what it
+   * already wrote to the timeline (a question to you) is found and reused rather than written twice.
+   */
+  #actOnOutcome(room, turnId, fn) {
+    if (room.pendingOutcome?.turnId === turnId) room.pendingOutcome = null;
+    const before = this.outcomeSource;
+    this.outcomeRooms.add(room);
+    this.outcomeSource = turnId;
+    try {
+      fn();
+    } finally {
+      this.outcomeSource = before;
+      this.outcomeRooms.delete(room);
+    }
     this.#save(room);
-    this.#pump(room);
-    // Rooms that were waiting for this Codex app thread to be free can go now.
-    if (req.agent === "codexapp") for (const other of this.#appThreadRooms(room.sessions.codexapp, room)) this.#pump(other);
+    this.#schedule();
   }
 
   /** Mark what a turn handed its agent as delivered (once). */
@@ -1984,6 +2120,7 @@ export class Engine extends EventEmitter {
   #afterTurn(room, ev, run) {
     const { req } = run;
     if (run.appLost) return this.#appLost(room, ev);
+    if (run.uncertain) return this.#appUncertain(room);
     if (this.#stale(room, req)) {
       if (ev.state === "done") this.#system(room, `${this.label(req.agent)}'s turn from before has finished. It doesn't change what's running now.`);
       return;
@@ -2119,6 +2256,30 @@ export class Engine extends EventEmitter {
       if (o.type === "owner" && o.readBy?.[agent] && !o.repliedBy?.[agent]) this.#patch(room, o, { repliedBy: { ...o.repliedBy, [agent]: turnId } });
   }
 
+  /**
+   * A turn held since it began (a hold, Pause everything) that never reached its agent: back to the front of the
+   * queue as it was (same id, same place in the order), its messages still unread, and on when the hold lifts.
+   */
+  #deferTurn(room, run, ev, reasons) {
+    this.running.delete(run.turnId);
+    if (run.sessionBefore === null) delete room.sessions[run.agent];
+    else if (run.sessionBefore !== undefined) room.sessions[run.agent] = run.sessionBefore;
+    room.queue.unshift(run.req);
+    this.#patch(room, ev, { state: "deferred", endedAt: nowIso(), error: `Not sent: ${reasons.join("; ") || "held"}. It goes when that ends.` });
+    this.#save(room);
+    this.#schedule();
+  }
+
+  /** Toryo can't tell whether the Codex app got a message: it's watched for (the thread kept), never sent again by itself. */
+  #appUncertain(room) {
+    this.#system(
+      room,
+      "Toryo couldn't tell whether the Codex app got its message. It's watching the thread for it and sends nothing else there meanwhile: if the app sends it, Toryo follows that turn as usual. If you know it never arrived, choose “Stop waiting for it” (or press Stop twice) and send it again.",
+      { level: "warn" },
+    );
+    this.#notify("The Codex app may not have Toryo's message", `“${room.title}”: Toryo is watching the thread for it.`);
+  }
+
   /** Following the Codex app's turn failed. The turn stays kept (nothing new goes to the app); you choose what happens. */
   #appLost(room, ev) {
     if (room.appTurn) room.appTurn.lost = true;
@@ -2133,9 +2294,11 @@ export class Engine extends EventEmitter {
 
   #afterChat(room, ev, req) {
     if (ev.status === "OWNER") {
-      const q = this.#append(room, { type: "question", kind: "chat-owner", from: req.agent, question: ev.detail || firstLine(ev.text), recommendation: recommendationIn(ev.text), open: true, turnId: ev.id });
-      (room.openChat ??= []).push(q.id);
-      this.#notify(`${this.label(req.agent)} has a question`, ev.detail || firstLine(ev.text));
+      // Asked once, even if this outcome is acted on again after a restart.
+      const asked = this.events.get(room.id).find((e) => e.type === "question" && e.kind === "chat-owner" && e.turnId === ev.id);
+      const q = asked ?? this.#append(room, { type: "question", kind: "chat-owner", from: req.agent, question: ev.detail || firstLine(ev.text), recommendation: recommendationIn(ev.text), open: true, turnId: ev.id });
+      if (q.open && !(room.openChat ??= []).includes(q.id)) room.openChat.push(q.id);
+      if (!asked) this.#notify(`${this.label(req.agent)} has a question`, ev.detail || firstLine(ev.text));
     }
     const d = room.discuss;
     if (!d || !d.pending.includes(req.agent)) return;
@@ -2421,12 +2584,17 @@ export class Engine extends EventEmitter {
   }
 
   #wait(room, w) {
-    const q = this.#append(room, { type: "question", kind: w.kind, from: w.from, question: w.question, recommendation: w.recommendation ?? "", questions: w.questions, planPath: w.planPath, open: true });
+    // Acting on a turn's outcome again after a restart: the question it asked may already be in the timeline. Ask once.
+    const source = this.outcomeSource;
+    const asked = source && this.events.get(room.id).find((e) => e.type === "question" && e.open && e.source === source && e.kind === w.kind);
+    const q = asked ?? this.#append(room, { type: "question", kind: w.kind, from: w.from, question: w.question, recommendation: w.recommendation ?? "", questions: w.questions, planPath: w.planPath, open: true, source: source ?? undefined });
     // Questions never replace each other (two planners can ask at once): later ones wait their turn.
-    if (room.waiting) (room.waitingQueue ??= []).push({ ...w, eventId: q.id });
-    else room.waiting = { ...w, eventId: q.id };
+    if (![room.waiting, ...(room.waitingQueue ?? [])].some((x) => x?.eventId === q.id)) {
+      if (room.waiting) (room.waitingQueue ??= []).push({ ...w, eventId: q.id });
+      else room.waiting = { ...w, eventId: q.id };
+    }
     this.#save(room);
-    this.#notify(w.from ? `${this.label(w.from)} needs your answer` : "Toryo needs you", w.question);
+    if (!asked) this.#notify(w.from ? `${this.label(w.from)} needs your answer` : "Toryo needs you", w.question);
   }
 
   // ---------------------------------------------------------------- events & persistence
@@ -2461,6 +2629,8 @@ export class Engine extends EventEmitter {
   }
 
   #save(room) {
+    // Acting on a turn's outcome: one save at the end (#actOnOutcome).
+    if (this.outcomeRooms.has(room)) return;
     room.updatedAt ??= nowIso();
     this.store.saveRoom(room);
     this.emit("room", this.summary(room));

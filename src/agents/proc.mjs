@@ -21,8 +21,13 @@ export function runAgentProcess({
   signal,
   timeoutMs,
   readOnly,
+  canLaunch,
 }) {
   return new Promise((resolve) => {
+    // Stopped before it started (while the turn was being prepared, say): start nothing at all.
+    if (signal?.aborted) return resolve({ code: null, signal: null, stderr: "", aborted: true, timedOut: false });
+    // Held (a hold, Pause everything) since the turn began: it's sent back unsent, so start nothing (see `canLaunch`).
+    if (canLaunch && !canLaunch()) return resolve({ code: null, signal: null, stderr: "", aborted: true, held: true, timedOut: false });
     const [program, ...prefix] = Array.isArray(command) ? command : [command];
     let cmd = program;
     let fullArgs = [...prefix, ...args];

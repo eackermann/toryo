@@ -604,6 +604,8 @@ function turnEl(ev) {
   let chip = "";
   if (ev.state === "failed") chip = `<span class="status" data-s="failed">Failed</span>`;
   else if (ev.state === "interrupted") chip = `<span class="status">Interrupted</span>`;
+  // Held while it was being prepared: it went back to the queue, unsent (the reason is below).
+  else if (ev.state === "deferred") chip = `<span class="status">Not sent yet</span>`;
   else if (ev.status && STATUS[ev.status]) chip = `<span class="status" data-s="${ev.status}" title="${esc(`TORYO: ${ev.status} ${ev.detail ?? ""}`)}">${STATUS[ev.status]}</span>`;
   const head = `<header><span class="who"><span class="avatar" data-agent="${ev.agent}">${INITIALS[ev.agent] ?? "??"}</span>${esc(name(ev.agent))}${role}</span><span class="kind">${esc(KIND[ev.kind] ?? ev.kind ?? "")}</span><span class="meta">${meta}</span>${chip}</header>`;
   if (live) {
@@ -622,7 +624,7 @@ function turnEl(ev) {
     .join("");
   const usage = ev.usage ? `${tokens((ev.usage.input ?? 0) + (ev.usage.cached ?? 0))} in · ${tokens(ev.usage.output)} out${ev.cost ? ` · $${ev.cost.toFixed(2)} at API rates` : ""}` : "";
   return el(`<article class="turn ${ev.state === "failed" ? "failed" : ""}" data-id="${ev.id}">${head}
-    ${text.trim() ? `<div class="body md ${long && !expanded ? "clamped" : ""}">${renderMarkdown(text)}</div>` : `<div class="hint">(no message)</div>`}
+    ${text.trim() ? `<div class="body md ${long && !expanded ? "clamped" : ""}">${renderMarkdown(text)}</div>` : ev.state === "deferred" ? "" : `<div class="hint">(no message)</div>`}
     ${long ? `<div><button type="button" class="btn small quiet" data-expand="${ev.id}">${expanded ? "Show less" : "Show the whole message"}</button></div>` : ""}
     ${ev.error ? `<div class="error">${esc(ev.error)}</div>` : ""}
     <footer>

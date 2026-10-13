@@ -187,7 +187,7 @@ export const codexapp = {
     return { installed: true, path: exe, version: name ? `default thread “${name}”` : `default thread ${cfg.thread.slice(0, 8)}…`, threadName: name };
   },
 
-  async run({ cfg = {}, prompt, sessionId, turnDir, onActivity, onStarted, onSubmitted, signal, abandon, timeoutMs, attach }) {
+  async run({ cfg = {}, prompt, sessionId, turnDir, onActivity, onStarted, onSubmitting, onSubmitted, canOpen, canLaunch, signal, abandon, timeoutMs, attach }) {
     const { exe, home } = locate(cfg);
     // The room's own thread first; the default only for a room that has none.
     const thread = sessionId ?? cfg.thread;
@@ -216,13 +216,31 @@ export const codexapp = {
     } else {
       // Last chance to send nothing: once queued, the app's turn can't be taken back.
       if (signal?.aborted || abandon?.aborted) return { text: "", sessionId: thread, aborted: true };
+      // Held (a hold, Pause everything) since the turn began: it goes back unsent.
+      if (canLaunch && !canLaunch()) return { text: "", sessionId: thread, aborted: true, held: true };
+      // From here until the app says it has it, a crash leaves it uncertain whether it got the message.
+      onSubmitting?.();
       const sent = spawnSync(exe, ["queue", "--thread", thread, "--message", message], {
         encoding: "utf8",
         cwd: "/mnt/c/Windows/Temp",
         input: "",
-        timeout: 60_000,
+        timeout: cfg.queueTimeoutMs ?? 60_000,
       });
-      if (sent.status !== 0) return { text: "", error: `codex queue failed: ${(sent.stderr || sent.stdout || "").trim().slice(0, 300)}` };
+      if (sent.status !== 0) {
+        // Not queued, for certain: the command couldn't start, or it ran and said it failed. Otherwise it was stopped
+        // (it ran out of time, or was killed) and the app may have the message: that's never sent again by itself.
+        // Stopped first: a command that ran out of time may still exit with a code of its own (it caught the signal).
+        const stopped = sent.error?.code === "ETIMEDOUT" || Boolean(sent.signal);
+        const neverRan = ["ENOENT", "EACCES", "ENOEXEC"].includes(sent.error?.code);
+        if (!stopped && (neverRan || typeof sent.status === "number"))
+          return { text: "", error: `codex queue failed: ${(sent.stderr || sent.stdout || sent.error?.message || "").trim().slice(0, 300)}` };
+        return {
+          text: "",
+          sessionId: thread,
+          uncertain: true,
+          error: `codex queue didn't finish (${sent.error?.code ?? sent.signal ?? "stopped"}), so Toryo can't tell whether the Codex app has the message.`,
+        };
+      }
       onSubmitted?.();
       onActivity?.({ kind: "say", text: "Queued in your Codex app thread. The app sends it when that thread is open and idle." });
     }
@@ -297,7 +315,8 @@ export const codexapp = {
         }
       }
       // After a stop, don't push a message the app hasn't sent yet.
-      if (!seen && !opened && !signal?.aborted && Date.now() - started > openAfter) {
+      // Not while Toryo holds the app or has paused everything: opening the thread would make it start the turn.
+      if (!seen && !opened && !signal?.aborted && Date.now() - started > openAfter && (canOpen?.() ?? true)) {
         opened = true;
         if (open(thread)) onActivity?.({ kind: "say", text: "Opened the thread in the Codex app so it sends the message." });
       }

@@ -63,7 +63,7 @@ export const codex = {
     return resume ? ["-c", 'sandbox_mode="workspace-write"', ...net] : ["-s", "workspace-write", ...net];
   },
 
-  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs }) {
+  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, canLaunch }) {
     const command = cfg.command ?? [which(cfg.bin ?? this.defaultBin) ?? "codex"];
     const last = join(turnDir, "last-message.txt");
     const common = ["--json", "--skip-git-repo-check", "-o", last];
@@ -81,6 +81,7 @@ export const codex = {
     let usage = null;
     let error = null;
     const proc = await runAgentProcess({
+      canLaunch,
       command,
       args,
       cwd,
@@ -141,6 +142,7 @@ export const codex = {
         : null,
       error,
       aborted: proc.aborted,
+      held: proc.held,
       timedOut: proc.timedOut,
     };
   },

@@ -14,14 +14,17 @@ const CODEX = "you hold Codex (headless and the Codex app)";
 
 test("holding Codex lets its turns finish in two rooms, starts no new Codex turn, and Claude carries on; releasing it wakes both", async () => {
   const t = await setup([
-    { agent: "codex", match: "Your role: builder", delayMs: 500, reply: "Built.\nTORYO: REVIEW S1 | h.md" },
+    // At work (started) for a while, so the hold comes while both turns are really under way.
+    { agent: "codex", match: "Your role: builder", workMs: 1000, reply: "Built.\nTORYO: REVIEW S1 | h.md" },
     { agent: "claude", reply: "Fine.\nTORYO: APPROVED" },
     { agent: "codex", match: "approved", reply: "Next.\nTORYO: OWNER Which one?" },
   ]);
   try {
     const a = t.engine.createRoom({ projectId: "repo", mode: "build", task: "A" });
     const b = t.engine.createRoom({ projectId: "repo", mode: "build", task: "B" });
-    await waitFor(() => summary(t.engine, a.id).running.includes("codex") && summary(t.engine, b.id).running.includes("codex"), { label: "both building" });
+    // Really started (the agent has the prompt), not still being prepared: a hold then would send it back unsent.
+    const working = (id) => t.engine.roomView(id).live.some((l) => l.agent === "codex" && l.phase === "working");
+    await waitFor(() => working(a.id) && working(b.id), { label: "both building" });
     const { message } = t.engine.deskControl("hold", { target: "codex" });
     assert.match(message, /Holding Codex \(headless and the Codex app\): Codex and Codex app finish the turns they're on/);
     for (const r of [a, b]) await waitFor(() => summary(t.engine, r.id).status === "held", { label: "held after review" });

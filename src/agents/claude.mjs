@@ -44,7 +44,7 @@ export const claude = {
     return { installed: v.code === 0, path: bin, version: v.stdout.trim().split("\n")[0] };
   },
 
-  async run({ cfg = {}, cwd, prompt, sessionId, access, systemPrompt, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths }) {
+  async run({ cfg = {}, cwd, prompt, sessionId, access, systemPrompt, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, canLaunch }) {
     const command = cfg.command ?? [which(cfg.bin ?? this.defaultBin) ?? "claude"];
     const fresh = !sessionId;
     const session = sessionId ?? uuid();
@@ -75,6 +75,7 @@ export const claude = {
     let dropped = null;
     let turns = null;
     const proc = await runAgentProcess({
+      canLaunch,
       command,
       args,
       cwd,
@@ -136,7 +137,7 @@ export const claude = {
     else if (!error && !proc.aborted && !text.trim() && turns === 0) error = "Claude ran no turns and returned nothing.";
     if (!error && proc.code !== 0 && !proc.aborted)
       error = `Claude exited with code ${proc.code}: ${proc.stderr.trim().split("\n").slice(-3).join(" ")}`;
-    return { text, sessionId: resultSession, usage, cost, limits, error, dropped: Boolean(dropped), aborted: proc.aborted, timedOut: proc.timedOut };
+    return { text, sessionId: resultSession, usage, cost, limits, error, dropped: Boolean(dropped), aborted: proc.aborted, held: proc.held, timedOut: proc.timedOut };
   },
 };
 

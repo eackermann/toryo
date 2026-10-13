@@ -23,7 +23,7 @@ export const grok = {
     return { installed: v.code === 0, path: bin, version: v.stdout.trim().split("\n")[0] };
   },
 
-  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths }) {
+  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, canLaunch }) {
     const command = cfg.command ?? [which(cfg.bin ?? this.defaultBin) ?? "grok"];
     const session = sessionId ?? uuid();
     // Grok takes the prompt as an argument; keep it well under the OS argument limit.
@@ -35,6 +35,7 @@ export const grok = {
 
     const lines = [];
     const proc = await runAgentProcess({
+      canLaunch,
       command,
       args,
       cwd,
@@ -58,7 +59,7 @@ export const grok = {
     if (!error && proc.code !== 0 && !proc.aborted)
       error = `Grok exited with code ${proc.code}: ${proc.stderr.trim().split("\n").slice(-3).join(" ")}`;
     // Grok takes the session id from Toryo; it only exists once Grok has answered.
-    return { text, sessionId: lines.length ? session : sessionId, usage: null, error, aborted: proc.aborted, timedOut: proc.timedOut };
+    return { text, sessionId: lines.length ? session : sessionId, usage: null, error, aborted: proc.aborted, held: proc.held, timedOut: proc.timedOut };
   },
 };
 
