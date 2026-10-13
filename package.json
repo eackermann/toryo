@@ -1,0 +1,15 @@
+{
+  "name": "toryo",
+  "version": "0.1.0",
+  "description": "A local relay desk where Codex, Claude and other coding agents build, review and plan together.",
+  "type": "module",
+  "bin": { "toryo": "bin/toryo.mjs" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node bin/toryo.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/eackermann/toryo.git" },
+  "private": true
+}

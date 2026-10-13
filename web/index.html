@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Toryo</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <h1>Toryo</h1>
+      <button class="roomtitle" id="roomTitle" type="button" title="Room settings" hidden></button>
+      <span class="where" id="roomWhere"></span>
+    </div>
+    <div class="modes" id="modes" role="group" aria-label="Room mode" hidden>
+      <button type="button" data-mode="chat" aria-pressed="false" title="Talk with one agent or several">Chat</button>
+      <button type="button" data-mode="plan" aria-pressed="false" title="Independent proposals, critiques, your call, a written plan">Plan</button>
+      <button type="button" data-mode="build" aria-pressed="false" title="One builds, the other reviews, slice by slice">Build</button>
+    </div>
+    <div class="runstate">
+      <span class="pill" id="runPill" data-state="idle" hidden><span class="dot"></span><span id="runText">Idle</span></span>
+      <button class="btn" id="pauseBtn" type="button" hidden>Pause</button>
+      <button class="btn danger" id="stopBtn" type="button" hidden>Stop</button>
+      <button class="btn quiet" id="roomBtn" type="button" title="Rename, change settings or delete this room" hidden>Room</button>
+      <button class="iconbtn" id="bellBtn" type="button" title="Browser notifications">🔔</button>
+      <button class="btn quiet" id="settingsBtn" type="button">Settings</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" type="button" data-tab="rooms" aria-selected="false">Rooms</button>
+    <button role="tab" type="button" data-tab="relay" aria-selected="true">Relay</button>
+    <button role="tab" type="button" data-tab="crew" aria-selected="false">Crew</button>
+  </nav>
+
+  <main id="main" data-tab="relay">
+    <aside class="pane side" aria-label="Rooms and context">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <p class="eyebrow">Rooms</p>
+        <button class="btn small" id="newRoomBtn" type="button">New room</button>
+      </div>
+      <div class="rooms" id="rooms"></div>
+      <div class="ctx" id="context"></div>
+    </aside>
+
+    <section class="center" aria-label="Relay">
+      <div class="log" id="log" aria-live="polite"></div>
+      <form class="composer" id="composer" autocomplete="off" hidden>
+        <div class="route">
+          <span class="seg" id="recipients" role="group" aria-label="Send to"></span>
+          <span class="routeinfo" id="routeInfo"></span>
+        </div>
+        <div class="compose-row">
+          <textarea id="msg" rows="2" placeholder="Write to the crew. @codex or @claude to address one; Enter to send, Shift+Enter for a new line."></textarea>
+          <div class="compose-actions">
+            <select id="delivery" aria-label="When to deliver">
+              <option value="next">At its next turn</option>
+              <option value="now">Now (interrupts)</option>
+            </select>
+            <button class="btn primary" type="submit" id="sendBtn">Send</button>
+          </div>
+        </div>
+        <div class="opts" id="composeOpts">
+          <label id="discussOpt"><input type="checkbox" id="discuss"> Let them discuss <select id="discussRounds" aria-label="Discussion rounds"><option>1</option><option selected>2</option><option>3</option><option>4</option></select> rounds</label>
+          <label id="writeOpt"><input type="checkbox" id="allowWrite"> Allow file changes</label>
+          <span class="seg" id="intent" role="group" aria-label="Ask or tell" title="Ask: it's a question and needs an answer. Tell: an instruction, acted on without a separate reply. Chosen from what you write until you pick one."><button type="button" data-intent="ask" aria-pressed="false">Ask</button><button type="button" data-intent="tell" aria-pressed="true">Tell</button></span>
+          <span class="hint" id="composeHint"></span>
+        </div>
+      </form>
+    </section>
+
+    <aside class="pane crew" aria-label="Crew" id="crewPane"></aside>
+  </main>
+</div>
+
+<div class="scrim" id="sheet" hidden><div class="sheet" id="sheetBody" role="dialog" aria-modal="true"></div></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

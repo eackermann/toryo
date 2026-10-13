@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Launch Toryo with the newest Node on this machine (Node 22+ required).
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+node_bin="$(command -v node || true)"
+if [ -d "$HOME/.nvm/versions/node" ]; then
+  newest="$(ls -1 "$HOME/.nvm/versions/node" | sort -V | tail -1)"
+  [ -n "$newest" ] && node_bin="$HOME/.nvm/versions/node/$newest/bin/node"
+fi
+if [ -z "$node_bin" ]; then echo "Toryo needs Node 22 or newer." >&2; exit 1; fi
+exec "$node_bin" "$here/bin/toryo.mjs" "$@"

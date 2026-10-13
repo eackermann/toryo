@@ -1,0 +1,190 @@
+![Tōryō: collaborative coding agent orchestration. Plan, build, review.](design/toryo-hero.png)
+
+# Toryo
+
+A local relay desk for coding agents. Codex, Claude, and optionally Cursor and Grok work in your repository in **rooms**. Toryo passes each finished turn to the next agent, keeps the builder moving through the plan, and stops only for decisions that are yours. No model runs the relay itself, so it costs no tokens and adds no delay.
+
+Toryo (棟梁, *tōryō*) is the master carpenter who runs a Japanese building site: plans the job, assigns the craftsmen and inspects their work. It was called Foreman until 13 October 2026. The old names still work: the `foreman` command, `FOREMAN:` status lines, the `FOREMAN_*` settings and a `~/.foreman` data folder that hasn't been moved yet.
+
+```
+toryo            # start the desk: http://localhost:4777
+toryo --open     # …and open it in your browser
+```
+
+If the desk is already running, `toryo --open` just opens it. Only one desk can use a data folder: a second one refuses to start, even if it can't reach the first. `toryo quit` stops the desk, and any turns that were running are offered again next time.
+
+**Install.** Toryo needs Node 22 or newer and git. It has no dependencies, and runs on Linux, including WSL on Windows; other systems are untested. Clone it and link the `toryo` command:
+
+```
+git clone https://github.com/eackermann/toryo.git ~/toryo
+ln -s ~/toryo/toryo ~/.local/bin/toryo
+```
+
+Then install and sign in to the agents you want in your crew: Codex and Claude Code, and optionally Cursor's CLI and Grok. `toryo doctor` shows which ones it finds, and how to install the others. The first time you open the desk, it asks for a project folder.
+
+**Usage.** Each agent's plan usage (5-hour and weekly limits, where the agent reports them) shows in the Agents panel and on the crew cards. Each limit says how long ago its own reading was taken, since one limit's reading can be fresher than another's. Codex's comes from its session logs, so it shows straight away, and Toryo reads those logs again every 5 minutes, also between turns. If it can't read them, the panel says so under the last good reading. Claude reports usage while it works, so Claude's appears after its first turn in a room and is only as fresh as its last turn. A limit that has reset since its last reading shows *reset, waiting for a new reading* rather than the old percentage, even on a page left open, and a number the agent didn't report shows as *unknown*, never 0%. A model's own limit, such as Claude's weekly Opus limit, shows on its own. Codex and the Codex app draw on the same ChatGPT plan, so Toryo treats their readings as one allowance and never adds them together. Room settings, renaming and deleting are under **Room** in the top bar, or click the room's name.
+
+Your config lives in `~/.toryo/config.json`: your projects, each with its house rules and checks, and the agents' settings. Everything else Toryo keeps (rooms, transcripts, snapshots) is under `~/.toryo/` too, never in your repository.
+
+## Three ways to work, in one room
+
+A room keeps each agent's session for its whole life. You can chat, then plan, then build in the same room, and everyone remembers what came before.
+
+**Chat.** Write to one agent, several, or everyone. Recipients answer in parallel and see each other's replies on their next turn. Tick *Let them discuss* to give them 1 to 4 rounds of back-and-forth. Toryo stops early when they all agree, and otherwise lists the points still open. Chat turns are read-only unless you tick *Allow file changes*.
+
+**Plan.** A structured planning round, deliberately not free chat:
+1. **Independent proposals.** Each planner drafts on its own, without seeing the others, so nobody anchors on the first idea.
+2. **Critiques.** Each one reads the others' proposals and says what's better, what's missing, and where they disagree.
+3. **Your call.** Toryo collects every `Q: … (Recommended: …)` question into one form, with the recommendations filled in. Change what you like and choose who writes the plan.
+4. **The written plan.** That agent writes `docs/plans/<topic>.md`, with one `### Slice N:` heading per slice, and records your decisions following the repository's convention, such as a *Recording Decisions* section in its CLAUDE.md.
+5. **One check.** Another planner checks the written plan once. If it asks for changes, there's one revision.
+6. **Start building** with that plan in the same room. Accepting the recommendation from a terminal or your phone (`toryo answer --accept`) does the same; writing an answer instead asks the author for changes.
+
+**Build.** One agent builds and the other reviews:
+- **Each slice.** The builder implements a slice, writes a review handoff and ends with `TORYO: REVIEW`.
+- **Checks first.** Toryo runs your project checks (your typechecks or tests, say) before every review, the final one included. If they fail, the work goes straight back to the builder without spending a review. If you stop the room, the checks stop too, and none that haven't started yet run. Each check has a time limit, 20 minutes unless you set another in Settings; a check that runs out of time fails.
+- **Review.** The reviewer reviews read-only. Its findings go back verbatim until it approves.
+- **A fresh reviewer for each slice.** By default the reviewer starts a new session for each new slice: each slice gets an independent look, and its session doesn't grow for the whole build, which gets expensive once the cache has gone cold. Within a slice it keeps its session, so it remembers its own findings. A fresh reviewer gets a short briefing instead of its memory: its role, the plan and where it stands, the latest handoff, and the room's **ledger**. The ledger holds findings still open from earlier slices, and your answers to the build's questions. Toryo keeps it from the reviews: a slice's findings close when it's approved, a finding the reviewer leaves for later stays open until a later review marks it resolved, and the room's side panel shows what's open. The final review of a plan always gets a fresh reviewer. Turn this off in **Room** settings (*Fresh reviewer for each new slice*). To start any agent afresh in a room, use *Start … fresh in this room* on its crew card; its next turn begins a new session with the same briefing.
+- **Keep going.** After approval, the builder continues into the next slice on its own. That's the end of “why did you stop?”. If it stops without a status line anyway, Toryo nudges it, twice by default, before asking you.
+- **When you're asked.** Only for a real decision (`TORYO: OWNER …`), after 4 rounds on one slice (a review without a status line counts as a round), on an error, or when a turn runs out of time (4 hours by default). A turn that comes back empty is an error, never a verdict: Toryo tries it once more, then asks you, with *Retry*. If a Claude Code hook dropped the prompt before Claude saw it (the stream says *Prompt dropped by a hook: …*), Toryo asks you straight away and names the hook, since trying again would only be dropped again. If two agents ask at once, both questions wait for you, and you can answer them in any order. Your answer goes to the agent that asked: when the reviewer asks, it gets your answer and finishes its review with a verdict.
+
+You can swap builder and reviewer at any time. If a round is under way when you swap (someone is working, a review is waiting its turn, or a question is waiting for you), that round is checked and reviewed with the old roles, and the swap takes effect before the next building turn, so nobody reviews their own work.
+
+Starting a new build or planning round in a room replaces the old one. A turn from the old one that is still running finishes, but its result no longer moves anything forward.
+
+**Picking up a round that's already finished.** If the builder has already written a handoff and is waiting for a review, tick *The builder already finished a round: start with the review*. You'll usually be moving over from copy-and-paste here. The reviewer goes first, with the builder's message passed on verbatim. The builder gets Toryo's briefing with that review on its first turn, and the relay carries on from there. With the Codex app as builder, leave the message empty and Toryo uses the last reply in the room's Codex app thread. From a terminal:
+
+```
+toryo start build "Carry on with the plan after the review" --project myapp \
+  --builder codexapp --reviewer claude --review-first --plan docs/plans/checkout-redesign.md
+```
+
+**Reviewing Toryo with Toryo.** Toryo is a project too. Its rules keep agents away from the running desk, and its checks run the syntax check and the tests. Claude wrote it, so Codex reviews it and Claude addresses the findings. The review starts from the handoff in `docs/reviews/`:
+
+```
+toryo start build "Address Codex's review" --project Toryo --builder claude --reviewer codex \
+  --review-first --handoff-file ~/toryo/docs/reviews/foreman-initial-review.md
+```
+
+Edits made in that room take effect after `toryo quit` and a fresh `toryo`, and running turns resume. The desk keeps serving the page it started with, so a half-finished edit never breaks the page you're using; when the files on disk differ, the page says *Toryo has been updated. Restart Toryo to use it* and gives the command.
+
+## The status protocol
+
+Every turn ends with one line, and that line is the only thing Toryo reads. It has to be the message's last line, outside quotes and code blocks: a status quoted as an example, or followed by more text, doesn't count.
+
+| Who | Line | What happens |
+|---|---|---|
+| Builder | `TORYO: REVIEW <slice> \| <handoff>` | checks run, then the reviewer gets the message verbatim |
+| Builder | `TORYO: DONE` | checks run, then a final review of the whole plan |
+| Reviewer | `TORYO: APPROVED` / `CHANGES` | builder moves on / builder fixes |
+| Anyone | `TORYO: OWNER <question>` | the room waits for you, and you're notified |
+| Planners | `PROPOSAL`, `CRITIQUE`, `AGREE`, `DISAGREE <point>` | drive the planning and discussion steps |
+
+## What you see
+
+- **The room list.** A room that needs you says **needs you** first, in a bold pill: a question it waits on, or one an agent asked in chat. Then who is working on what: CX 🔨 is Codex building, CL 👓 is Claude reviewing, 📝 a proposal or the plan being written, 🧪 the checks. Otherwise the room's state: ⏸ paused, ⏹ stopped or stopping, ✓ done, Zzz idle. Hover over a room for the same in words.
+- **The timeline.** Every message in full (Markdown), with its status, the files it changed, and its tokens. *Prompt* shows exactly what Toryo sent to that agent.
+- **Live activity.** Commands, edits and remarks stream in while an agent works. *Interrupt with a note* delivers a message mid-turn.
+- **Decision cards.** Each question comes with the agent's recommendation and a one-click *Use the recommendation*.
+- **Snapshots and diffs.** Toryo snapshots the tree before and after every turn in a shadow git store in `~/.toryo/shadow`; your repository's `.git` is only read. *N files changed* shows that turn's exact diff. Reviewers are told which snapshot they're reviewing, and the command to diff it against their last review.
+- **The plan panel.** Slices are read from the plan file, and approved ones are ticked.
+- **Shared docs.** The plans, decisions and handoffs the agents touched in the room, one click away.
+- **While you were away.** A summary when you come back to a room, with *Jump to the first new message*.
+- **Second opinion.** Ask any other agent to look at any message.
+- **Your note's route.** The composer shows who gets your note and why: an `@mention`, the agent waiting for your answer, wording about checking (goes to the reviewer) or fixing (goes to the builder), or whoever acts next.
+- **Notes: Ask or Tell.** Mark a note *Ask* (a question, which needs an answer) or *Tell* (an instruction). Until you choose, a question mark or a question means Ask. Notes don't turn building into answering:
+  - **To the builder while it works.** Its next turn is a building turn, *Building: your notes*. It acts on your notes there, and answers any Ask in the same turn. Then the relay carries on as it would have: checks, then review.
+  - **The outcome of each note.** That turn opens with one line per note: *done*, *scheduled* (for which slice) or *declined* (and why). The note shows that outcome, so you can see every note landed.
+  - **To a reviewer, or in a room that isn't building.** Only an Ask gets a turn: a short, read-only *Answering your question*. Then the room goes back to exactly what it was doing; answering doesn't change a verdict. A Tell goes with that agent's next turn.
+  - **Where a note is.** Under each note you see where it is: waiting for that agent's turn to end, being read, then its outcome or *replied*, with a link. Until an agent has it, you can *Edit* the note or *Cancel* it; once it has gone, it stays as sent.
+- **Writing.** Enter sends; Shift+Enter starts a new line.
+
+## Keeping Codex in its app (experimental)
+
+You can add a **Codex desktop app thread** to the crew instead of headless Codex: pick *Codex app* as the builder, or tick it in the crew.
+- **Each room has its own thread.** You choose it in the New room form whenever the Codex app is in the crew. The form suggests the project's default thread, else the default for every project; both are in Settings, and changing them never moves an existing room. The crew card shows the room's thread, opens it in the app, and changes it while the Codex app isn't working in that room. Toryo won't give a room a thread the Codex app is working in for another room. Sharing a thread with a room that's idle is allowed, with a warning, and only one room's turn runs in a thread at a time.
+- **Sending.** Toryo puts each message into that thread's follow-up queue with `codex queue`, the same queue the app uses.
+- **Receiving.** It reads the thread's session log to stream activity and to catch the end of the turn.
+- **Why use it.** The work stays visible and steerable in the app, and from the ChatGPT phone app.
+
+The catch: the app sends a thread's queued messages only once it has opened that thread since it started. On 13 Oct a queued message sat for 50 minutes on a thread the app hadn't opened. Opening the thread sent all three waiting messages within a second, in order. After that the app sent new ones within a second, even with another thread on screen. So when a message hasn't gone out after eight seconds, Toryo opens the thread with the app's `codex://threads/<id>` link, which brings the app to the front. To stop that, set `"openThread": "never"` under `agents.codexapp` in the config. If the thread is busy with your own turn, the message waits for it to finish. Permissions and the model are the app's own; Toryo can't make this agent read-only.
+
+Toryo also can't stop or interrupt a turn in the app. *Stop* lets the app's turn finish and starts nothing else in the room until it has; stop it in the app if you need to, or press *Stop* again to make Toryo stop waiting for it. A stop that comes before Toryo has handed the message to the app means it isn't sent at all. A note sent *Now* to the Codex app goes with its next turn. When the app's turn runs past the room's time limit, Toryo tells you and keeps following it. Once the app has a message, Toryo follows that turn to its end, also across restarts and in a stopped or paused room, and never sends it twice. Until that turn ends, the room sends the app nothing else and no other room sends into that thread. If Toryo loses track of the turn (it can't read the app's log, say), it keeps it and asks you: follow it again, or stop waiting for it.
+
+## From your phone
+
+Toryo's own page runs on this machine. To reach it while you're away, use the apps you already have, through Toryo's MCP server:
+
+```
+claude mcp add --scope user toryo -- ~/toryo/toryo mcp
+```
+
+Open that Claude Code session with Remote Control (`claude --remote-control`, or `/remote-control`), then ask from the Claude app: *“What's Toryo doing?”*, *“Tell Codex to leave the migrations alone”*, *“Accept Claude's recommendation”*. The tools are `toryo_status`, `toryo_room`, `toryo_say`, `toryo_answer`, `toryo_control` and `toryo_start`.
+
+Codex can use the same server: `codex mcp add toryo -- ~/toryo/toryo mcp` in WSL. For the Windows desktop app, run `codex mcp add toryo -- wsl.exe -e /home/<you>/toryo/toryo mcp` in PowerShell; that path is untested.
+
+For a push to your phone when someone needs you, put an [ntfy](https://ntfy.sh) topic in Settings. Windows notifications are on by default.
+
+The same commands work in any terminal while Toryo runs:
+
+```
+toryo status                     toryo show [room] [--full]
+toryo say --to codex "…"         toryo answer --accept
+toryo pause|resume|stop [room]   toryo start plan "…"
+```
+
+## Safety
+
+- **Who writes.** Only the builder, and the plan's author while it writes or revises the plan and the decision records, change files. Reviews, plan proposals, critiques, plan checks and chat replies are read-only, unless you tick *Allow file changes* on a chat message. Proposals stay in the room rather than the repository: several planners write them at the same time, and only the agreed plan belongs in `docs/plans/`. Every proposal is kept in the room's transcript.
+- **How read-only is enforced.** Codex gets its own `read-only` sandbox. For Claude, Cursor and Grok, Toryo mounts the project folder read-only for that turn, so neither the agent nor any command it runs (shell commands, scripts, git) can change it; the rest of the machine, such as `/tmp`, stays writable. This uses Linux user namespaces (`unshare` from util-linux 2.38 or newer), which WSL has. Where they aren't available, the crew panel says so, and Claude falls back to its own permission rules, which stop its edit tools but not shell commands. Cursor then falls back to its Ask mode. A Cursor chat keeps Ask mode once it has had it, so Toryo starts Cursor in a new chat, with a short briefing, before its next turn that changes files. That's why Toryo uses the mount, not Ask mode, wherever the mount works. If an agent misbehaves with the mount, `"readOnlyMount": false` under that agent in `~/.toryo/config.json` turns it off for that agent. The Codex app follows its own permissions. In every case, if files change during a read-only turn, Toryo tells you.
+- **Builders.** Codex builds in its `workspace-write` sandbox with network access. To match the Codex app's “ask, and an automatic reviewer approves”, choose that in Settings; it isn't tested headless yet. Claude runs in `auto` permission mode.
+- **Commits.** Nothing is committed unless your house rules allow it.
+- **One builder per tree.** Don't run a Toryo build room and the Codex app on the same working tree at the same time, unless the Codex app *is* that room's builder.
+- **Restarts.** Turns running when Toryo stops are offered again, paused, when it starts, and each agent resumes its own session. Checks that were running simply run again. The Codex app is different: it keeps working while Toryo is down, so Toryo reconnects to the same turn and sends nothing twice. If an agent never got a turn's message (it failed to start, or Toryo stopped first), the retry sends the whole message again.
+- **The page.** Toryo reads its page files once, when it starts, and serves them from memory, so the page always matches the running desk. If one is missing, Toryo doesn't start and says which.
+- **Network.** The server listens on 127.0.0.1 only. It refuses other Host headers and cross-site requests, and `--lan` requires a token. The page loads nothing from the internet; it uses fonts already on your computer.
+- **Files.** The file viewer shows only files that really live in the project: a link that points outside it is refused.
+
+## Agents
+
+| Agent | How Toryo runs it | Status |
+|---|---|---|
+| Codex | `codex exec --json`, then `codex exec resume <id>` | tested |
+| Claude | `claude -p --output-format stream-json`, `--session-id`, then `--resume` | tested |
+| Cursor | `agent -p --output-format stream-json --resume <chat>`, with `--force` when it builds | tested on 13 Oct with Cursor CLI 2026.10.01 |
+| Grok | `grok -p --output-format json -s <session>` | written from the docs, not yet run |
+| Codex app | `codex.exe queue --thread <id>`, then the thread's session log | experimental: queueing, delivery by the app and reading the reply tested on 13 Oct; a full build relay through the app not yet run |
+
+`toryo doctor` shows what's installed. Each session can be continued in a terminal; the crew panel shows the resume command.
+
+## Planned
+
+**Already working: Pause everything and holds, through the API only for now.** The page's buttons and the `toryo hold` / `toryo pause --all` commands come in later slices. They work through `POST /api/desk`, with `{ "action": "pause" }`, `"resume"`, or `{ "action": "hold" | "release", "target": "codex" }`.
+- **Hold scopes.** `"codex"` holds both headless Codex and the Codex app. `"codexapp"` holds only the app, and `"codex"` with `"headless": true` only headless Codex. Any other agent's name holds that agent.
+- **Graceful.** Turns and checks already running finish; nothing new starts. Pause everything also stops new project checks, while a hold on an agent doesn't. Following a Codex app turn the app already has is never held up.
+- **Separate from each room's own Pause.** Resuming the desk doesn't resume a room you paused, and resuming a room doesn't release a hold.
+- **Visible.** A room whose work is held up shows *Held* in the room list, and says once, in the room, what it's waiting for.
+- **Kept across restarts.** The controls live in `~/.toryo/desk.json` and are in force before any room starts.
+- **When the file is a problem.** If Toryo can't read that file, or a newer Toryo wrote it, nothing new starts and the file is left alone. Fix it and restart, or reset the controls (`"action": "reset"`, which sets the old file aside). If Toryo can't save a new hold, the hold applies anyway and nothing new starts until it's saved (`"action": "save"`). A release it can't save doesn't happen.
+
+The owner has chosen a Home view for managing several rooms, with usage guards as the main feature. Guards will start on at 90% of both the 5-hour and weekly limits, release automatically at reset, and preserve settings already saved. A one-time notice will explain how to turn them off. Manual holds and Pause everything will let current work finish and survive a restart. Home will show questions, current work and elapsed time, measured usage and resets, and recent activity, with the same controls through the terminal and MCP.
+
+An early slice will add Ask for a check to a Ready plan's choices, alongside Start building, Read, and Ask for changes. Checks stay read-only and findings go to the author automatically. Re-check after changes will be a room setting, on by default: the author revises, another planner checks once, the author addresses findings, and the plan returns to Ready. A chat discussion about the Ready plan can be passed to its author as a change request with one click. Recommendation buttons will send the intended answer without stray wrapper punctuation.
+
+New headless Build rooms will default to their own worktree, with the shared-folder choice still available and existing rooms left in place. Worktrees will live under `~/.toryo/worktrees`, include current uncommitted work, and show the room's own changes for an explicit return to main as uncommitted files. Conflicts will leave main untouched. The Codex app stays in main for this release. A second builder in one folder will be refused. A planning author can write shared documents into main between active turns/checks/reviews, then the build room gets a note listing changed files. Setup and checks will run one at a time per project unless its settings allow parallel runs; commands receive their room ID, folder, and port offset.
+
+These additions are **planned, not yet available**. The [implementation plan](docs/plans/plan-a-home-view-for-foreman-and-desk-wi.md) puts the plan-review improvement early, then the guard and Home, followed by a small builder guard, shared-file coordination, and worktrees. [Accepted review decisions](docs/decisions.md#2026-10-13-accepted-plan-review-and-worktree-defaults) and [plan-review decisions](docs/decisions.md#2026-10-13-plan-checks-and-discussion-handoffs) record the choices and why. The review's open questions are settled.
+
+Later retains one-turn overrides, usage forecasts and advance warnings, further Swap work, turn caps, provider-exhaustion recovery, and immediate pause. Managed dev servers, general resource declarations, and test-database naming are also deferred; a worktree and port offset do not by themselves isolate services. Folder restoration would ask first because it overwrites files; a commit offer would require project permission. Separately, snapshots keeping their own copies of referenced data is a bug fix to do soon, outside this plan, so a project's Git cleanup cannot break old snapshots.
+
+## Development
+
+```
+cd ~/toryo && node --test --test-concurrency=1 test/*.test.mjs
+```
+
+The tests drive the whole engine through `test/fake-agent.mjs`, which speaks the Codex and Claude output formats. Toryo has no dependencies. `node test/ui-check.mjs` also checks the page in a real browser, against a desk of its own with fake agents and a fake Codex app; it needs a `playwright-core` folder (`PLAYWRIGHT_CORE=…`) and skips itself without one.
+
+## License
+
+[MIT](LICENSE)
