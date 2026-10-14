@@ -564,6 +564,30 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .home ul.recent time { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .home .startroom { display: grid; gap: 12px; }
 .home .startroom p { margin: 0; color: var(--ink-2); }
+.home .deskbar { align-items: center; }
+.home .deskctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-basis: 100%; }
+.home .deskctl .hint { font-size: 12.5px; color: var(--muted); }
+.home .deskbar .chip .linkbtn { color: inherit; font-weight: 700; text-decoration: underline; padding: 0 2px; min-height: 0; }
+.home .notice { flex-basis: 100%; display: grid; gap: 8px; padding: 12px 14px; border-radius: 10px; background: var(--sunk); }
+.home .notice p { margin: 0; color: var(--ink-2); }
+.home .deskresult { display: grid; gap: 8px; padding: 12px 14px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line-strong); }
+.home .deskresult[data-error="true"] { border-color: var(--bad); }
+.home .deskresult p { margin: 0; }
+.home .deskresult ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.home .deskresult li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.home .deskresult > .btn { justify-self: start; }
+.home .asks { display: grid; gap: 14px; }
+.home .ask[data-stale="true"] { border-color: var(--line); box-shadow: none; background: var(--sunk); }
+.home .ask[aria-busy="true"] { opacity: 0.75; }
+.home .ask .recs { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13.5px; overflow-wrap: anywhere; }
+.home .ask .stalenote { margin: 0; font-size: 13px; color: var(--ink-2); font-weight: 600; }
+.home .ask .err { margin: 0; font-size: 13px; color: var(--bad-ink); font-weight: 600; overflow-wrap: anywhere; }
+.home .ask .write { display: grid; gap: 8px; }
+.home .ask .write[hidden] { display: none; }
+.home .ask .write label { font-size: 12.5px; color: var(--muted); }
+.home .ask textarea { width: 100%; min-height: 72px; resize: vertical; }
+.home .allow > header .btn { margin-left: auto; }
+.home .agentrow .btn { margin-left: auto; }
 .roomlink[aria-current="page"] { background: var(--sunk); box-shadow: inset 0 0 0 1px var(--line); }
 .roomlink.railhome { text-decoration: none; }
 .roomlink .homeico { display: grid; place-items: center; width: 32px; height: 32px; margin: 4px; border-radius: 10px; background: var(--sunk); color: var(--ink-2); flex: none; }

@@ -122,6 +122,14 @@ const S = {
   // Home's overview (GET /api/home), and how many Recent items it shows.
   home: null,
   recent: 40,
+  // Home's questions as last shown (a card whose question closes meanwhile still has its data), what went wrong
+  // answering each, the ones being sent, and what the desk said about the last control you used.
+  homeCards: new Map(),
+  homeErrors: new Map(),
+  homePending: new Set(),
+  // Questions a send from Home found already answered elsewhere: their cards say so until dismissed.
+  homeStale: new Set(),
+  deskResult: null,
   seen: readSeen(),
   connected: false,
 };
@@ -2197,7 +2205,7 @@ function homeSoon() {
 function homeActivity({ turnId, item }) {
   const card = $(`#home [data-turn="${CSS.escape(turnId)}"]`);
   if (!card) return;
-  const line = $("[data-act]", card);
+  const line = $("[data-activity]", card);
   if (line) line.textContent = item.text ?? "";
   const out = $("[data-ago]", card);
   if (out && item.at) {
@@ -2224,26 +2232,47 @@ function renderHome() {
   const box = $("#home");
   const h = S.home;
   if (!h || !S.state) {
-    box.innerHTML = `<div class="home"><p class="hint">Loading Home…</p></div>`;
+    if (!$(".home", box)) box.innerHTML = `<div class="home"><p class="hint">Loading Home…</p></div>`;
     return;
   }
   const top = box.scrollTop;
-  // Drawn again as news comes: a link or button you'd reached (by keyboard, say) keeps the focus.
-  const focused = box.contains(document.activeElement) ? focusKey(document.activeElement) : null;
-  box.innerHTML = `<div class="home">${S.connected ? "" : `<div class="offline" role="status">${ic("alert")}<span>Reconnecting to the desk… What you see here may be out of date.</span></div>`}
-    ${homeHero(h)}
-    <div class="home-grid">
-      <div class="col">${homeNeeds(h)}${homeWorking(h)}${homeOthers(h)}</div>
-      <div class="col">${homeUsage(h)}${homeRecent(h)}</div>
-    </div></div>`;
+  // Drawn again as news comes, part by part: a link or button you'd reached (by keyboard, say) keeps the focus, and
+  // a question you're answering isn't drawn again at all (see patchNeeds).
+  const focused = box.contains(document.activeElement) && document.activeElement.matches("a, button") ? focusKey(document.activeElement) : null;
+  if (!$(".home [data-part]", box))
+    box.innerHTML = `<div class="home"><div data-part="offline"></div><div data-part="hero"></div><div data-part="result"></div>
+      <div class="home-grid"><div class="col"><div data-part="needs"></div><div data-part="working"></div><div data-part="others"></div></div>
+      <div class="col"><div data-part="usage"></div><div data-part="recent"></div></div></div></div>`;
+  setPart("offline", S.connected ? "" : `<div class="offline" role="status">${ic("alert")}<span>Reconnecting to the desk… What you see here may be out of date.</span></div>`);
+  setPart("hero", homeHero(h));
+  setPart("result", homeResult());
+  patchNeeds(h);
+  setPart("working", homeWorking(h));
+  setPart("others", homeOthers(h));
+  setPart("usage", homeUsage(h));
+  setPart("recent", homeRecent(h));
   box.scrollTop = top;
-  if (focused) [...box.querySelectorAll("a, button")].find((el) => focusKey(el) === focused)?.focus({ preventScroll: true });
+  if (focused && !box.contains(document.activeElement)) [...box.querySelectorAll("a, button")].find((el) => focusKey(el) === focused)?.focus({ preventScroll: true });
   wakeSparklers();
+}
+
+/** One part of Home, drawn again only when what it shows has changed. */
+const homeParts = new Map();
+function setPart(name, html) {
+  if (homeParts.get(name) === html && $(`#home [data-part="${name}"]`)?.childElementCount) return;
+  homeParts.set(name, html);
+  $(`#home [data-part="${name}"]`).innerHTML = html;
 }
 
 /** What makes one of Home's links or buttons the same one after Home is drawn again. */
 function focusKey(el) {
-  return `${el.tagName}|${el.getAttribute("href") ?? ""}|${el.dataset.openQuestion ?? ""}|${el.closest("[data-turn]")?.dataset.turn ?? ""}|${el.hasAttribute("data-more-recent")}|${el.closest("li")?.querySelector("time")?.dataset.ago ?? ""}`;
+  return el.dataset.key ?? `${el.tagName}|${el.getAttribute("href") ?? ""}|${el.dataset.openQuestion ?? ""}|${el.closest("[data-turn]")?.dataset.turn ?? ""}|${el.hasAttribute("data-more-recent")}|${el.closest("li")?.querySelector("time")?.dataset.ago ?? ""}`;
+}
+
+/** A button on Home that does one thing: `act` and its arguments ride on it, and `key` keeps its focus across redraws. */
+function homeBtn(label, act, args = {}, cls = "btn small") {
+  const data = Object.entries(args).map(([k, v]) => ` data-${k}="${esc(String(v))}"`).join("");
+  return `<button type="button" class="${cls}" data-act="${act}"${data} data-key="${esc(`${act}|${Object.values(args).join("|")}`)}">${label}</button>`;
 }
 
 function homeHero(h) {
@@ -2256,21 +2285,52 @@ function homeHero(h) {
   else if (asks) headline = `${need}. Nothing else is moving.`;
   else if (working) headline = `${working} room${working > 1 ? "s are" : " is"} working. Nothing needs you.`;
   else headline = "All quiet. Nothing is running, and nothing needs you.";
-  // What holds work up, desk-wide, in words. The buttons for these come with Home's controls.
+  // Pause everything, and what Resume will let go: the rooms waiting only on the pause.
+  const finishing = h.working.length;
+  const waiting = h.rooms.filter((r) => (r.blocked ?? []).some((b) => b.reasons.includes("everything is paused"))).length;
+  const pause = h.desk.paused
+    ? `${homeBtn(`${ic("play")}Resume everything`, "desk", { do: "resume" }, "btn primary")}<span class="hint">${esc(`${finishing ? `${finishing} turn${finishing > 1 ? "s" : ""} still finishing. ` : ""}Resume lets ${waiting ? `${waiting} room${waiting > 1 ? "s" : ""} waiting on the pause` : "new work"} start again; your holds and the guard stay.`)}</span>`
+    : homeBtn(`${ic("pause")}Pause everything`, "desk", { do: "pause" }, "btn");
+  // Each restriction, with the way to lift it.
   const desk = [];
   if (h.desk.problem) desk.push(`<span class="chip" data-k="bad">${ic("alert")}${esc(h.desk.problem.text)}</span>`);
-  if (h.desk.paused) desk.push(`<span class="chip" data-k="paused">${ic("pause")}Everything is paused: running turns and checks finish, nothing new starts</span>`);
-  for (const hold of h.desk.holds) desk.push(`<span class="chip" data-k="held">${ic("lock")}You hold ${esc(hold.label)}</span>`);
-  for (const g of h.desk.guard.holds) desk.push(`<span class="chip" data-k="${g.excepted ? "idle" : "held"}">${ic("lock")}${esc(g.excepted ? `The guard is paused for ${g.name}'s ${g.label} limit until it resets` : `${g.reason[0].toUpperCase()}${g.reason.slice(1)}`)}</span>`);
-  const lede = h.desk.guard.notice?.pending
-    ? "The usage guard is on: when an agent's 5-hour or weekly usage reaches 90%, Toryo lets its running turns finish and starts no new ones until that limit resets."
-    : h.desk.paused
-      ? "Rooms you paused yourself stay paused when you resume."
-      : "";
+  for (const hold of h.desk.holds) desk.push(`<span class="chip" data-k="held">${ic("lock")}You hold ${esc(hold.label)} ${homeBtn("Release", "desk", { do: "release", target: hold.key.replace(":headless", ""), headless: hold.key.endsWith(":headless") }, "linkbtn")}</span>`);
+  for (const g of h.desk.guard.holds) {
+    const policy = h.desk.guard.policies.find((p) => p.group === g.group);
+    const target = policy?.target ?? g.group;
+    const window = g.type.replace(/_/g, "-");
+    const action = g.excepted
+      ? ""
+      : g.state === "ready"
+        ? homeBtn("Release it", "guard", { do: "guard-release", target, window }, "linkbtn")
+        : g.resetsAt
+          ? homeBtn("Let it run until the reset", "guard", { do: "guard-pause", target, window }, "linkbtn")
+          : `<span class="muted">Its reset time isn't known.</span> ${homeBtn("Turn this rule off", "guard", { do: "rule-off", target, window }, "linkbtn")}`;
+    desk.push(`<span class="chip" data-k="${g.excepted ? "idle" : "held"}">${ic("lock")}${esc(g.excepted ? `The guard is paused for ${g.name}'s ${g.label} limit until it resets` : `${g.reason[0].toUpperCase()}${g.reason.slice(1)}`)} ${action}</span>`);
+  }
+  const notice = h.desk.guard.notice?.pending
+    ? `<div class="notice" role="status"><p>The usage guard is on: when an agent's 5-hour or weekly usage reaches 90%, Toryo lets its running turns finish and starts no new ones until that limit resets, then carries on by itself.</p><div class="actions">${homeBtn("OK", "guard", { do: "guard-ok" }, "btn small primary")}${homeBtn("Turn it off", "guard", { do: "guard-all-off" }, "btn small")}${homeBtn("Settings…", "guard-sheet", {}, "btn small quiet")}</div></div>`
+    : "";
   return `<section class="hero" aria-labelledby="h-home">
-    <div class="hero-text"><p class="eyebrow">Home · ${esc(new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }))}</p><h1 id="h-home">${headline}</h1>${lede ? `<p class="lede">${esc(lede)}</p>` : ""}</div>
-    ${desk.length ? `<div class="deskbar">${desk.join("")}</div>` : ""}
+    <div class="hero-text"><p class="eyebrow">Home · ${esc(new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }))}</p><h1 id="h-home">${headline}</h1>${h.desk.paused ? `<p class="lede">Rooms you paused yourself stay paused when you resume.</p>` : ""}</div>
+    <div class="deskbar"><div class="deskctl">${pause}${homeBtn(`${ic("lock")}Usage guard`, "guard-sheet", {}, "btn quiet")}</div>${desk.join("")}</div>
+    ${notice}
   </section>`;
+}
+
+/** What the desk said after you used one of its controls, with any way forward it offers (Release: the guard). */
+function homeResult() {
+  const r = S.deskResult;
+  if (!r) return "";
+  const offers = (r.offers ?? [])
+    .map((o) => {
+      const btn = o.action === "pause-until-reset" ? homeBtn("Pause this guard until reset", "guard", { do: "guard-pause", target: o.mcp.arguments.target, window: o.mcp.arguments.window }, "btn small you")
+        : o.action === "release-expired-hold" ? homeBtn("Release it", "guard", { do: "guard-release", target: o.mcp.arguments.target, window: o.mcp.arguments.window }, "btn small you")
+        : homeBtn("Turn this rule off", "guard", { do: "rule-off", target: o.mcp.arguments.target, window: Object.keys(o.mcp.arguments.rules ?? {})[0] ?? "" }, "btn small");
+      return `<li><span>${esc(o.text)}.</span>${btn}</li>`;
+    })
+    .join("");
+  return `<div class="deskresult" role="status" data-error="${Boolean(r.error)}"><p>${esc(r.message)}</p>${offers ? `<ul>${offers}</ul>` : ""}${homeBtn("Dismiss", "dismiss-result", {}, "btn small quiet")}</div>`;
 }
 
 function homeTile(roomId, title) {
@@ -2278,22 +2338,325 @@ function homeTile(roomId, title) {
   return roomTile(sum, 40);
 }
 
-function homeNeeds(h) {
-  const cards = h.questions.map((q) => {
-    const asker = q.from ? `${name(q.from)} asks` : "Your call";
-    return `<article class="ask" data-q="${esc(q.id)}">
-      <header>${homeTile(q.room, q.roomTitle)}<div class="who"><strong>${esc(q.roomTitle)}</strong><span class="muted">${esc(asker)}</span></div><span class="wait">waiting <span data-since="${esc(q.at ?? "")}">${q.at ? since(q.at) : ""}</span></span></header>
-      <p class="q">${esc(q.question)}</p>
-      ${q.recommendation ? `<div class="rec"><span class="eyebrow">Recommended</span><p>${esc(q.recommendation)}</p></div>` : ""}
-      <div class="actions"><a class="btn" href="#/r/${esc(q.room)}" data-open-question="${esc(q.id)}">Open the room at this question</a></div>
-    </article>`;
-  });
+// ------------------------------------------------------------------ Home: answering
+
+/**
+ * Answers written on Home, per question, kept in this browser until sent or dismissed: a reload, news or another
+ * room never loses one. { [questionId]: { room, text } }.
+ */
+function homeDrafts() {
+  try {
+    return JSON.parse(localStorage.getItem("toryo.homeDrafts") ?? "{}");
+  } catch {
+    return {};
+  }
+}
+function setHomeDraft(qid, value) {
+  const all = homeDrafts();
+  if (value) all[qid] = value;
+  else delete all[qid];
+  try {
+    localStorage.setItem("toryo.homeDrafts", JSON.stringify(all));
+  } catch {
+    /* ignore */
+  }
+}
+/**
+ * A draft, with its question as it was shown: if the question closes (answered elsewhere, even while this page was
+ * closed), the card can still be drawn, saying so, with your text to copy or dismiss.
+ */
+function draftFor(qid, text) {
+  const q = S.homeCards.get(qid);
+  const was = homeDrafts()[qid] ?? {};
+  return { room: q?.room ?? was.room, roomTitle: q?.roomTitle ?? was.roomTitle ?? "", question: q?.question ?? was.question ?? "", from: q?.from ?? was.from ?? null, kind: q?.kind ?? was.kind ?? null, text };
+}
+const fromDraft = (id, d) => ({ id, room: d.room, roomTitle: d.roomTitle || "A room", question: d.question || "(the question isn't known)", from: d.from ?? null, kind: d.kind ?? null, at: null });
+
+const STALE_NOTE = "This question was answered elsewhere, or its room has moved on. Nothing was sent from here. Your text is kept below: copy it, or dismiss it.";
+
+/** One question waiting for you, with what you can do about it from here. */
+function askCard(q, { stale = false } = {}) {
+  const draft = homeDrafts()[q.id];
+  const error = S.homeErrors.get(q.id);
+  const sending = S.homePending.has(q.id);
+  const off = sending ? " disabled" : "";
+  const asker = q.from ? `${name(q.from)} asks` : "Your call";
+  const open = `<a class="btn small quiet" href="#/r/${esc(q.room)}" data-open-question="${esc(q.id)}">${q.kind === "plan-checkpoint" ? "Open the form" : "Open the room"}</a>`;
+  const write = (label) => homeBtn(label, "write", { q: q.id }, "btn small");
+  let actions = "";
+  let more = "";
+  if (q.kind === "plan-checkpoint") {
+    // The full form stays in the room. Here: every recommendation as shown, with the author the form would choose.
+    const qs = q.questions ?? [];
+    if (!stale) more = qs.length ? `<ul class="recs">${qs.map((x) => `<li>${esc(x.question)} <span class="muted">(${esc(name(x.from))})</span>: <b>${esc(x.recommendation || "no recommendation")}</b></li>`).join("")}</ul>` : `<p class="hint">No open questions were raised.</p>`;
+    actions = q.complete && q.author ? homeBtn(`${ic("check")}Accept all recommendations: ${esc(name(q.author))} writes the plan`, "accept-checkpoint", { q: q.id }, "btn small you") : "";
+    if (!q.complete && !stale) more += `<p class="hint">Some have no recommendation: answer them in the form.</p>`;
+  } else if (q.kind === "plan-ready") {
+    actions = homeBtn(`${ic("build")}Start building with this plan`, "accept", { q: q.id }, "btn small you") + ((q.checkers ?? []).length ? homeBtn(`Ask ${esc(q.checkers.map(name).join(" and "))} to check it`, "plan-check", { q: q.id }) : "") + write("Ask for changes");
+  } else if (q.kind === "error") {
+    actions = homeBtn("Retry", "accept", { q: q.id }, "btn small you") + write("Retry with a note");
+  } else if (q.kind === "app-lost") {
+    actions = homeBtn("Follow it again", "accept", { q: q.id }, "btn small you");
+  } else {
+    actions = (q.recommendation ? homeBtn(`${ic("check")}Use the recommendation`, "accept", { q: q.id }, "btn small you") : "") + write("Write my own answer");
+  }
+  if (sending) actions = actions.replaceAll("<button ", "<button disabled ");
+  const to = q.from ? name(q.from) : "the room";
+  return `<article class="ask" data-q="${esc(q.id)}" data-room="${esc(q.room)}"${stale ? ' data-stale="true"' : ""}${sending ? ' aria-busy="true"' : ""}>
+    <header>${homeTile(q.room, q.roomTitle)}<div class="who"><strong>${esc(q.roomTitle)}</strong><span class="muted">${esc(asker)}</span></div><span class="wait">${stale ? "closed" : `waiting <span data-since="${esc(q.at ?? "")}">${q.at ? since(q.at) : ""}</span>`}</span></header>
+    <p class="q">${esc(q.question)}</p>
+    ${more}
+    ${q.recommendation && !stale && !["plan-checkpoint", "plan-ready", "error", "app-lost"].includes(q.kind) ? `<div class="rec"><span class="eyebrow">Recommended</span><p>${esc(q.recommendation)}</p></div>` : ""}
+    ${stale ? `<p class="stalenote" role="status">${STALE_NOTE}</p>` : ""}
+    ${error && !stale ? `<p class="err" role="alert">${esc(error)}</p>` : ""}
+    <div class="actions">${stale ? "" : actions}${open}${stale ? homeBtn("Dismiss", "dismiss", { q: q.id }, "btn small quiet") : ""}</div>
+    <div class="write"${draft ? "" : " hidden"}>
+      <label for="hw-${esc(q.id)}">Your answer to ${esc(to)}</label>
+      <textarea id="hw-${esc(q.id)}" rows="3" data-draft="${esc(q.id)}" placeholder="Write to ${esc(to)}… (Ctrl+Enter sends)"${sending ? " readonly" : ""}>${esc(draft?.text ?? "")}</textarea>
+      ${stale ? "" : `<div class="actions"><button type="button" class="btn small you" data-act="send" data-q="${esc(q.id)}" data-key="send|${esc(q.id)}"${off}>${sending ? "Sending…" : "Send"}</button><button type="button" class="btn small quiet" data-act="cancel-write" data-q="${esc(q.id)}" data-key="cancel-write|${esc(q.id)}"${off}>Cancel</button></div>`}
+    </div>
+  </article>`;
+}
+
+/**
+ * A card you're typing in, whose question has just closed: it says so, and nothing can be sent from it any more,
+ * without drawing it again (your text and focus stay).
+ */
+function markStale(node) {
+  const id = node.dataset.q;
+  S.homeStale.add(id);
+  if (node.dataset.stale === "true" && $(".stalenote", node)) return;
+  node.dataset.stale = "true";
+  const wait = $(".wait", node);
+  if (wait) wait.textContent = "closed";
+  $(".err", node)?.remove();
+  $(".rec", node)?.remove();
+  const actions = $(":scope > .actions", node);
+  actions.before(el(`<p class="stalenote" role="status">${STALE_NOTE}</p>`));
+  actions.innerHTML = `<a class="btn small quiet" href="#/r/${esc(node.dataset.room)}" data-open-question="${esc(id)}">Open the room</a>${homeBtn("Dismiss", "dismiss", { q: id }, "btn small quiet")}`;
+  $(".write > .actions", node)?.remove();
+}
+
+/**
+ * Needs you, card by card. A card you're writing in, or sending from, isn't drawn again (your text, cursor and focus
+ * stay). A question that has closed while you had text for it (on this page, or kept from before a reload) stays as
+ * a closed card, saying so, until you dismiss it.
+ */
+function patchNeeds(h) {
+  const part = $('#home [data-part="needs"]');
+  if (!$(".asks", part))
+    part.innerHTML = `<section class="panel needs" aria-labelledby="h-needs"><header><h2 id="h-needs">Needs you</h2><span class="count" hidden></span><span class="hnote">Oldest first</span></header><div class="asks"></div><p class="hint more" hidden></p></section>`;
+  const count = $(".count", part);
+  count.hidden = !h.questionCount;
+  count.textContent = h.questionCount;
+  const moreNote = $(".more", part);
   const more = h.questionCount - h.questions.length;
-  return `<section class="panel needs" aria-labelledby="h-needs">
-    <header><h2 id="h-needs">Needs you</h2>${h.questionCount ? `<span class="count">${h.questionCount}</span>` : ""}<span class="hnote">Oldest first</span></header>
-    ${cards.length ? cards.join("") : `<div class="hempty">${ic("check")}<span>Nothing needs you. A room turns orange when something does.</span></div>`}
-    ${more > 0 ? `<p class="hint">And ${more} more, in their rooms.</p>` : ""}
-  </section>`;
+  moreNote.hidden = more <= 0;
+  moreNote.textContent = `And ${more} more, in their rooms.`;
+  const list = $(".asks", part);
+  const old = new Map([...list.querySelectorAll(":scope > .ask")].map((n) => [n.dataset.q, n]));
+  const busy = (node) => node.contains(document.activeElement) || S.homePending.has(node.dataset.q);
+  const drafts = homeDrafts();
+  const target = [];
+  const open = new Set(h.openIds ?? h.questions.map((q) => q.id));
+  for (const q of h.questions) {
+    S.homeCards.set(q.id, q);
+    const was = old.get(q.id);
+    if (was && busy(was)) {
+      if (S.homeStale.has(q.id)) markStale(was);
+      target.push(was);
+    } else target.push(el(askCard(q, { stale: S.homeStale.has(q.id) })));
+  }
+  // Questions now closed that you had text for: from the cards on the page, and from the drafts kept in this browser.
+  for (const id of new Set([...old.keys(), ...Object.keys(drafts)])) {
+    if (open.has(id)) continue;
+    const node = old.get(id);
+    if (node && busy(node)) {
+      markStale(node);
+      target.push(node);
+    } else if (drafts[id]) target.push(el(askCard(S.homeCards.get(id) ?? fromDraft(id, drafts[id]), { stale: true })));
+  }
+  for (const [, node] of old) if (!target.includes(node)) node.remove();
+  let ref = null;
+  for (let i = target.length - 1; i >= 0; i--) {
+    const node = target[i];
+    // A busy card already in the list stays where it is (moving it would take the focus away).
+    if (!(node.parentNode === list && busy(node)) && (node.parentNode !== list || node.nextSibling !== ref)) list.insertBefore(node, ref);
+    ref = node;
+  }
+  const empty = $(".hempty", list);
+  if (!target.length && !empty) list.innerHTML = `<div class="hempty">${ic("check")}<span>Nothing needs you. A room turns orange when something does.</span></div>`;
+  if (target.length && empty) empty.remove();
+}
+
+/**
+ * Who an action reached and when they'll act on it, from the room as the desk returned it (its summary): for each
+ * recipient, held up and why, at work already, or next.
+ */
+function reachedText(sum, who) {
+  const blocked = sum?.blocked ?? [];
+  const agents = (who?.length ? who : [...new Set([...blocked.map((b) => b.agent), ...(sum?.running ?? [])])]).filter(Boolean);
+  if (sum?.paused) return `${agents.map(name).join(" and ") || "The room"} ${agents.length > 1 ? "get" : "gets"} it when you resume “${sum.title}”.`;
+  return agents
+    .map((a) => {
+      const b = blocked.find((x) => x.agent === a);
+      if (b) return `${name(a)} gets it when this ends: ${b.reasons.join("; ")}.`;
+      return (sum?.running ?? []).includes(a) ? `${name(a)} is on it.` : `${name(a)} gets it next.`;
+    })
+    .join(" ");
+}
+
+/** Something done from Home: answers, the planning checkpoint, a ready plan's check, and the desk's controls. */
+async function homeAct(btn) {
+  const act = btn.dataset.act;
+  const card = btn.closest(".ask");
+  const qid = card?.dataset.q;
+  const roomId = card?.dataset.room;
+  // The card as it is now (drawing it again replaces the element).
+  const current = () => (qid ? $(`#home .ask[data-q="${CSS.escape(qid)}"]`) : null);
+  const redraw = ({ focus = false } = {}) => {
+    const node = current();
+    const q = S.homeCards.get(qid) ?? (homeDrafts()[qid] ? fromDraft(qid, homeDrafts()[qid]) : null);
+    if (!q || !node) return;
+    const fresh = el(askCard(q, { stale: S.homeStale.has(qid) }));
+    node.replaceWith(fresh);
+    if (focus) $("textarea", fresh)?.focus();
+  };
+  if (act === "write") {
+    setHomeDraft(qid, draftFor(qid, homeDrafts()[qid]?.text ?? ""));
+    const box = $(".write", current());
+    box.hidden = false;
+    return $("textarea", box).focus();
+  }
+  if (act === "cancel-write" || act === "dismiss") {
+    setHomeDraft(qid, null);
+    S.homeErrors.delete(qid);
+    S.homeStale.delete(qid);
+    if (act === "dismiss") return current()?.remove();
+    $(".write", current()).hidden = true;
+    $("textarea", current()).value = "";
+    return;
+  }
+  if (act === "dismiss-result") {
+    S.deskResult = null;
+    return setPart("result", "");
+  }
+  if (act === "guard-sheet") return guardSheet();
+  if (card) {
+    // One send at a time, and none from a question that has closed.
+    if (S.homePending.has(qid)) return;
+    if (S.homeStale.has(qid) || card.dataset.stale === "true" || (S.home?.openIds && !S.home.openIds.includes(qid))) {
+      const node = current();
+      if (node) markStale(node);
+      return;
+    }
+    const node = current();
+    const text = $("textarea", node)?.value ?? "";
+    if (act === "send" && !text.trim()) {
+      S.homeErrors.set(qid, "Write an answer first.");
+      return redraw({ focus: true });
+    }
+    const q = S.homeCards.get(qid);
+    const call =
+      act === "accept-checkpoint" ? ["control", { action: "accept-checkpoint", questionId: qid }]
+      : act === "plan-check" ? ["control", { action: "plan-check", questionId: qid }]
+      : ["answer", act === "send" ? { text, questionId: qid } : { accept: true, questionId: qid }];
+    // While it's on its way: nothing in the card can change or be pressed (what's sent is what you see).
+    S.homePending.add(qid);
+    S.homeErrors.delete(qid);
+    node.setAttribute("aria-busy", "true");
+    for (const b of node.querySelectorAll("button")) b.disabled = true;
+    const box = $("textarea", node);
+    if (box) box.readOnly = true;
+    const sendBtn = $("[data-act=send]", node);
+    if (sendBtn) sendBtn.textContent = "Sending…";
+    let sent = false;
+    try {
+      const sum = await api("POST", `/api/rooms/${roomId}/${call[0]}`, call[1]);
+      sent = true;
+      setHomeDraft(qid, null);
+      // Who it reached: the author for a checkpoint, the checkers for a check, the agent asking for an answer (a
+      // ready plan's Start building: whoever the build queued), and whether each is held up, from the desk's reply.
+      const who = act === "accept-checkpoint" ? [q?.author] : act === "plan-check" ? q?.checkers ?? [] : q?.kind === "plan-ready" && act === "accept" ? null : [q?.from];
+      const title = act === "accept-checkpoint" ? "Your call is in: the plan is next" : act === "plan-check" ? "The check is asked for" : q?.kind === "plan-ready" && act === "accept" ? "The build starts" : "Answer sent";
+      toast(title, reachedText(sum, who) || q?.roomTitle);
+    } catch (error) {
+      // Answered elsewhere meanwhile (another tab, a terminal, your phone): nothing was sent, and your text stays.
+      S.homeErrors.set(qid, error.status === 409 ? `Not sent: ${error.message}` : `That didn't work: ${error.message} Your text is kept.`);
+      if (error.status === 409) S.homeStale.add(qid);
+      // Without text of yours, the card goes once Home catches up: say it here too.
+      if (act !== "send") toast("Not sent", error.message, 9000);
+    } finally {
+      S.homePending.delete(qid);
+      // Sent: the question is answered, so its card goes. Not sent: back in your text.
+      if (sent) current()?.remove();
+      else redraw({ focus: act === "send" });
+      loadHome();
+    }
+    return;
+  }
+  // The desk's controls, as the terminal and MCP use them.
+  const d = btn.dataset;
+  const body =
+    act === "desk" ? (d.do === "pause" || d.do === "resume" ? { action: d.do } : { action: d.do, target: d.target, headless: d.headless === "true" })
+    : d.do === "guard-ok" ? { action: "guard-ok" }
+    : d.do === "guard-all-off" ? { action: "guard", enabled: false }
+    : d.do === "rule-off" ? { action: "guard", target: d.target, rules: { [d.window]: { enabled: false } } }
+    : { action: d.do, target: d.target, window: d.window };
+  btn.disabled = true;
+  try {
+    const res = await api("POST", "/api/desk", body);
+    if (d.do === "guard-all-off") await api("POST", "/api/desk", { action: "guard-ok" }).catch(() => {});
+    S.deskResult = { message: res.message, offers: res.offers ?? [] };
+  } catch (error) {
+    S.deskResult = { message: error.message, offers: [], error: true };
+  } finally {
+    btn.disabled = false;
+    setPart("result", homeResult());
+    loadHome();
+  }
+}
+
+/** The usage guard's rules for each allowance: on or off, the threshold per window, and release at reset. */
+function guardSheet() {
+  const policies = S.home?.desk.guard.policies ?? [];
+  openSheet(`${sheetHead("Usage guard", "When to hold each allowance")}<form id="guardForm" style="display:grid;gap:16px">
+    <p class="hint" style="margin:0">When an allowance's usage reaches a threshold, Toryo lets running turns finish and starts nothing new until that limit resets.</p>
+    ${policies
+      .map(
+        (p) => `<fieldset class="field" data-group="${esc(p.group)}"><legend class="lbl">${esc(p.label ?? p.name)}</legend>
+        ${p.rules.map((r) => `<label class="opt"><input type="checkbox" name="on" data-type="${esc(r.type)}" ${r.enabled ? "checked" : ""}> ${esc(r.label)} limit, at <input type="number" name="at" data-type="${esc(r.type)}" min="1" max="100" value="${r.at}" aria-label="${esc(`${p.name}'s ${r.label} threshold, in percent`)}" style="width:5em">%</label>`).join("")}
+        <label class="opt"><input type="checkbox" name="auto" ${p.autoRelease ? "checked" : ""}> Let go by itself at the reset (otherwise it waits for you)</label></fieldset>`,
+      )
+      .join("")}
+    <div style="display:flex;gap:8px"><button class="btn primary" type="submit">Save</button><button class="btn" type="button" data-close>Cancel</button></div></form>`);
+  $("#guardForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      // Only what you changed is sent: an allowance left as it was keeps its own settings.
+      const said = [];
+      for (const set of $$("#guardForm fieldset")) {
+        const p = policies.find((x) => x.group === set.dataset.group);
+        const rules = {};
+        for (const r of p.rules) {
+          const on = $(`input[name=on][data-type="${CSS.escape(r.type)}"]`, set).checked;
+          const at = Number($(`input[name=at][data-type="${CSS.escape(r.type)}"]`, set).value);
+          if (on !== r.enabled || at !== r.at) rules[r.type] = { enabled: on, at };
+        }
+        const auto = $("input[name=auto]", set).checked;
+        if (!Object.keys(rules).length && auto === p.autoRelease) continue;
+        said.push((await api("POST", "/api/desk", { action: "guard", target: p.target, rules, autoRelease: auto === p.autoRelease ? undefined : auto })).message);
+      }
+      closeSheet();
+      if (said.length) {
+        S.deskResult = { message: said.join(" "), offers: [] };
+        setPart("result", homeResult());
+      }
+      loadHome();
+    } catch (error) {
+      fail(error);
+    }
+  });
 }
 
 /** The rooms sharing a folder, in a few words: one or two by name, more as a count (the names on hover). */
@@ -2334,7 +2697,7 @@ function homeWorking(h) {
         <div class="wc-title"><strong>${esc(w.title)}</strong><span class="muted">${esc(w.project ?? "")}${w.folder ? ` · <span class="mono">${esc(w.folder)}</span>` : ""}</span></div>
         <div class="wc-line">${chip}<span><b>${esc(w.agent === "toryo" ? "Toryo" : name(w.agent))}</b>${w.role && w.role !== "other" ? `, ${esc(w.role)}` : ""} · ${esc(workWhat(w))}</span>${w.questions ? `<span class="act-k" data-k="you">Needs you too</span>` : ""}</div>
         ${workPhases(w) ? `<div class="wc-phase">${workPhases(w)}</div>` : ""}
-        <div class="wc-act mono" data-act>${esc(w.activity ?? "")}</div>
+        <div class="wc-act mono" data-activity>${esc(w.activity ?? "")}</div>
         ${w.shared?.length ? `<div class="wc-shared">${sharedText(w.shared)}</div>` : ""}
       </div>
       <div class="wc-time"><span class="big" data-since="${esc(since0)}">${since(since0)}</span><span class="muted">${w.phase === "working" || w.agent === "toryo" ? "working" : w.phase === "preparing" ? "since it started" : "since it was sent"}${w.lastOutputAt ? ` · last output <span data-ago="${esc(w.lastOutputAt)}">${ago(w.lastOutputAt)}</span>` : ""}</span></div>
@@ -2395,8 +2758,11 @@ function homeUsage(h) {
       const on = (p?.rules ?? []).filter((r) => r.enabled);
       const guard = on.length ? `guard at ${on.map((r) => `${r.at}% ${r.label}`).join(", ")}` : "guard off";
       const holds = h.desk.guard.holds.filter((x) => x.group === group);
+      // Both Codex interfaces share one allowance: hold or release them together too.
+      const family = agents.some((a) => a.agent === "codex") && agents.some((a) => a.agent === "codexapp");
+      const familyHeld = h.desk.holds.some((x) => x.key === "codex");
       return `<div class="allow" data-group="${esc(group)}">
-        <header><strong>${esc(p?.label ?? group)}</strong><span class="muted">${esc(guard)}</span></header>
+        <header><strong>${esc(p?.label ?? group)}</strong><span class="muted">${esc(guard)}</span>${family ? homeBtn(familyHeld ? "Release both" : "Hold both", "desk", { do: familyHeld ? "release" : "hold", target: "codex", headless: false }, "btn small quiet") : ""}</header>
         ${g?.windows?.length ? g.windows.map((w) => homeMeter(w, rules[w.type])).join("") : `<p class="hint">No usage reading yet.</p>`}
         ${holds.map((x) => `<p class="guardhold" data-excepted="${x.excepted}">${ic("lock")}<span>${esc(x.excepted ? `The guard is paused for the ${x.label} limit until it resets.` : `${x.reason[0].toUpperCase()}${x.reason.slice(1)}.`)}</span></p>`).join("")}
         <div class="agentrows">${agents
@@ -2409,7 +2775,11 @@ function homeUsage(h) {
             }
             const list = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]);
             const doing = byVerb.size ? [...byVerb].map(([verb, rooms]) => `${esc(verb)} in ${list(rooms)}`).join("; ") : `<span class="muted">idle</span>`;
-            return `<div class="agentrow">${avatar(a.agent, 22)}<b>${esc(a.label)}</b><span>${doing}</span>${a.blockers.length ? `<span class="muted held">held: ${esc(a.blockers.join("; "))}</span>` : ""}</div>`;
+            // Holding this agent alone: headless Codex, the Codex app, or any other agent.
+            const key = a.agent === "codex" ? "codex:headless" : a.agent;
+            const held = h.desk.holds.some((x) => x.key === key);
+            const ctl = homeBtn(held ? "Release" : "Hold", "desk", { do: held ? "release" : "hold", target: a.agent, headless: a.agent === "codex" }, "btn small quiet");
+            return `<div class="agentrow">${avatar(a.agent, 22)}<b>${esc(a.label)}</b><span>${doing}</span>${ctl}${a.blockers.length ? `<span class="muted held">held: ${esc(a.blockers.join("; "))}</span>` : ""}</div>`;
           })
           .join("")}</div>
       </div>`;
@@ -2527,6 +2897,7 @@ document.addEventListener("click", async (e) => {
       if (location.hash !== `#/r/${id}`) history.pushState(null, "", `#/r/${id}`);
       return loadRoom(id, { open: true });
     }
+    if (hit("#home button[data-act]")) return homeAct(hit("#home button[data-act]"));
     if (hit("[data-open-question]")) {
       // From Home: the room, at that question.
       S.focusOn = hit("[data-open-question]").dataset.openQuestion;
@@ -2821,6 +3192,19 @@ document.addEventListener("keydown", (e) => {
 });
 document.addEventListener("visibilitychange", () => !document.hidden && markSeenSoon());
 $("#log").addEventListener("scroll", markSeenSoon, { passive: true });
+// An answer written on Home is kept as you type it; Ctrl+Enter (or Cmd+Enter) sends it.
+$("#home").addEventListener("input", (e) => {
+  const qid = e.target.dataset?.draft;
+  if (qid && !e.target.readOnly) setHomeDraft(qid, draftFor(qid, e.target.value));
+});
+$("#home").addEventListener("keydown", (e) => {
+  if (e.target.dataset?.draft && e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    const send = $("[data-act=send]", e.target.closest(".ask"));
+    if (send) homeAct(send);
+  }
+});
+
 // Links to rooms and Home, Back and Forward: the address decides.
 window.addEventListener("hashchange", () => S.state && route());
 

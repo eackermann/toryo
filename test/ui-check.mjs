@@ -56,6 +56,10 @@ try {
     { agent: "claude", match: "Anything missing", reply: "Slice 1 needs a test.\nTORYO: REPLY" },
     { agent: "codex", match: "The owner asked for changes to the plan", write: { path: "docs/plans/ui.md", content: "# Exports\n\n### Slice 1: One, tested\n" }, reply: "Added it.\nTORYO: REVIEW docs/plans/ui.md" },
     { agent: "codex", match: "Slow build of the parser", delayMs: 6000, reply: "Built the parser.\nTORYO: OWNER Ship it?" },
+    // Step 5t: a Codex turn whose session log puts both its limits over the guard (with resets), and a Claude turn
+    // whose 5-hour limit is over it with no reset time.
+    { agent: "codex", match: "Use it all up", codexUsage: { primary: { used_percent: 96, window_minutes: 300, resets_at: Math.round(Date.now() / 1000) + 3600 }, secondary: { used_percent: 95, window_minutes: 10080, resets_at: Math.round(Date.now() / 1000) + 86400 } }, reply: "Used.\nTORYO: REPLY" },
+    { agent: "claude", match: "Unknown reset", rateLimit: { status: "allowed", unifiedWindows: { five_hour: { utilization: 0.97 } } }, reply: "OK.\nTORYO: REPLY" },
     // Step 5s: a turn that takes a while to start (preparing), then works, saying what it runs.
     { agent: "codex", match: "Phases for Home", delayMs: 2500, progress: "npm run build", workMs: 4000, reply: "Built.\nTORYO: REPLY" },
     { agent: "codex", match: "Slow review of the (lexer|docs)", delayMs: 6000, reply: "Built it.\nTORYO: REVIEW Slice 1: It | h.md" },
@@ -883,6 +887,16 @@ try {
   const working = await page.innerText(card);
   assert.match(working, /prepared in \d+s/);
   assert.match(working, /working · last output \d+s ago/);
+  // Its activity line is part of the card's link: clicking it opens the room, and posts nothing to the desk.
+  const deskPosts = [];
+  const onDeskPost = (r) => r.method() === "POST" && r.url().includes("/api/desk") && deskPosts.push(r.url());
+  page.on("request", onDeskPost);
+  await page.click(`${card} .wc-act`);
+  await page.waitForFunction((id) => location.hash === `#/r/${id}`, phased.id);
+  page.off("request", onDeskPost);
+  assert.deepEqual(deskPosts, []);
+  await page.goBack();
+  await page.waitForFunction(() => !document.querySelector("#home").hidden);
   // A burst of news (eight notes in a row): a few fetches of the overview, and no room fetched whole.
   const fetched = [];
   const onRequest = (r) => /\/api\/(home|rooms\/[\w-]+)(\?|$)/.test(r.url()) && r.method() === "GET" && fetched.push(new URL(r.url()).pathname);
@@ -962,6 +976,201 @@ try {
     desk2.kill("SIGTERM");
     await new Promise((r) => desk2.once("exit", r));
   }
+
+  // 5t. Home's buttons, with the same actions and question ids as the terminal and MCP.
+  const deskNow = async () => (await fetch(`${url}api/desk`)).json();
+  const askingRoom = async (title) => {
+    const r = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], title, text: "Ask me.", to: "codex" });
+    await until(async () => (await questions(r.id)).length === 1 && (await view(r.id)).live.length === 0);
+    const [q] = await questions(r.id);
+    await page.waitForSelector(`#home .ask[data-q="${q.id}"]`);
+    return { room: r, q, card: `#home .ask[data-q="${q.id}"]` };
+  };
+  await page.click("a.brand");
+  await page.waitForFunction(() => !document.querySelector("#home").hidden);
+  // The guard's note, until it's read: OK, and it doesn't come back after a reload.
+  await page.waitForSelector("#home .notice");
+  await page.click('#home .notice [data-do="guard-ok"]');
+  await page.waitForSelector("#home .notice", { state: "detached" });
+  // Holding Codex: both interfaces, then each alone. Answering while Codex is held: saved, and Home says who gets it
+  // and when.
+  const heldAsk = await askingRoom("Held answer");
+  await page.click('#home .allow[data-group="openai"] > header [data-act="desk"]');
+  await until(async () => (await deskNow()).holds.some((h) => h.key === "codex"));
+  await page.waitForFunction(() => /Release both/.test(document.querySelector('#home .allow[data-group="openai"] > header')?.innerText ?? ""));
+  await page.click(`${heldAsk.card} [data-act="accept"]`);
+  await toastSays(/Codex gets it when this ends: you hold Codex/);
+  await until(async () => (await view(heldAsk.room.id)).events.find((e) => e.id === heldAsk.q.id).open === false);
+  assert.equal((await view(heldAsk.room.id)).live.length, 0, "Codex is held: its reply waits");
+  await page.click('#home .allow[data-group="openai"] > header [data-act="desk"]');
+  await until(async () => !(await deskNow()).holds.length);
+  for (const [agent, key] of [["codex", "codex:headless"], ["codexapp", "codexapp"]]) {
+    const row = `#home .allow[data-group="openai"] .agentrow:has(.avatar[data-agent="${agent}"]) [data-act="desk"]`;
+    await page.click(row);
+    await until(async () => (await deskNow()).holds.map((h) => h.key).join() === key);
+    await page.waitForFunction((sel) => document.querySelector(sel)?.textContent === "Release", row);
+    await page.click(row);
+    await until(async () => !(await deskNow()).holds.length);
+  }
+  // A planning checkpoint: every recommendation as shown, with the author named; the full form stays in the room.
+  const homePlan = await post("api/rooms", { projectId: "ui", mode: "plan", topic: "Home plan", members: ["codex", "claude"], title: "Home plan" });
+  await until(async () => (await questions(homePlan.id)).some((q) => q.kind === "plan-checkpoint"));
+  const [cp] = await questions(homePlan.id);
+  const cpCard = `#home .ask[data-q="${cp.id}"]`;
+  await page.waitForSelector(`${cpCard} [data-act="accept-checkpoint"]`);
+  assert.match(await page.innerText(cpCard), /Use SQLite\? \(Codex\): yes[\s\S]*Ship a CLI too\? \(Claude\): no[\s\S]*Accept all recommendations: Codex writes the plan[\s\S]*Open the form/);
+  // With its author held: accepted, and Home says Codex writes it when the hold ends.
+  await post("api/desk", { action: "hold", target: "codex" });
+  await clearToasts();
+  await page.click(`${cpCard} [data-act="accept-checkpoint"]`);
+  await toastSays(/Your call is in[\s\S]*Codex gets it when this ends: you hold Codex/);
+  await until(async () => (await view(homePlan.id)).room.plan.synthesizer === "codex");
+  assert.match((await view(homePlan.id)).events.find((e) => e.kind === "decisions").text, /Use SQLite\? → yes \(Codex's recommendation\)/);
+  await post("api/desk", { action: "release", target: "codex" });
+  // The plan written: asking Claude to check it while Claude alone is held says Claude, not the plan's author.
+  await until(async () => (await questions(homePlan.id)).some((q) => q.kind === "plan-ready"));
+  const readyQ = (await questions(homePlan.id)).find((q) => q.kind === "plan-ready");
+  await post("api/desk", { action: "hold", target: "claude" });
+  await page.waitForSelector(`#home .ask[data-q="${readyQ.id}"] [data-act="plan-check"]`);
+  await clearToasts();
+  await page.click(`#home .ask[data-q="${readyQ.id}"] [data-act="plan-check"]`);
+  await toastSays(/The check is asked for[\s\S]*Claude gets it when this ends: you hold Claude/);
+  assert.doesNotMatch(await page.innerText("#toasts"), /Codex gets it/);
+  await post("api/desk", { action: "release", target: "claude" });
+  // A card answered elsewhere while you write in it: it says so, keeps your text, sends nothing; Dismiss lets it go.
+  const staleAsk = await askingRoom("Stale room");
+  await page.click(`${staleAsk.card} [data-act="write"]`);
+  await page.keyboard.type("My draft answer");
+  await post(`api/rooms/${staleAsk.room.id}/answer`, { questionId: staleAsk.q.id, text: "From the phone." });
+  // Still typing (the focus never left): the card says it's closed, with Dismiss, and keeps your text and focus.
+  await page.waitForSelector(`${staleAsk.card}[data-stale="true"] .stalenote`);
+  assert.deepEqual(await page.evaluate(() => [document.activeElement?.tagName, document.activeElement?.value]), ["TEXTAREA", "My draft answer"]);
+  assert.equal(await page.$(`${staleAsk.card} [data-act="send"]`), null, "nothing to send it to");
+  assert.ok(await page.$(`${staleAsk.card} [data-act="dismiss"]`));
+  // Ctrl+Enter sends nothing from a closed card.
+  const staleSends = [];
+  const onStaleSend = (r) => r.method() === "POST" && r.url().includes(`/api/rooms/${staleAsk.room.id}/`) && staleSends.push(r.url());
+  page.on("request", onStaleSend);
+  await page.keyboard.press("Control+Enter");
+  await page.waitForTimeout(300);
+  page.off("request", onStaleSend);
+  assert.deepEqual(staleSends, []);
+  // Once you leave it, Home draws it again: still closed, still with your text.
+  await page.click("#home h1");
+  await post(`api/rooms/${heldAsk.room.id}/messages`, { text: "More news.", to: "codex", answering: false });
+  await page.waitForTimeout(800);
+  assert.ok(await page.$(`${staleAsk.card}[data-stale="true"] .stalenote`));
+  assert.equal(await page.inputValue(`${staleAsk.card} textarea`), "My draft answer");
+  await page.click(`${staleAsk.card} [data-act="dismiss"]`);
+  await page.waitForSelector(staleAsk.card, { state: "detached" });
+  // 2. Drafts for questions that closed before a reload, and while the page was closed: back as closed cards.
+  const before = await askingRoom("Closed before reload");
+  await page.click(`${before.card} [data-act="write"]`);
+  await page.keyboard.type("Written before the reload");
+  await page.click("#home h1");
+  await post(`api/rooms/${before.room.id}/answer`, { questionId: before.q.id, text: "From the phone." });
+  await page.reload();
+  await page.waitForSelector(`${before.card}[data-stale="true"] .stalenote`);
+  assert.equal(await page.inputValue(`${before.card} textarea`), "Written before the reload");
+  assert.match(await page.innerText(before.card), /Closed before reload[\s\S]*SQLite or Postgres\?/);
+  const awayDraft = await askingRoom("Closed while away");
+  await page.click(`${awayDraft.card} [data-act="write"]`);
+  await page.keyboard.type("Written before closing the page");
+  await page.goto("about:blank");
+  await post(`api/rooms/${awayDraft.room.id}/answer`, { questionId: awayDraft.q.id, text: "From the phone." });
+  await page.goto(url);
+  await page.waitForSelector(`${awayDraft.card}[data-stale="true"] .stalenote`);
+  assert.equal(await page.inputValue(`${awayDraft.card} textarea`), "Written before closing the page");
+  for (const c of [before.card, awayDraft.card]) await page.click(`${c} [data-act="dismiss"]`);
+  // 1. While an answer is on its way: the card is locked (what's sent is what you see), and a second send does nothing.
+  const slowAsk = await askingRoom("Slow send");
+  let letSendGo;
+  const sendGate = new Promise((r) => (letSendGo = r));
+  const slowSends = [];
+  await page.route(`**/api/rooms/${slowAsk.room.id}/answer`, async (route) => {
+    slowSends.push(route.request().postData());
+    await sendGate;
+    await route.continue();
+  });
+  await page.click(`${slowAsk.card} [data-act="write"]`);
+  await page.keyboard.type("Exactly this");
+  await page.keyboard.press("Control+Enter");
+  await page.waitForSelector(`${slowAsk.card}[aria-busy="true"]`);
+  await page.keyboard.type(" and more");
+  await page.keyboard.press("Control+Enter");
+  assert.equal(await page.inputValue(`${slowAsk.card} textarea`), "Exactly this", "nothing typed while it's sent");
+  assert.ok(await page.$eval(`${slowAsk.card} [data-act="send"]`, (b) => b.disabled));
+  letSendGo();
+  await until(async () => (await view(slowAsk.room.id)).events.find((e) => e.id === slowAsk.q.id).answer === "Exactly this");
+  assert.equal(slowSends.length, 1, "sent once");
+  await page.unroute(`**/api/rooms/${slowAsk.room.id}/answer`);
+  await page.waitForSelector(slowAsk.card, { state: "detached" });
+  assert.equal(await page.evaluate((id) => JSON.parse(localStorage.getItem("toryo.homeDrafts") ?? "{}")[id], slowAsk.q.id), undefined);
+  // A send that fails keeps your text, with the focus back in it; sent again, by keyboard, it goes.
+  const failingAsk = await askingRoom("Fail room");
+  await page.route(`**/api/rooms/${failingAsk.room.id}/answer`, (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "The desk had a problem." }) }));
+  await page.click(`${failingAsk.card} [data-act="write"]`);
+  await page.keyboard.type("Postgres, please.");
+  await page.keyboard.press("Control+Enter");
+  await page.waitForSelector(`${failingAsk.card} .err`);
+  assert.match(await page.innerText(`${failingAsk.card} .err`), /That didn't work: The desk had a problem\. Your text is kept\./);
+  assert.equal(await page.inputValue(`${failingAsk.card} textarea`), "Postgres, please.");
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName), "TEXTAREA");
+  errors.splice(errors.findIndex((e) => /status of 500/.test(e)), 1);
+  await page.unroute(`**/api/rooms/${failingAsk.room.id}/answer`);
+  await page.keyboard.press("Control+Enter");
+  await until(async () => (await view(failingAsk.room.id)).events.find((e) => e.id === failingAsk.q.id).answer === "Postgres, please.");
+  // Typing while news comes in: the card isn't drawn again (text, cursor and focus stay); a reload brings it back.
+  const typingAsk = await askingRoom("Typing room");
+  await page.click(`${typingAsk.card} [data-act="write"]`);
+  await page.keyboard.type("Half an answ");
+  const fetchedHome = page.waitForResponse((r) => r.url().includes("/api/home"));
+  await post(`api/rooms/${heldAsk.room.id}/messages`, { text: "Some news.", to: "codex", answering: false });
+  await fetchedHome;
+  await page.waitForTimeout(200);
+  assert.deepEqual(await page.evaluate(() => ({ tag: document.activeElement?.tagName, value: document.activeElement?.value, at: document.activeElement?.selectionStart })), { tag: "TEXTAREA", value: "Half an answ", at: 12 });
+  await page.keyboard.type("er");
+  await page.reload();
+  await page.waitForSelector(`${typingAsk.card} .write:not([hidden]) textarea`);
+  assert.equal(await page.inputValue(`${typingAsk.card} textarea`), "Half an answer");
+  assert.equal(await page.$("#home .notice"), null, "the guard's note, once read, stays read");
+  await page.click(`${typingAsk.card} [data-act="cancel-write"]`);
+  // The guard holds Codex for both windows; your own hold on top. Release says what's left, with a button for each.
+  const usedUp = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], title: "Used up", text: "Use it all up.", to: "codex" });
+  await until(async () => (await deskNow()).guard.holds.filter((h) => h.group === "openai").length === 2);
+  await page.click('#home .allow[data-group="openai"] > header [data-act="desk"]');
+  await until(async () => (await deskNow()).holds.some((h) => h.key === "codex"));
+  await page.waitForSelector('#home .deskbar [data-do="release"]');
+  await page.click('#home .deskbar [data-do="release"]');
+  await page.waitForSelector("#home .deskresult li");
+  assert.match(await page.innerText("#home .deskresult"), /^Released Codex \(headless and the Codex app\)\./);
+  assert.equal(await page.$$eval('#home .deskresult [data-do="guard-pause"]', (b) => b.length), 2, "one for each window still held");
+  await page.click('#home .deskresult [data-do="guard-pause"][data-window="weekly"]');
+  await until(async () => (await deskNow()).guard.exceptions.some((x) => x.key === "openai:weekly"));
+  await page.waitForFunction(() => /lets Codex run until its weekly limit resets/.test(document.querySelector("#home .deskresult")?.innerText ?? ""));
+  await page.click('#home .deskbar [data-do="guard-pause"][data-window="five-hour"]');
+  await until(async () => (await deskNow()).guard.exceptions.length === 2);
+  // No reset time known: Home says so, and offers turning that rule off instead.
+  const unknown = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["claude"], title: "Unknown reset", text: "Unknown reset.", to: "claude" });
+  await until(async () => (await deskNow()).guard.holds.some((h) => h.group === "anthropic"));
+  await page.waitForFunction(() => /Its reset time isn't known/.test(document.querySelector("#home .deskbar")?.innerText ?? ""));
+  await page.click('#home .deskbar [data-do="rule-off"]');
+  await until(async () => !(await deskNow()).guard.holds.some((h) => h.group === "anthropic"));
+  // The guard's settings: what you turned off stays off, after a reload too; a change you make is saved.
+  await page.click('#home [data-act="guard-sheet"]');
+  await page.waitForSelector("#guardForm");
+  assert.equal(await page.isChecked('#guardForm fieldset[data-group="anthropic"] input[name=on][data-type="five_hour"]'), false);
+  await page.fill('#guardForm fieldset[data-group="openai"] input[name=at][data-type="weekly"]', "99");
+  await page.click('#guardForm button[type="submit"]');
+  await until(async () => (await deskNow()).guard.policies.find((p) => p.group === "openai").rules.find((r) => r.type === "weekly").at === 99);
+  await page.reload();
+  await page.waitForSelector('#home [data-act="guard-sheet"]');
+  await page.click('#home [data-act="guard-sheet"]');
+  await page.waitForSelector("#guardForm");
+  assert.equal(await page.isChecked('#guardForm fieldset[data-group="anthropic"] input[name=on][data-type="five_hour"]'), false);
+  assert.equal(await page.inputValue('#guardForm fieldset[data-group="openai"] input[name=at][data-type="weekly"]'), "99");
+  await page.click("#guardForm [data-close]");
+  await until(async () => (await view(usedUp.id)).live.length === 0 && (await view(unknown.id)).live.length === 0);
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");

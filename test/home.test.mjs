@@ -161,7 +161,8 @@ test("over HTTP: Home and Recent as the page fetches them, after a reconnect too
     const get = async (path) => (await fetch(`http://127.0.0.1:${port}${path}`, { headers: { "x-toryo": "1" } })).json();
     const home = await get("/api/home");
     assert.equal(home.questions[0].roomTitle, "<img src=x onerror=alert(1)>", "the title as it is: the page escapes it");
-    assert.deepEqual(Object.keys(home).sort(), ["agents", "at", "desk", "questionCount", "questions", "recent", "rooms", "usage", "working"]);
+    assert.deepEqual(Object.keys(home).sort(), ["agents", "at", "desk", "openIds", "questionCount", "questions", "recent", "rooms", "usage", "working"]);
+    assert.deepEqual(home.openIds, home.questions.map((q) => q.id));
     assert.ok(home.desk.guard, "the desk's controls and the guard");
     e.deskControl("hold", { target: "claude" });
     const page = await get("/api/feed?limit=1");
@@ -315,6 +316,31 @@ test("a Codex app turn the app took up while Toryo was stopped: working since th
     await waitFor(() => e.running.size === 0, { label: "let go" });
     e.shutdown();
   } finally {
+    t.cleanup();
+  }
+});
+
+test("Home's cards for planning: a checkpoint names the author its form would choose and whether every question has a recommendation; a ready plan names who can check it", async () => {
+  const t = await setup([
+    { agent: "codex", match: "step 1 of 4", reply: "Codex proposal.\n- Q: Use SQLite? (Recommended: yes)\nTORYO: PROPOSAL" },
+    { agent: "claude", match: "step 1 of 4", reply: "Claude proposal.\n- Q: Ship a CLI too?\nTORYO: PROPOSAL" },
+    { match: "step 2 of 4", reply: "Critique.\nTORYO: CRITIQUE" },
+    { agent: "codex", match: "step 3 of 4", write: { path: "docs/plans/p.md", content: "# P\n\n### Slice 1: One\n" }, reply: "Written.\nTORYO: REVIEW docs/plans/p.md" },
+    { agent: "claude", match: "step 4 of 4", reply: "Fine.\nTORYO: APPROVED" },
+  ]);
+  try {
+    const e = t.engine;
+    const room = e.createRoom({ projectId: "repo", mode: "plan", topic: "P", planPath: "docs/plans/p.md", members: ["codex", "claude"] });
+    await waitFor(() => e.home().questions.some((q) => q.kind === "plan-checkpoint"), { label: "the checkpoint" });
+    const cp = e.home().questions.find((q) => q.kind === "plan-checkpoint");
+    // Claude's question has no recommendation: Home sends you to the form rather than accept for you.
+    assert.deepEqual([cp.author, cp.complete, cp.questions.length], ["codex", false, 2]);
+    e.synthesize(room.id, { questionId: cp.id, decisions: "- Ship a CLI too? → no" });
+    await waitFor(() => e.home().questions.some((q) => q.kind === "plan-ready"), { label: "the plan ready" });
+    const ready = e.home().questions.find((q) => q.kind === "plan-ready");
+    assert.deepEqual([ready.author, ready.checkers, ready.planPath], ["codex", ["claude"], "docs/plans/p.md"]);
+  } finally {
+    t.engine.shutdown();
     t.cleanup();
   }
 });

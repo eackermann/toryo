@@ -1073,8 +1073,18 @@ export class Engine extends EventEmitter {
       folder: project(r)?.path ?? null,
       shared: (byFolder.get(project(r)?.path) ?? []).filter((x) => x !== r).map((x) => ({ id: x.id, title: x.title })),
     });
+    // What a question's card needs to act on it from Home: a checkpoint's default author (as the room's form has
+    // it) and whether every question has a recommendation; a ready plan's author and the planners who can check it.
+    const extra = (r, q) => {
+      if (q.kind === "plan-checkpoint" && r.plan) {
+        const author = r.plan.participants?.includes(r.crew.builder) ? r.crew.builder : r.plan.participants?.[0] ?? r.crew.builder;
+        return { author, complete: (q.questions ?? []).every((x) => String(x.recommendation ?? "").trim()) };
+      }
+      if (q.kind === "plan-ready" && r.plan) return { author: r.plan.synthesizer ?? null, checkers: this.#allWaiting(r).find((w) => w.eventId === q.id)?.checkers ?? [], planPath: r.plan.planPath };
+      return {};
+    };
     const questions = rooms
-      .flatMap((r) => this.#openQuestions(r).map((q) => ({ ...q, room: r.id, roomTitle: r.title })))
+      .flatMap((r) => this.#openQuestions(r).map((q) => ({ ...q, ...extra(r, q), room: r.id, roomTitle: r.title })))
       .sort((a, b) => (a.at ?? "").localeCompare(b.at ?? "") || a.id.localeCompare(b.id));
     const working = [...this.running.values()]
       .filter((run) => this.rooms.get(run.roomId) && !this.rooms.get(run.roomId).archived)
@@ -1130,6 +1140,8 @@ export class Engine extends EventEmitter {
       desk: this.deskView(),
       questions: questions.slice(0, 50),
       questionCount: questions.length,
+      // Every open question's id (Home shows the first 50): a draft for any other question is for one now closed.
+      openIds: questions.map((q) => q.id),
       working,
       rooms: others,
       usage: this.usage.groupView(now),
@@ -2414,9 +2426,10 @@ export class Engine extends EventEmitter {
       // The Codex app accepted the message: keep the turn (on disk) until it ends; it's followed, never sent again.
       onSubmitted: () => {
         if (run.phase === "preparing" || run.phase === "sending") run.phase = "in-app";
-        run.submittedAt ??= nowIso();
+        // One time for the run and its record, so following it again after a restart says the same.
+        run.submittedAt ??= ev.submittedAt ?? nowIso();
         if (room.appTurn?.marker !== `[Toryo ${turnId}]`) room.appTurn = this.#appTurnFrom(room, this.#followReq(req, ev));
-        if (!ev.submitted) this.#patch(room, ev, { submitted: true, submittedAt: nowIso() });
+        if (!ev.submitted) this.#patch(room, ev, { submitted: true, submittedAt: run.submittedAt });
         this.#save(room);
       },
       // The Codex app opens a thread to make it send a queued message, but not while it's held or everything is paused.
