@@ -185,6 +185,10 @@ export class Engine extends EventEmitter {
       // Said once, even if Toryo stops again before this is saved.
       if (!this.events.get(room.id).some((e) => e.type === "system" && e.reconciled === turnId))
         this.#append(room, { type: "system", text: `Toryo stopped just as ${this.label(ev.agent)}'s turn ended. It carries on from that turn now.`, forAgents: false, level: "info", reconciled: turnId });
+      // Files it wrote in a folder a build holds: told to that build once (the note may be there already), also when
+      // which files isn't known.
+      const known = ev.filesKnown ?? Array.isArray(ev.files);
+      if (ev.files?.length || (!known && (ev.reached ?? ev.state === "done"))) this.#noteWritesToBuild(room, ev.req, ev, ev.files ?? [], known);
       if (ev.state === "done") {
         this.#commitDispatch(room, ev.agent, run);
         this.#markReplies(room, ev.agent, ev.id);
@@ -330,6 +334,16 @@ export class Engine extends EventEmitter {
       groups: { ...d.groups },
       guard: this.#guardView(),
       problem: this.deskProblem,
+      // Folders you said you're using, and what's in each project's folder now.
+      // `projects`: the projects whose folder this is, exactly (their id releases it); `covers`: every project it
+      // keeps Toryo out of (outside Git, a folder inside it, or one it's inside, is the same folder).
+      folders: Object.entries(d.folders ?? {}).map(([root, f]) => ({
+        root,
+        at: f.at,
+        name: f.name,
+        projects: this.config.projects.filter((p) => this.#folderOf(p).root === root).map((p) => p.id),
+        covers: this.config.projects.filter((p) => this.#sameFolder(this.#folderOf(p), { root, git: f.git })).map((p) => p.id),
+      })),
     };
   }
 
@@ -453,6 +467,32 @@ export class Engine extends EventEmitter {
           const others = holdsFor(d.guard, group, this.now()).map((h) => this.#guardReason(h));
           message = `Released the guard's hold on ${this.#groupName(group)} for its ${windowLabel(type)} limit.${others.length ? ` Still held: ${others.join("; ")}.` : ""}`;
           guardChanges = [{ kind: "end", why: "released", key, hold }];
+          break;
+        }
+        case "use-folder":
+        case "release-folder": {
+          // A folder you're using yourself (an editor, the Codex app on its own): Toryo starts nothing new in it.
+          d.folders ??= {};
+          // Released by the folder itself (as Home and `toryo status` name it), or by a project in it.
+          const root = action === "release-folder" && d.folders[args.project] ? args.project : null;
+          const project = root ? null : this.#projectNamed(args.project);
+          const folder = root ? { root, git: d.folders[root].git } : this.#folderOf(project);
+          if (action === "use-folder") {
+            restrictive = true;
+            d.folders[folder.root] ??= { at: nowIso(), git: folder.git, name: project.name };
+            journalText = `You're using ${folder.root}`;
+            const busy = this.#folderUses(folder).filter((u) => !u.you);
+            message = `You're using ${folder.root}: Toryo starts nothing new in it until you release it${busy.length ? `. Still finishing there: ${busy.map((u) => this.#useWords(u)).join("; ")}` : ""}. Toryo can't see what you do there; it only keeps its own work out.`;
+          } else {
+            if (!d.folders[folder.root]) {
+              // Not that folder itself, but one it's in (or inside it), outside Git: say which to release.
+              const near = Object.entries(d.folders).filter(([r, f]) => this.#sameFolder({ root: r, git: f.git }, folder)).map(([r]) => r);
+              throw new UserError(`You aren't using ${folder.root}.${near.length ? ` You're using ${near.join(" and ")}, which ${near.length > 1 ? "overlap" : "overlaps"} it: release ${near.length > 1 ? "those" : "that"} (toryo folder release ${near[0]}).` : ""}`);
+            }
+            delete d.folders[folder.root];
+            journalText = `You released ${folder.root}`;
+            message = `Released ${folder.root}: Toryo's work there goes on.`;
+          }
           break;
         }
         case "guard-ok":
@@ -787,6 +827,7 @@ export class Engine extends EventEmitter {
         // loop: whoever hears it may change something (release a hold, queue a note), and that's looked at at once.
         for (const room of this.rooms.values()) {
           if (room.archived) continue;
+          // (Waiting for a quiet moment in the folder isn't said here: it's short, and the room's status says why.)
           const reasons = [...new Set(room.queue.flatMap((q) => this.blockersFor(q, room)))].join("; ");
           if (reasons === (room.deskNotice ?? "")) continue;
           const was = room.deskNotice;
@@ -814,11 +855,16 @@ export class Engine extends EventEmitter {
    * or waiting behind an earlier step of the room's work that's held up. A step not running beside the work holds
    * the steps after it, so the work keeps its order. One calculation for starting, the room's status and its reasons.
    */
-  #heldUp(room) {
+  #heldUp(room, { access = true } = {}) {
     const out = new Map();
     let first = null;
     for (const req of room.queue) {
       const own = this.blockersFor(req, room);
+      // Sharing the folder with other work (see #accessBlock), unless something else holds it already.
+      if (access && !own.length) {
+        const why = this.#accessBlock(room, req);
+        if (why) own.push(why);
+      }
       if (own.length) {
         out.set(req, own);
         if (!req.parallel) first ??= req;
@@ -830,10 +876,10 @@ export class Engine extends EventEmitter {
     return out;
   }
 
-  /** The first request in a room's queue that can start now, or null. */
-  #nextStartable(room) {
+  /** The first request in a room's queue that can start now, or null (`access: false`: setting the folder's sharing aside). */
+  #nextStartable(room, { access = true } = {}) {
     if (room.archived || room.paused || room.stopped || !room.queue.length) return null;
-    const heldUp = this.#heldUp(room);
+    const heldUp = this.#heldUp(room, { access });
     const running = this.#runningIn(room);
     for (const req of room.queue) {
       if (room.waiting && !req.whileWaiting) continue;
@@ -1339,8 +1385,9 @@ export class Engine extends EventEmitter {
     }
     room.archived = true;
     this.rooms.delete(room.id);
-    // Its turns still finishing keep its folder until they've ended.
-    if (room.folderClaim && this.#runningIn(room).length) this.draining.set(room.id, room);
+    // Its turns still finishing (to their last snapshot) keep using its folder until they've ended: its builder
+    // claim, and its place among the folder's writers and readers.
+    if (this.#runningIn(room).length) this.draining.set(room.id, room);
     this.notable.delete(room.id);
     this.timelines.delete(room.id);
     this.store.saveRoom(room);
@@ -2585,7 +2632,25 @@ export class Engine extends EventEmitter {
       this.#save(room);
     }
     const after = snapOn ? await this.snapshots.take(project, `after ${turnId} ${req.agent} ${req.kind}`) : null;
-    const files = before && after ? await this.snapshots.changes(project, before.commit, after.commit) : [];
+    // What the turn changed, and whether that's known (snapshots on, both taken, and compared): unknown isn't nothing.
+    const listed = before && after ? await this.snapshots.changes(project, before.commit, after.commit, { strict: true }) : null;
+    const filesKnown = listed !== null;
+    const files = listed ?? [];
+    // A turn that gives a review's verdict later (a status-only answer; an answer to your question, after which the
+    // review's verdict carries on): what changed since that review began counts, not only during this turn.
+    const reviewed =
+      req.kind === "review-status" ? this.#lastReview(room, req.agent)
+      : (req.kind === "note-answer" || req.kind === "note-reply") && REVIEW_KINDS.has(req.after?.kind) ? this.events.get(room.id).find((e) => e.id === req.after.evId)
+      : null;
+    const sinceReview = reviewed?.snapBefore && after ? await this.snapshots.changes(project, reviewed.snapBefore, after.commit, { strict: true }) : undefined;
+    // A review's verdict, given now or carried on: what changed since the review began (as compared), with what this
+    // turn saw change itself. A comparison Toryo tried and couldn't make leaves it not known, which doesn't count as
+    // nothing having changed.
+    const verdictTurn = (this.#reviews(req) || reviewed) && req.access !== "write";
+    const stale = verdictTurn ? [...new Set([...(sinceReview ?? []), ...files].map((f) => f.path))] : [];
+    const staleUnknown = verdictTurn && Boolean(snapOn) && (sinceReview === null || !filesKnown || (reviewed && !reviewed.snapBefore));
+    // Whether the agent had the turn (it could have changed files), as opposed to failing before it started.
+    const reached = run.phase !== "preparing";
     this.running.delete(turnId);
     if (result.sessionId) room.sessions[req.agent] = result.sessionId;
     // A Cursor chat that had an Ask-mode turn keeps Ask mode: remember it, so its next turn that writes starts a new chat.
@@ -2643,11 +2708,21 @@ export class Engine extends EventEmitter {
       empty: empty || undefined,
       snapAfter: after?.commit ?? null,
       files,
+      filesKnown,
+      reached,
+      // A review during which files changed (by someone else: it can't write) may not cover them: out of date. For a
+      // turn giving a review's verdict later, from the start of that review. Not known: out of date too.
+      outOfDate: state === "done" && stale.length ? stale : undefined,
+      staleUnknown: state === "done" && staleUnknown && !stale.length ? true : undefined,
       activityCount: run.activity.length,
     });
     if (req.access !== "write" && files.length && state === "done")
       this.#system(room, `Files changed during ${this.label(req.agent)}'s read-only turn (by it or someone else): ${files.slice(0, 8).map((f) => f.path).join(", ")}${files.length > 8 ? "…" : ""}`, { level: "warn" });
     this.#actOnOutcome(room, turnId, () => {
+      // Written in a folder a build holds (a plan's author, a writable chat): its room is told which files.
+      // (Changes not known: said whenever the agent had the turn, whatever became of it: it may have written before
+      // failing or being stopped.)
+      if (files.length || (!filesKnown && reached)) this.#noteWritesToBuild(room, req, ev, files, filesKnown);
       if (state === "done") this.#markReplies(room, req.agent, turnId);
       if (state === "done") this.#noteOutcomes(room, req, run, ev);
       this.#afterTurn(room, ev, run);
@@ -2898,7 +2973,9 @@ export class Engine extends EventEmitter {
         items.push({ heading: `${this.label(ev.agent)}${role}${tag}`, body: ev.text });
         ids.push(ev.id);
       } else if (ev.type === "system" && ev.forAgents) {
-        items.push({ heading: "Toryo", body: ev.text });
+        // A note of files changed between a build's turns: every one of them, however many.
+        const all = ev.writesFrom && ev.files?.length > 20 ? `\n\nEvery file changed:\n${ev.files.map((f) => `- ${f}`).join("\n")}` : "";
+        items.push({ heading: "Toryo", body: `${ev.text}${all}` });
         ids.push(ev.id);
       } else if (ev.type === "gate") {
         items.push({ heading: "Toryo checks", body: ev.results.map((r) => `${r.ok ? "PASS" : "FAIL"} ${r.name} (${r.seconds}s)${r.ok ? "" : `\n${r.output}`}`).join("\n") });
@@ -2941,7 +3018,7 @@ export class Engine extends EventEmitter {
     let outcome = { kind: req.kind, final: req.final, verdictOnly: req.verdictOnly || undefined, status: ev.status, detail: ev.detail, evId: ev.id };
     // A building turn for your notes carries on from the turn before it, unless it resubmitted (REVIEW, DONE, OWNER).
     // (note-reply: the same, for turns queued before 13 Oct.) An answer to your question always carries on as before.
-    if (req.kind === "build-notes" || req.kind === "note-reply") outcome = ev.status && ev.status !== "REPLY" ? { ...req.after, status: ev.status, detail: ev.detail, evId: ev.id } : req.after;
+    if (req.kind === "build-notes" || req.kind === "note-reply") outcome = ev.status && ev.status !== "REPLY" ? { ...req.after, status: ev.status, detail: ev.detail, evId: ev.id } : { ...req.after, outOfDate: ev.outOfDate ?? req.after?.outOfDate, staleUnknown: ev.staleUnknown ?? req.after?.staleUnknown };
     if (req.kind === "note-answer") {
       // A question answered beside the work: nothing to carry on, except more questions that came meanwhile.
       if (!req.after) {
@@ -2949,7 +3026,8 @@ export class Engine extends EventEmitter {
         if (asks.length) this.#queueAnswer(room, req.agent, asks.map((n) => n.id));
         return;
       }
-      outcome = req.after;
+      // The review's verdict carries on, with what changed since that review began (see #executeTurn).
+      outcome = { ...req.after, outOfDate: ev.outOfDate ?? req.after.outOfDate, staleUnknown: ev.staleUnknown ?? req.after.staleUnknown };
     }
     // The owner wrote to this agent while it worked.
     const notes = room.mode === "chat" ? [] : this.#notesDuring(room, req.agent, run);
@@ -2962,7 +3040,9 @@ export class Engine extends EventEmitter {
     const actual = { ...req, kind: outcome.kind, final: outcome.final, verdictOnly: outcome.verdictOnly };
     const source = (ev && outcome.evId === ev.id ? ev : this.events.get(room.id).find((e) => e.id === outcome.evId)) ?? ev ?? {};
     if (FREE_KINDS.has(actual.kind)) return this.#afterChat(room, { ...source, status: outcome.status, detail: outcome.detail }, actual);
-    if (room.mode === "build" && room.build) return this.#afterBuild(room, source, actual, outcome.status, outcome.detail ?? "");
+    // A verdict carried past a turn after it (an answer to your question) is out of date if files changed meanwhile.
+    if (room.mode === "build" && room.build)
+      return this.#afterBuild(room, outcome.outOfDate?.length || outcome.staleUnknown ? { ...source, outOfDate: outcome.outOfDate, staleUnknown: outcome.staleUnknown } : source, actual, outcome.status, outcome.detail ?? "");
     if (room.mode === "plan" && room.plan) return this.#afterPlan(room, source, actual, outcome.status, outcome.detail ?? "");
   }
 
@@ -3162,6 +3242,17 @@ export class Engine extends EventEmitter {
     }
     if (REVIEW_KINDS.has(req.kind)) {
       const R = this.label(req.agent);
+      // Files changed while it was reviewing: its approval may not cover them, so it settles nothing by itself (no
+      // slice approved, no findings resolved). You decide; the recommendation is to have it look again.
+      const stale = ev.outOfDate ?? (req.kind === "review-status" ? this.#lastReview(room, req.agent)?.outOfDate : undefined);
+      if (status === "APPROVED" && stale?.length) {
+        const list = `${stale.slice(0, 8).join(", ")}${stale.length > 8 ? "…" : ""}`;
+        return this.#wait(room, { kind: "review-owner", from: req.agent, final: req.final, question: `Files changed while ${R} was reviewing (${list}), so its approval may not cover them. Should ${R} look again?`, recommendation: "Look at the changed files again, then give your verdict" });
+      }
+      // Toryo tried to tell whether files changed since the review began, and couldn't: the approval doesn't count by
+      // itself either.
+      if (status === "APPROVED" && ev.staleUnknown)
+        return this.#wait(room, { kind: "review-owner", from: req.agent, final: req.final, question: `Toryo couldn't tell whether files changed since ${R}'s review began (comparing its snapshots failed), so its approval may not cover the files as they are now. Should ${R} look again? If snapshots can't work in this folder at all, looking again will ask this again: fix snapshots there, or turn them off for this room in Room settings (then nothing is compared).`, recommendation: "Look at the files again, then give your verdict" });
       // A review that will ask again for its status (below) counts once, when it has one.
       if (status || !(req.kind === "review" || req.kind === "review-answer")) this.#ledgerFromReview(room, ev, req, status);
       if (status === "APPROVED") {
@@ -3605,6 +3696,151 @@ export class Engine extends EventEmitter {
     const events = this.events.get(room.id);
     const from = room.session?.eventId ? events.findIndex((e) => e.id === room.session.eventId) : -1;
     return from > 0 ? events.slice(from) : events;
+  }
+
+  // ---------------------------------------------------------------- sharing a folder between turns
+
+  /**
+   * Work in one folder takes turns. Work that writes there (a builder, a plan's author, a chat allowed to change
+   * files, the project's checks, anything handed to the Codex app) starts only at a quiet moment: no other turn of any
+   * kind, no checks, no review using the folder, counting turns being prepared and Codex app turns a room keeps.
+   * Work that only reads (replies, proposals, reviews) doesn't start there while something writes, nor while a
+   * writer that's ready waits for its quiet moment, so readers can't keep a writer out. One exception: a build's own
+   * room may answer your questions beside its builder's work (a short read-only turn), as it always has. A plan's
+   * author or a writable chat that's ready goes before the build's next step (its next turn, checks or review), so a
+   * plan doesn't wait for a long build to end; the build keeps its folder and goes on after. A folder you said you're
+   * using gets nothing new. Returns why a request waits, or null.
+   */
+  #accessBlock(room, req) {
+    if (req.attach) return null; // following a turn the Codex app already has
+    const folder = this.#roomFolder(room);
+    if (!folder) return null;
+    if (this.#youUse(folder)) return "you're using this folder";
+    const uses = this.#folderUses(folder);
+    if (this.#writes(req)) {
+      if (uses.length) return `it waits for a quiet moment in this folder: ${this.#useWords(uses[0])}`;
+      if (this.#needsFolder(room, req)) {
+        const ahead = this.#waitingWriters(folder).filter((w) => !w.build && w.room !== room);
+        if (ahead.length) return `${this.label(ahead[0].req.agent)} writes in this folder for “${ahead[0].room.title}” first`;
+      }
+      return null;
+    }
+    // Reading: not while another room writes there, nor while a writer that's ready waits for its turn (or is ahead
+    // of this build's next step). The build's own side answers go on beside its builder.
+    const writer = uses.find((u) => u.writes && u.room !== room);
+    if (writer) return this.#useWords(writer);
+    const ownWriter = uses.find((u) => u.writes && u.room === room);
+    if (ownWriter && (this.#reviews(req) || room.mode !== "build")) return this.#useWords(ownWriter);
+    const ahead = this.#waitingWriters(folder).filter((w) => w.room !== room);
+    if (ahead.length) return `${this.label(ahead[0].req.agent)} writes in this folder for “${ahead[0].room.title}” first`;
+    return null;
+  }
+
+  /** A review: a build's review, or a check of a plan. */
+  #reviews(req) {
+    return REVIEW_KINDS.has(req.kind) || req.kind === "plan-check";
+  }
+
+  /** An agent's latest review in the room (the one a status-only turn gives the verdict of). */
+  #lastReview(room, agent) {
+    return [...this.events.get(room.id)].reverse().find((e) => e.type === "turn" && e.agent === agent && e.state === "done" && (e.kind === "review" || e.kind === "review-answer"));
+  }
+
+  /**
+   * Writes in its folder, or may: write access, the project's checks (their commands can write), or anything handed
+   * to the Codex app (it follows its own permissions, whatever Toryo asked).
+   */
+  #writes(req) {
+    return req.access === "write" || req.kind === "gates" || req.agent === "codexapp";
+  }
+
+  /** The folder a room works in. */
+  #roomFolder(room) {
+    const project = this.project(room.projectId);
+    return project ? this.#folderOf(project) : null;
+  }
+
+  /** Whether you said you're using this folder (or one it's in, or inside it). */
+  #youUse(folder) {
+    return Object.entries(this.desk.folders ?? {}).some(([root, f]) => this.#sameFolder({ root, git: f.git }, folder));
+  }
+
+  /**
+   * What's using a folder now, in any room (deleted rooms whose turns are still finishing too): every turn (from when
+   * it's prepared to when its last snapshot is taken) and checks run, and Codex app turns a room keeps (the app may
+   * be writing).
+   */
+  #folderUses(folder) {
+    const out = [];
+    const near = (room) => {
+      const f = this.#roomFolder(room);
+      return f && this.#sameFolder(f, folder);
+    };
+    for (const run of this.running.values()) {
+      const room = this.rooms.get(run.roomId) ?? this.draining.get(run.roomId);
+      if (room && near(room)) out.push({ room, agent: run.agent, kind: run.req.kind, writes: this.#writes(run.req), reviews: this.#reviews(run.req) });
+    }
+    for (const room of [...this.rooms.values(), ...this.draining.values()])
+      if (room.appTurn && near(room) && !out.some((u) => u.room === room && u.agent === "codexapp")) out.push({ room, agent: "codexapp", kind: room.appTurn.req?.kind, writes: true, kept: true });
+    return out;
+  }
+
+  /** One use of a folder in words: "Codex is writing in this folder for “Plan room”". */
+  #useWords(u) {
+    if (u.agent === "toryo") return `the checks are running in this folder for “${u.room.title}”`;
+    const who = this.label(u.agent);
+    if (u.kept) return `the Codex app may still be writing in this folder for “${u.room.title}”`;
+    return u.writes ? `${who} is writing in this folder for “${u.room.title}”` : u.reviews ? `${who} is reviewing in this folder for “${u.room.title}”` : `${who} is reading this folder for “${u.room.title}”`;
+  }
+
+  /**
+   * The writers that would start now in a folder if it were quiet: each room's next request, when it writes and
+   * nothing but the folder's sharing holds it (a held or paused author doesn't keep a quiet moment for itself).
+   * Oldest first.
+   */
+  #waitingWriters(folder) {
+    const out = [];
+    for (const room of this.rooms.values()) {
+      const f = this.#roomFolder(room);
+      if (room.archived || !f || !this.#sameFolder(f, folder)) continue;
+      const req = this.#nextStartable(room, { access: false });
+      if (req && this.#writes(req)) out.push({ room, req, build: this.#needsFolder(room, req) });
+    }
+    return out.sort((a, b) => (queueOrder(a.req, a.room) < queueOrder(b.req, b.room) ? -1 : 1));
+  }
+
+  /** A project by id, name or folder (the first project when none is named). */
+  #projectNamed(ref) {
+    const projects = this.config.projects;
+    if (!projects.length) throw new UserError("There are no projects yet.");
+    if (!ref) return projects[0];
+    const p = projects.find((x) => x.id === ref || x.name === ref || x.path === ref) ?? projects.find((x) => x.name.toLowerCase() === String(ref).toLowerCase());
+    if (!p) throw new UserError(`No project called “${ref}”.`);
+    return p;
+  }
+
+  /**
+   * A plan's author or a writable chat changed files in a folder a build holds: the build's room is told which, in a
+   * line its agents read before their next turn, once per turn (kept in its timeline, so a restart doesn't lose or
+   * repeat it). It's for their information: it doesn't approve or start anything.
+   */
+  #noteWritesToBuild(room, req, ev, files, known) {
+    if (!this.#writes(req) || req.kind === "gates" || this.#needsFolder(room, req)) return;
+    if (known && !files.length) return;
+    const folder = this.#roomFolder(room);
+    const build = folder && this.#claimants(folder).find((r) => r !== room && !r.archived);
+    if (!build || this.events.get(build.id).some((e) => e.type === "system" && e.writesFrom === ev.id)) return;
+    const paths = files.map((f) => f.path);
+    const list = known ? `: ${paths.slice(0, 20).join(", ")}${paths.length > 20 ? ` and ${paths.length - 20} more (all of them below)` : ""}` : " (which ones isn't known: Toryo couldn't list that turn's changes)";
+    this.#append(build, {
+      type: "system",
+      text: `Between this build's turns, ${this.label(req.agent)} ${known ? "changed" : "may have changed"} files in this folder for “${room.title}”${list}. Take them into account before going on.`,
+      forAgents: true,
+      level: "info",
+      writesFrom: ev.id,
+      files: paths,
+    });
+    this.#save(build);
   }
 
   // ---------------------------------------------------------------- one builder per folder

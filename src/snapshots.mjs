@@ -124,15 +124,18 @@ export class Snapshots {
     return { commit: id, tree: tree.stdout.trim() };
   }
 
-  /** Files that differ between two snapshots: [{ status, path }]. */
-  async changes(project, from, to) {
+  /**
+   * Files that differ between two snapshots: [{ status, path }]. A comparison that fails gives [] (nothing to show),
+   * or null with `strict` (not known: unlike nothing changed).
+   */
+  async changes(project, from, to, { strict = false } = {}) {
     if (!from || !to || from === to) return [];
     const info = await this.ensure(project);
-    if (!info) return [];
+    if (!info) return strict ? null : [];
     const r = await run("git", ["diff-tree", "-r", "--no-renames", "--name-status", "-z", from, to], {
       env: { ...quiet(), GIT_DIR: info.dir },
     });
-    if (r.code !== 0) return [];
+    if (r.code !== 0) return strict ? null : [];
     const parts = split0(r.stdout);
     const out = [];
     for (let i = 0; i + 1 < parts.length; i += 2) out.push({ status: parts[i], path: parts[i + 1] });

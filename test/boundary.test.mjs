@@ -153,10 +153,11 @@ test("rooms on one Codex app thread take turns; rooms on different threads run t
   try {
     const { app, calls } = fakeApp();
     const e = await engineWith(t, { codexapp: app });
-    const room = (thread) => e.createRoom({ projectId: "repo", mode: "chat", members: ["codexapp"], appThread: thread, settings: { snapshots: false } });
-    const a = room("t1");
-    const b = room("t2");
-    const c = room("t1");
+    // Each in a folder of its own: work handed to the Codex app counts as writing, and writers in one folder take turns.
+    const room = (thread, projectId) => e.createRoom({ projectId, mode: "chat", members: ["codexapp"], appThread: thread, settings: { snapshots: false } });
+    const a = room("t1", "repo");
+    const b = room("t2", t.project("second", e));
+    const c = room("t1", t.project("third", e));
     for (const r of [a, b, c]) e.postMessage(r.id, { text: "Go.", to: "codexapp" });
     assert.deepEqual(calls.map((x) => x.thread).sort(), ["t1", "t2"], "t2 runs beside t1; the second t1 room waits");
     calls[0].args.onSubmitted();

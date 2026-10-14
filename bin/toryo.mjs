@@ -53,6 +53,9 @@ From any terminal (or an agent) while Toryo runs
   toryo hold codex|claude|codexapp [--headless]    toryo release codex|claude|codexapp [--headless]
                                 hold an agent in every room (codex: both Codex interfaces; codexapp: the app only;
                                 --headless: headless Codex only); a release says what the usage guard still holds
+  toryo folder use|release [project]
+                                you're using a project's folder yourself (an editor, the Codex app on its own):
+                                Toryo starts nothing new in it until you release it
   toryo guard                   what the usage guard does, and what it holds now
   toryo guard [agent] --five-hour 90 --weekly 90 [--auto-release | --no-auto-release]
                                 its rules (--weekly off turns one off; --off or --on, all of them; no agent: every agent)
@@ -133,6 +136,13 @@ try {
     case "stop":
       console.log(await client.control(positional[1] ?? roomArg(), command));
       process.exit(0);
+    case "folder": {
+      // You're using a project's folder yourself: Toryo starts nothing new in it until you release it.
+      const verb = positional[1];
+      if (!["use", "release"].includes(verb)) throw new Error("Usage: toryo folder use|release [project]");
+      console.log(await client.desk(`${verb}-folder`, { project: positional[2] ?? (typeof flag("project", null) === "string" ? flag("project", null) : undefined) }));
+      process.exit(0);
+    }
     case "hold":
     case "release":
       if (!positional[1]) throw new Error(`Say which agent: toryo ${command} codex`);

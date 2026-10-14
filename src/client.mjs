@@ -30,6 +30,8 @@ function deskLines(desk) {
   if (desk.paused) lines.push("Everything is paused: running turns finish, nothing new starts. Resume with: toryo resume --all");
   if (desk.holds?.length) lines.push(`You hold: ${desk.holds.map((h) => h.label).join(", ")}. Release with: toryo release <agent>`);
   for (const h of guard?.holds ?? []) lines.push(h.excepted ? `The usage guard is paused for ${h.name}'s ${h.label} limit until it resets.` : `Held by the usage guard: ${h.reason}.`);
+  // Folders you said you're using: Toryo starts nothing new in them.
+  for (const f of desk.folders ?? []) lines.push(`You're using ${f.root} (since ${new Date(f.at).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}): toryo folder release ${f.projects?.[0] ?? f.root}`);
   if (lines.length) lines.push("");
   return lines;
 }

@@ -17,7 +17,10 @@ test("Home shows the work running in several rooms: who, where, what, since when
   ]);
   try {
     const e = t.engine;
-    const build = e.createRoom({ projectId: "repo", mode: "build", task: "Build the export", title: "Export" });
+    // The build in a folder of its own (a reply doesn't run beside a builder in its folder), with a quiet room there.
+    const other = t.project("other");
+    const build = e.createRoom({ projectId: other, mode: "build", task: "Build the export", title: "Export" });
+    const quiet = e.createRoom({ projectId: other, mode: "chat", members: ["claude"], title: "Quiet" });
     const chat = e.createRoom({ projectId: "repo", mode: "chat", members: ["claude"], title: "Import", text: "Plan the import.", to: "claude" });
     await waitFor(() => e.home().working.length === 2 && e.home().working.every((w) => w.workingAt && w.activity), { label: "both working, with output" });
     const home = e.home();
@@ -27,17 +30,18 @@ test("Home shows the work running in several rooms: who, where, what, since when
       ["codex", "builder", "build", "Build the export", "working"],
     );
     assert.equal(byRoom[chat.id].agent, "claude");
-    assert.equal(byRoom[build.id].project, "repo");
-    assert.ok(byRoom[build.id].folder.endsWith("repo"));
-    // Both rooms work in the same folder: each says so.
-    assert.deepEqual(byRoom[build.id].shared.map((x) => x.id), [chat.id]);
+    assert.equal(byRoom[build.id].project, "other");
+    assert.ok(byRoom[build.id].folder.endsWith("other"));
+    // Another room in the same folder: it says so.
+    assert.deepEqual(byRoom[build.id].shared.map((x) => x.id), [quiet.id]);
+    assert.deepEqual(byRoom[chat.id].shared, []);
     // Its times, kept apart: started (preparing), started working, last said something.
     for (const w of home.working) {
       assert.ok(Date.parse(w.startedAt) <= Date.parse(w.workingAt));
       assert.ok(Date.parse(w.lastOutputAt) >= Date.parse(w.workingAt));
       assert.ok(w.activity.length > 0);
     }
-    assert.deepEqual(home.rooms, [], "every room is working");
+    assert.deepEqual(home.rooms.map((r) => r.id), [quiet.id], "every other room is working");
     assert.deepEqual(home.agents.find((a) => a.agent === "codex").working.map((w) => w.room), [build.id]);
   } finally {
     t.engine.shutdown();

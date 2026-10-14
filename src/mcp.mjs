@@ -66,10 +66,10 @@ const TOOLS = [
   {
     name: "toryo_desk",
     description:
-      "Desk-wide controls, across every room. pause: Pause everything (running turns and checks finish, nothing new starts). resume: undo that. hold / release: an agent (`target`: codex covers both headless Codex and the Codex app, codexapp the app only, claude…; `headless` with codex: headless Codex only). A release says what the usage guard still holds, with the toryo_guard arguments to pause that guard until its reset.",
+      "Desk-wide controls, across every room. pause: Pause everything (running turns and checks finish, nothing new starts). resume: undo that. hold / release: an agent (`target`: codex covers both headless Codex and the Codex app, codexapp the app only, claude…; `headless` with codex: headless Codex only). A release says what the usage guard still holds, with the toryo_guard arguments to pause that guard until its reset. use-folder / release-folder: you're using a project's folder yourself (an editor, the Codex app on its own), so Toryo starts nothing new in it until you release it (`project`: its id or name; the first project when left out).",
     inputSchema: {
       type: "object",
-      properties: { action: { type: "string", enum: ["pause", "resume", "hold", "release"] }, target: { type: "string" }, headless: { type: "boolean" } },
+      properties: { action: { type: "string", enum: ["pause", "resume", "hold", "release", "use-folder", "release-folder"] }, target: { type: "string" }, headless: { type: "boolean" }, project: { type: "string" } },
       required: ["action"],
       additionalProperties: false,
     },
@@ -194,7 +194,7 @@ export function runMcpServer(client = new ToryoClient()) {
             text = await client.plan(a.room, a.action, { question: a.question, from: a.from, checkers: a.checkers });
             break;
           case "toryo_desk":
-            text = await client.desk(a.action, { target: a.target, headless: Boolean(a.headless) });
+            text = await client.desk(a.action, { target: a.target, headless: Boolean(a.headless), project: a.project });
             break;
           case "toryo_guard": {
             const action = a.action ?? (a.rules || a.fiveHour != null || a.weekly != null || a.autoRelease != null || a.enabled != null ? "set" : "show");

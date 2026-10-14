@@ -111,9 +111,17 @@ try {
     throw new Error(`Timed out waiting for ${what}`);
   };
 
+  // A project of its own (a Git folder of its own): for each build (one builder per folder), and for a plan whose author
+  // writes while the history build is going (writers take turns in a folder).
+  const own = async (name) => {
+    const path = join(base, name.replace(/\W+/g, "-").toLowerCase());
+    execFileSync("git", ["init", "-q", path]);
+    return (await post("api/projects", { path, name, gates: [{ name: "Tests", command: "true" }] })).id;
+  };
   const build = await post("api/rooms", { projectId: "demo", mode: "build", task: "Build the history.", planPath: "docs/plans/demo.md", title: "History build", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
-  const chat = await post("api/rooms", { projectId: "demo", mode: "chat", members: ["codex"], text: "Pick a database for the history.", to: "codex", title: "Database chat" });
-  const plan = await post("api/rooms", { projectId: "demo", mode: "plan", topic: "The public API", members: ["codex", "claude"], title: "API plan" });
+  // The chat and planning rooms in folders of their own: nothing reads a folder while the history build writes there.
+  const chat = await post("api/rooms", { projectId: await own("Database"), mode: "chat", members: ["codex"], text: "Pick a database for the history.", to: "codex", title: "Database chat" });
+  const plan = await post("api/rooms", { projectId: await own("API"), mode: "plan", topic: "The public API", members: ["codex", "claude"], title: "API plan" });
   await until(async () => (await view(build.id)).live.length === 1 && (await view(build.id)).room.build?.approved?.length === 1, "the build's second slice");
   await until(async () => (await view(chat.id)).questions.length === 1, "the chat question");
   // A note with code and a quotation, which the bubble must keep readable.
@@ -125,7 +133,7 @@ try {
   await until(async () => (await view(plan.id)).questions.some((q) => q.kind === "plan-checkpoint"), "the planning checkpoint");
   // A plan that's ready, which you've talked over with Claude since: its card, and Claude's reply offering to send
   // that discussion to Codex.
-  const ready = await post("api/rooms", { projectId: "demo", mode: "plan", topic: "Export", members: ["codex", "claude"], title: "Export plan", planPath: "docs/plans/export.md" });
+  const ready = await post("api/rooms", { projectId: await own("Exports"), mode: "plan", topic: "Export", members: ["codex", "claude"], title: "Export plan", planPath: "docs/plans/export.md" });
   await until(async () => (await view(ready.id)).questions.some((q) => q.kind === "plan-checkpoint"), "the export plan's checkpoint");
   await post(`api/rooms/${ready.id}/control`, { action: "accept-checkpoint", questionId: (await view(ready.id)).questions[0].id, synthesizer: "codex" });
   await until(async () => (await view(ready.id)).questions.some((q) => q.kind === "plan-ready"), "the export plan ready");
@@ -133,12 +141,6 @@ try {
   await until(async () => (await view(ready.id)).live.length === 0 && (await view(ready.id)).events.some((e) => e.type === "turn" && /old export/.test(e.text ?? "")), "Claude's reply");
 
   // A room in every state a ring shows, and several rooms working at once.
-  // Each build in a project of its own (a Git folder of its own): one builder per folder.
-  const own = async (name) => {
-    const path = join(base, name.replace(/\W+/g, "-").toLowerCase());
-    execFileSync("git", ["init", "-q", path]);
-    return (await post("api/projects", { path, name, gates: [{ name: "Tests", command: "true" }] })).id;
-  };
   const room = async (body) => post("api/rooms", { mode: "build", members: ["codex", "claude"], builder: "codex", reviewer: "claude", ...body, projectId: body.projectId === "demo" ? await own(body.title) : body.projectId });
   const busy = [];
   for (let i = 1; i <= 4; i++) busy.push(await room({ projectId: "demo", task: `Busy build ${i}`, title: `Busy build ${i}` }));

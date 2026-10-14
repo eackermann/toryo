@@ -64,6 +64,8 @@ try {
     // Step 5u: a turn long enough to watch on the session's strip. Step 5v: a build whose checks it watches.
     { agent: "codex", match: "Strip turn", progress: "npm test", workMs: 3000, reply: "Done.\nTORYO: REPLY" },
     { agent: "codex", match: "Strip checks", reply: "Built.\nTORYO: REVIEW Slice 1: It | h.md" },
+    // Step 5y: a build that keeps its folder.
+    { agent: "codex", match: "Busy here", hang: true },
     // Step 5x: a turn that keeps a room busy, then the first message of a new session.
     { agent: "codex", match: "Hold this", hang: true },
     { agent: "codex", match: "Next sprint", workMs: 1200, reply: "Ready.\nTORYO: REPLY" },
@@ -222,6 +224,10 @@ try {
   assert.equal(row.text, "Codex app building");
   assert.equal(row.k, "work");
   assert.equal(row.mono, "AR");
+  // Done with the App room: its Codex app turn would never end here, and the app may be writing, so it would keep
+  // every other room's work out of the ui folder. Stop, then Stop again, lets that turn go.
+  const appRoomId = await page.$eval(".roomlink[aria-current=true]", (b) => b.dataset.room);
+  for (let i = 0; i < 2; i++) await fetch(`${url}api/rooms/${appRoomId}/control`, { method: "POST", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify({ action: "stop" }) });
 
   // 5. A question asked in chat: "needs you" comes first in the room list.
   const asked = await (await fetch(`${url}api/rooms`, { method: "POST", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify({ projectId: "ui", mode: "chat", members: ["codex"], text: "Ask me something.", to: "codex", title: "Asking room" }) })).json();
@@ -314,6 +320,9 @@ try {
   const planned = await (await fetch(`${url}api/rooms/${plan.id}`)).json();
   assert.equal(planned.room.plan.synthesizer, "claude");
   assert.match(planned.events.find((e) => e.kind === "decisions").text, /Ship a CLI too\? → no \(Claude's recommendation\)/);
+  // Done with it: its author (Claude) would be writing the plan here forever, keeping other rooms' turns out of the
+  // ui folder (nothing reads a folder while something writes in it).
+  await post(`api/rooms/${plan.id}/control`, { action: "stop" });
 
   // 5e. Each room keeps its own draft, tied to its own question: text written in one room never answers another's.
   const view = async (id) => (await fetch(`${url}api/rooms/${id}`)).json();
@@ -581,8 +590,8 @@ try {
   }
   await page.unroute(`**/api/rooms/${pending.id}/messages`);
 
-  // A project of its own, in a Git folder of its own: one builder per folder, and the App room's build (step 2) still
-  // has the ui project's folder (the app's turn there never ends).
+  // A project of its own, in a Git folder of its own: one builder per folder, and a build room started while another
+  // build there still waits for you (Slow room's question) can't start in that folder.
   const ownProject = async (name) => {
     const path = join(base, name);
     execFileSync("git", ["init", "-q", path]);
@@ -744,7 +753,8 @@ try {
   // 5q. A ready plan. Its card asks Claude to check it, once however fast you click; your talk with Claude since goes
   // to Codex, the author, from Claude's reply; the room keeps Re-check after changes. On a phone, the card's buttons
   // fill its width and are tall enough to tap.
-  const exports = await post("api/rooms", { projectId: "ui", mode: "plan", topic: "Exports", members: ["codex", "claude"], title: "Ready plan", planPath: "docs/plans/ui.md" });
+  // Its own project: the ui folder's other rooms (Slow room's build among them) leave its author no quiet moment.
+  const exports = await post("api/rooms", { projectId: await ownProject("exports"), mode: "plan", topic: "Exports", members: ["codex", "claude"], title: "Ready plan", planPath: "docs/plans/ui.md" });
   await openRoom(exports.id, "Ready plan");
   await page.waitForSelector("[data-checkpoint] [data-accept-checkpoint]");
   await page.selectOption("#cqWho", "codex");
@@ -1028,7 +1038,8 @@ try {
     await until(async () => !(await deskNow()).holds.length);
   }
   // A planning checkpoint: every recommendation as shown, with the author named; the full form stays in the room.
-  const homePlan = await post("api/rooms", { projectId: "ui", mode: "plan", topic: "Home plan", members: ["codex", "claude"], title: "Home plan" });
+  const homePlanProject = await ownProject("homeplan");
+  const homePlan = await post("api/rooms", { projectId: homePlanProject, mode: "plan", topic: "Home plan", members: ["codex", "claude"], title: "Home plan" });
   await until(async () => (await questions(homePlan.id)).some((q) => q.kind === "plan-checkpoint"));
   const [cp] = await questions(homePlan.id);
   const cpCard = `#home .ask[data-q="${cp.id}"]`;
@@ -1346,43 +1357,59 @@ try {
   assert.equal(await page.isVisible(`#log [data-id="${sprintReply.id}"]`), false, "session 2's reply is in its fold");
   await page.waitForFunction(() => /^Session 3 · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
 
-  // 5y. One builder per folder. The App room (step 2) is still building in the ui project's folder: a ready plan's
-  // Start building on Home is refused, naming it, and offers to wait; so does the new-room form. Waiting rooms say
-  // what they wait for, and the App room says who waits for its folder.
+  // 5y. One builder per folder. A build in the Home plan's folder: the ready plan's Start building on Home is refused,
+  // naming it, and offers to wait; so does the new-room form. Waiting rooms say what they wait for, and the room
+  // building says who waits for its folder.
   const errorsBeforeFolder = errors.length;
-  const appRoom = (await (await fetch(`${url}api/state`)).json()).rooms.find((r) => r.title === "App room");
-  assert.equal(appRoom.folder.holding, true);
+  const appRoom = await post("api/rooms", { projectId: homePlanProject, mode: "build", task: "Busy here", title: "Busy here", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  await until(async () => (await view(appRoom.id)).live.length === 1);
+  assert.equal((await (await fetch(`${url}api/state`)).json()).rooms.find((r) => r.id === appRoom.id).folder.holding, true);
   await until(async () => (await questions(homePlan.id)).some((q) => q.kind === "plan-ready"));
   const readyNow = (await questions(homePlan.id)).find((q) => q.kind === "plan-ready");
   await page.click("a.brand");
   const readyCard = `#home .ask[data-q="${readyNow.id}"]`;
   await page.click(`${readyCard} [data-act="accept"]`);
   await page.waitForSelector(`${readyCard} .err`);
-  assert.match(await page.innerText(`${readyCard} .err`), /^“App room” is building in this folder \(.+\), so this build can't start now\. You can have it wait/);
-  assert.match(await page.innerText(`${readyCard} [data-act="accept-wait"]`), /Wait for “App room”, then build/);
+  assert.match(await page.innerText(`${readyCard} .err`), /^“Busy here” is building in this folder \(.+\), so this build can't start now\. You can have it wait/);
+  assert.match(await page.innerText(`${readyCard} [data-act="accept-wait"]`), /Wait for “Busy here”, then build/);
   assert.equal((await questions(homePlan.id)).some((q) => q.id === readyNow.id), true, "the plan is still ready");
   await clearToasts();
   await page.click(`${readyCard} [data-act="accept-wait"]`);
   await toastSays(/The build waits for its folder/);
   await until(async () => (await view(homePlan.id)).room.mode === "build");
-  // The App room, building: who waits for its folder, on Home and in its header.
+  // The room building: who waits for its folder, on Home and in its header.
   await page.waitForFunction(() => /“Home plan” waits for this folder to start building\./.test(document.querySelector("#home")?.innerText ?? ""));
-  await openRoom(appRoom.id, "App room");
+  await openRoom(appRoom.id, "Busy here");
   await page.waitForFunction(() => /“Home plan” waits for this folder to start building\./.test(document.querySelector("#roomhead")?.innerText ?? ""));
   // The new-room form: refused, then waiting; the room it opens says what it waits for.
   await page.click("#newRoomBtn");
   await page.click(".modecard[data-mode=build]");
-  await page.selectOption("#nrProject", "ui");
+  await page.selectOption("#nrProject", homePlanProject);
   await page.fill("#nrTask", "Another build here");
   await page.fill("#nrTitle", "Waiting build");
   await page.click("#newRoomForm button[type=submit]");
   await page.waitForSelector("#newRoomForm .ns-busy:not([hidden]) [data-wait]");
-  assert.match(await page.innerText("#newRoomForm .ns-busy"), /^“App room” is building in this folder/);
+  assert.match(await page.innerText("#newRoomForm .ns-busy"), /^“Busy here” is building in this folder/);
   await page.click("#newRoomForm [data-wait]");
   await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Waiting build");
-  await page.waitForFunction(() => /Held\s*Waiting: “App room” is building in this folder/.test(document.querySelector("#roomhead")?.innerText ?? ""));
+  await page.waitForFunction(() => /Held\s*Waiting: “Busy here” is building in this folder/.test(document.querySelector("#roomhead")?.innerText ?? ""));
   // The two refusals, as the browser logs them, and nothing else.
   assert.deepEqual(errors.splice(errorsBeforeFolder).map((e) => /status of 409/.test(e)), [true, true]);
+
+  // 5z. A folder you're using yourself: from Home, Toryo starts nothing new there until you release it.
+  await page.click("a.brand");
+  await page.click('#home [data-act="folder-sheet"]');
+  await page.click(`#sheet .folderlist button[data-do="use-folder"][data-project="ui"]`);
+  await page.waitForSelector("#sheet", { state: "hidden" });
+  await page.waitForSelector('#home .deskbar button[data-do="release-folder"]');
+  assert.match(await page.innerText("#home .deskbar"), /You're using\s+\S+repo/);
+  const usedTurns = (await view(stripRoom.id)).events.filter((e) => e.type === "turn").length;
+  await post(`api/rooms/${stripRoom.id}/messages`, { text: "Next sprint, again.", to: "codex", answering: false });
+  await until(async () => (await (await fetch(`${url}api/state`)).json()).rooms.find((r) => r.id === stripRoom.id).blocked.some((b) => b.reasons.includes("you're using this folder")));
+  assert.equal((await view(stripRoom.id)).events.filter((e) => e.type === "turn").length, usedTurns, "nothing started there");
+  await page.click('#home .deskbar button[data-do="release-folder"]');
+  await until(async () => (await view(stripRoom.id)).events.filter((e) => e.type === "turn").length > usedTurns);
+  await page.waitForFunction(() => !/You're using/.test(document.querySelector("#home .deskbar")?.innerText ?? ""));
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");

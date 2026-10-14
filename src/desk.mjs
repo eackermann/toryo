@@ -8,7 +8,10 @@ import { normalizeGroups } from "./usage.mjs";
  * resumes a room you paused yourself. All of them let current turns finish; they only stop new ones starting.
  *
  *   { version: 2, paused: null | { at }, holds: { <key>: { agents: [...], at } }, groups: { <agent>: <allowance> },
- *     guard: { … } }   (the usage guard: src/guard.mjs)
+ *     guard: { … }, folders: { <folder>: { at, git, name } } }   (the usage guard: src/guard.mjs)
+ *
+ * `folders`: folders you said you're using (an editor, the Codex app on its own): Toryo starts nothing new in them
+ * until you release them. Added within version 2; a file without it has none.
  *
  * Version 1 had no guard: read, it gets the guard as the owner chose it for existing desks (on, at 90% of the 5-hour
  * and weekly windows, released at reset), with its one-time notice. A file Toryo can't read, or one from a newer
@@ -21,7 +24,7 @@ export const DESK_VERSION = 2;
 const FAMILIES = { codex: ["codex", "codexapp"] };
 
 export function defaultDesk() {
-  return { version: DESK_VERSION, paused: null, holds: {}, groups: normalizeGroups(null), guard: defaultGuard() };
+  return { version: DESK_VERSION, paused: null, holds: {}, groups: normalizeGroups(null), guard: defaultGuard(), folders: {} };
 }
 
 /**
@@ -89,5 +92,12 @@ export function parseDesk(raw, path, agents) {
   } catch (error) {
     return bad(error.message);
   }
-  return { desk: { version: DESK_VERSION, paused: raw.paused ? { at: raw.paused.at } : null, holds, groups, guard }, migrated: raw.version === 1 };
+  // Folders you're using: like a hold, one Toryo can't make sense of isn't dropped quietly.
+  const folders = {};
+  if (raw.folders != null && (typeof raw.folders !== "object" || Array.isArray(raw.folders))) return bad("“folders” isn't valid");
+  for (const [root, f] of Object.entries(raw.folders ?? {})) {
+    if (!root.startsWith("/") || !f || typeof f !== "object" || !iso(f.at)) return bad(`the folder “${root}” isn't valid`);
+    folders[root] = { at: f.at, git: Boolean(f.git), name: typeof f.name === "string" ? f.name : null };
+  }
+  return { desk: { version: DESK_VERSION, paused: raw.paused ? { at: raw.paused.at } : null, holds, groups, guard, folders }, migrated: raw.version === 1 };
 }

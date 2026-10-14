@@ -969,7 +969,8 @@ function upsertEvent(ev, { quiet = false } = {}) {
 function renderEvent(ev) {
   switch (ev.type) {
     case "system":
-      return el(`<div class="sys ${ev.level === "warn" ? "warn" : ""}" data-id="${ev.id}"><time>${clock(ev.at)}</time><span>${esc(ev.text)}</span></div>`);
+      // A note of files changed between a build's turns: the full list, folded, when the line names only some.
+      return el(`<div class="sys ${ev.level === "warn" ? "warn" : ""}" data-id="${ev.id}"><time>${clock(ev.at)}</time><span>${esc(ev.text)}${ev.writesFrom && ev.files?.length > 20 ? `<details><summary>All ${ev.files.length} files</summary><ul class="mono">${ev.files.map((f) => `<li>${esc(f)}</li>`).join("")}</ul></details>` : ""}</span></div>`);
     case "owner":
       return ownerEl(ev);
     case "turn":
@@ -2653,6 +2654,8 @@ function homeHero(h) {
   const desk = [];
   if (h.desk.problem) desk.push(`<span class="chip" data-k="bad">${ic("alert")}${esc(h.desk.problem.text)}</span>`);
   for (const hold of h.desk.holds) desk.push(`<span class="chip" data-k="held">${ic("lock")}You hold ${esc(hold.label)} ${homeBtn("Release", "desk", { do: "release", target: hold.key.replace(":headless", ""), headless: hold.key.endsWith(":headless") }, "linkbtn")}</span>`);
+  // Folders you said you're using: Toryo starts nothing new in them.
+  for (const f of h.desk.folders ?? []) desk.push(`<span class="chip" data-k="held">${ic("lock")}You're using <span class="mono">${esc(f.root)}</span> ${homeBtn("Release", "desk", { do: "release-folder", project: f.root }, "linkbtn")}</span>`);
   for (const g of h.desk.guard.holds) {
     const policy = h.desk.guard.policies.find((p) => p.group === g.group);
     const target = policy?.target ?? g.group;
@@ -2671,9 +2674,30 @@ function homeHero(h) {
     : "";
   return `<section class="hero" aria-labelledby="h-home">
     <div class="hero-text"><p class="eyebrow">Home · ${esc(new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }))}</p><h1 id="h-home">${headline}</h1>${h.desk.paused ? `<p class="lede">Rooms you paused yourself stay paused when you resume.</p>` : ""}</div>
-    <div class="deskbar"><div class="deskctl">${pause}${homeBtn(`${ic("lock")}Usage guard`, "guard-sheet", {}, "btn quiet")}</div>${desk.join("")}</div>
+    <div class="deskbar"><div class="deskctl">${pause}${homeBtn(`${ic("lock")}Usage guard`, "guard-sheet", {}, "btn quiet")}${homeBtn(`${ic("lock")}I'm using a folder…`, "folder-sheet", {}, "btn quiet")}</div>${desk.join("")}</div>
     ${notice}
   </section>`;
+}
+
+/**
+ * The folders you can say you're using yourself (an editor, the Codex app on its own): Toryo then starts nothing new
+ * in them until you release them. It can't see what you do there; it only keeps its own work out.
+ */
+function folderSheet() {
+  const folders = S.home?.desk?.folders ?? S.state?.desk?.folders ?? [];
+  openSheet(`${sheetHead("Folders", "I'm using a folder")}
+    <p class="hint" style="margin:0 0 12px">While you work in a folder yourself (in an editor, or with the Codex app on its own), Toryo starts nothing new in it, in any room. Turns already running there finish. Toryo can't see what you do: it only keeps its own work out until you release the folder.</p>
+    <ul class="ss-list folderlist">${S.state.config.projects
+      .map((p) => {
+        // The folder you're using that keeps Toryo out of this project (its own, or one around it): released by that
+        // folder itself, whatever the projects are called.
+        const f = folders.find((x) => x.projects?.includes(p.id)) ?? folders.find((x) => x.covers?.includes(p.id));
+        const action = f
+          ? `${f.projects?.includes(p.id) ? "" : `<span class="hint">You're using <span class="mono">${esc(f.root)}</span>, around it.</span> `}${homeBtn("Release", "desk", { do: "release-folder", project: f.root }, "btn small")}`
+          : homeBtn("I'm using it", "desk", { do: "use-folder", project: p.id }, "btn small");
+        return `<li><b>${esc(p.name)}</b> <span class="mono muted">${esc(p.path)}</span> ${action}</li>`;
+      })
+      .join("")}</ul>`);
 }
 
 /** What the desk said after you used one of its controls, with any way forward it offers (Release: the guard). */
@@ -2902,6 +2926,7 @@ async function homeAct(btn) {
     return setPart("result", "");
   }
   if (act === "guard-sheet") return guardSheet();
+  if (act === "folder-sheet") return folderSheet();
   if (card) {
     // One send at a time, and none from a question that has closed.
     if (S.homePending.has(qid)) return;
@@ -2966,7 +2991,7 @@ async function homeAct(btn) {
   // The desk's controls, as the terminal and MCP use them.
   const d = btn.dataset;
   const body =
-    act === "desk" ? (d.do === "pause" || d.do === "resume" ? { action: d.do } : { action: d.do, target: d.target, headless: d.headless === "true" })
+    act === "desk" ? (d.do === "pause" || d.do === "resume" ? { action: d.do } : d.do === "use-folder" || d.do === "release-folder" ? { action: d.do, project: d.project } : { action: d.do, target: d.target, headless: d.headless === "true" })
     : d.do === "guard-ok" ? { action: "guard-ok" }
     : d.do === "guard-all-off" ? { action: "guard", enabled: false }
     : d.do === "rule-off" ? { action: "guard", target: d.target, rules: { [d.window]: { enabled: false } } }
@@ -3267,6 +3292,11 @@ document.addEventListener("click", async (e) => {
       return loadRoom(id, { open: true });
     }
     if (hit("#home button[data-act]")) return homeAct(hit("#home button[data-act]"));
+    // The folders sheet's buttons: the desk's own control, then the sheet closes and Home says what the desk said.
+    if (hit("#sheet .folderlist button[data-act]")) {
+      const btn = hit("#sheet .folderlist button[data-act]");
+      return homeAct(btn).finally(() => closeSheet());
+    }
     if (hit("[data-session-list]")) return sessionSheet();
     if (hit("[data-show-session]")) {
       // The strip shows an earlier session, or the current one again.
