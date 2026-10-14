@@ -279,3 +279,22 @@ Later that day the owner added two more bugs to the same fix slice (Slice 17), s
 | Every result's text is kept, in order: the main answer first, any follow-up after it, marked as a follow-up. The status comes from the last status line, and the ledger reads the whole text. | Nothing the agent answered is lost. |
 | Check how the totals add up across results: in the sample, `total_cost_usd` looks cumulative but `usage` doesn't. | So the run's cost and tokens are right, counted once. |
 | Optional: the briefing could ask agents to stop their own background commands before their final answer. | Waiting for one cost 7 minutes here. |
+
+## 2026-10-14: A Fast switch for each agent
+
+The owner added a slice to the [Home and controls plan](plans/plan-a-home-view-for-foreman-and-desk-wi.md), as its own slice after the fix slice (Slice 17). Slice 18 was already built and in review when it came, so it's Slice 19, before the remaining worktree slices. Several agents have a fast mode: quicker answers in exchange for more of the owner's allowance. These are the owner's decisions.
+
+| Decision | Why |
+|---|---|
+| A *Fast* switch for each agent in a room's crew settings, with a desk-wide default. | The owner chooses where speed is worth the extra usage. |
+| It shows only where the agent and the model chosen for it support a fast mode, and it's off unless the owner turns it on. | Fast costs more of the allowance, so it's never on by surprise. |
+| Each turn records whether it actually ran fast. If the owner asked for fast and the agent says it's off or paused, the room says why, rather than quietly running at standard speed. | Asking for fast doesn't guarantee it. |
+| Whether a turn ran fast shows with the turn's usage. | So the owner can see what fast costs. |
+
+**What the owner found by hand on 14 Oct (outside any room), for the slice to build on:**
+
+- **Claude.** A headless `claude -p` run ignores the fast mode saved in the interactive settings: its `system/init` event says `"fast_mode_state":"off","fast_mode_disabled_reason":"sdk_opt_in_required"`. With `--settings '{"fastMode":true}'` it says `"fast_mode_state":"on"`, with no reason. The states are `off`, `cooldown` (paused after a rate limit) and `on`. The reasons include `extra_usage_disabled`, `model_not_allowed` and `not_first_party`.
+- **Codex (headless).** `service_tier` is a config key: `codex exec -c service_tier="fast"`. Codex's model list (`models_cache.json`) gives each model `"additional_speed_tiers":["fast"]` and `"service_tiers":[{"id":"priority","name":"Fast","description":"2x speed, increased usage"}]` (some models say 1.5x). `exec` accepted both `"fast"` and `"priority"`, but the session log doesn't record the tier, so it's not confirmed that a turn ran fast. The owner asked to check which value is right, and to read each model's tiers from that list rather than hard-code them.
+- **The Codex app.** It keeps the speed per thread (its log's `thread_settings_applied` event has `service_tier`), and Toryo can't set it through `codex queue`. Toryo shows the thread's current speed, read from the log, and says it's changed in the app.
+- **Cursor.** Fast versions are separate models in `agent models` (names ending in `-fast`). The owner left the choice open: the switch can pick the model's fast version when there is one, or just say that fast versions are in the model list.
+- **Grok.** Not checked yet: the slice finds out whether its CLI has a fast mode or fast models.

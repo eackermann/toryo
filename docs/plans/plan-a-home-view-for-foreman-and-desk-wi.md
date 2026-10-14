@@ -22,6 +22,7 @@ The core release provides:
 - Manual holds across rooms and automatic holds at usage thresholds, with release at reset.
 - Shared allowance tracking for headless Codex and the Codex app, as the owner believes they use the same account.
 - Persistent controls and explanations of every reason work cannot start.
+- A *Fast* switch for each agent, in a room's crew settings with a desk-wide default, shown only where the agent and its model support a fast mode, with each turn saying whether it actually ran fast.
 - The same operations through the HTTP API, CLI, and MCP tools.
 - One outstanding Toryo submission per Codex app thread, independently of optional turn caps.
 - A shared-folder guard after Home, followed by a Build-room choice between this folder (shared) and its own worktree.
@@ -292,9 +293,9 @@ On 13 October the owner asked for a timeline in the sticky bar at the top of the
 
 ## Reviewable slices
 
-Preserve the owner's delivery order and insert the newly requested small plan-review slice immediately after safe question targeting, so its buttons and re-check cycle use the same stale-question protection. The owner then added the design system and re-skin right after the app-thread boundary (13 Oct): the page takes its approved look before the Home slices build on it. Later the same day the owner asked for a timeline of each session's phases at the top of the room, and for a way to start a new session in a room, leaving where they go in the plan open. They come right after Home: Home completes the guard milestone the plan is built around, and the folder guard and worktrees after it are larger and don't depend on them. The sequence is usage observations; graceful holds and desk pause; the app-thread boundary; the design system and re-skin; safe question targeting; plan checks and changes; the usage guard with phone controls; Home overview; Home answers and buttons; the session timeline; new sessions; then the two shared-folder slices and worktrees. On 14 October the owner added two slices right after the third worktree slice (copied files and setup), the fix first: the Codex app's folder check, following an app turn that ended with an error, and Claude runs with more than one result (in that order); then earlier sessions, a time ruler, and zoom and pan on the session timeline. The remaining worktree slices follow them.
+Preserve the owner's delivery order and insert the newly requested small plan-review slice immediately after safe question targeting, so its buttons and re-check cycle use the same stale-question protection. The owner then added the design system and re-skin right after the app-thread boundary (13 Oct): the page takes its approved look before the Home slices build on it. Later the same day the owner asked for a timeline of each session's phases at the top of the room, and for a way to start a new session in a room, leaving where they go in the plan open. They come right after Home: Home completes the guard milestone the plan is built around, and the folder guard and worktrees after it are larger and don't depend on them. The sequence is usage observations; graceful holds and desk pause; the app-thread boundary; the design system and re-skin; safe question targeting; plan checks and changes; the usage guard with phone controls; Home overview; Home answers and buttons; the session timeline; new sessions; then the two shared-folder slices and worktrees. On 14 October the owner added two slices right after the third worktree slice (copied files and setup), the fix first: the Codex app's folder check, following an app turn that ended with an error, and Claude runs with more than one result (in that order); then earlier sessions, a time ruler, and zoom and pan on the session timeline. The same day the owner asked for a Fast switch for each agent, as its own slice after the fix slice; the session timeline slice was already built, so the Fast switch comes right after it. The remaining worktree slices follow them.
 
-There are twenty-two executable slices. Slice 4 re-skins the page with the approved design system. Slice 6 delivers the plan-review improvement early. The desk-control milestone is Slice 7 and core Home finishes at Slice 9. The session timeline is Slice 10 and new sessions Slice 11. The cheap one-builder guard is Slice 12; coordinating plan/chat writes and reviews is a separate Slice 13. Worktree foundations, the room's own worktree, and copied files and setup are Slices 14-16. Slice 17 is the owner's fix slice: the Codex app's folder check, following an app turn that ended with an error, and Claude runs with more than one result. Slice 18 adds earlier sessions, the time ruler, and zoom and pan to the session timeline. Project-wide check order, review, return, and cleanup of worktrees are Slices 19-22. Deferred features retain their reasoning in Later at the end, without numbered headings or completion gates for this release.
+There are twenty-three executable slices. Slice 4 re-skins the page with the approved design system. Slice 6 delivers the plan-review improvement early. The desk-control milestone is Slice 7 and core Home finishes at Slice 9. The session timeline is Slice 10 and new sessions Slice 11. The cheap one-builder guard is Slice 12; coordinating plan/chat writes and reviews is a separate Slice 13. Worktree foundations, the room's own worktree, and copied files and setup are Slices 14-16. Slice 17 is the owner's fix slice: the Codex app's folder check, following an app turn that ended with an error, and Claude runs with more than one result. Slice 18 adds earlier sessions, the time ruler, and zoom and pan to the session timeline. Slice 19 is the owner's Fast switch for each agent. Project-wide check order, review, return, and cleanup of worktrees are Slices 20-23. Deferred features retain their reasoning in Later at the end, without numbered headings or completion gates for this release.
 
 Run appropriate targeted tests while developing each slice, then the repository's required syntax and full-suite checks before its handoff. Re-read concurrent changes before editing. Each slice updates README only for behavior that actually ships and writes a review handoff in `docs/reviews/`. The graceful-policy foundation and the preparation/send boundary remain separate reviews.
 
@@ -480,7 +481,44 @@ The owner's fix slice (14 Oct; [the first note](../decisions.md#2026-10-14-follo
 
 **Done when.** The owner can look at any session's timeline at the top of the room, read real times off its ruler, and zoom into and pan along it, by pointer or keyboard, without the strip taking more room in the header.
 
-### Slice 19: Serialize project checks and expose room environment values
+### Slice 19: A Fast switch for each agent
+
+The owner's slice (14 Oct; [the record](../decisions.md#2026-10-14-a-fast-switch-for-each-agent)), with what the owner found by hand that day. Several agents have a fast mode: quicker answers in exchange for more of the owner's allowance.
+
+**Scope.**
+- **The switch.**
+  - **Where:** a *Fast* switch for each agent in the room's crew settings (on, off, or the desk's default), and a desk-wide default for each agent in Settings. Both are off unless the owner turns them on.
+  - **When it shows:** only where the agent and the model chosen for it support a fast mode. A room whose choice no longer applies (its model changed) says so, rather than dropping it silently.
+  - **Elsewhere:** the same settings through the API, the command line and MCP. The room's crew card says when an agent is set to fast.
+- **Claude.**
+  - **Asking:** a headless `claude -p` ignores the interactive setting (its init says `sdk_opt_in_required`). With fast on, Toryo passes `--settings '{"fastMode":true}'`.
+  - **What ran:** the turn records the init's `fast_mode_state` (`on`, `off` or `cooldown`) and `fast_mode_disabled_reason`.
+  - **Which models:** established before the switch is offered, from Claude Code's or Anthropic's own documentation of fast mode, and kept with Claude's model list in its adapter (where its models and effort levels already are), saying where it comes from. The switch shows only for those models. If no model's support can be established, Claude gets no switch, and the slice's handoff says so.
+  - **Refusals still count:** a supported model can still be refused on a turn (`extra_usage_disabled`, `cooldown`, `model_not_allowed`), and the turn says why (below).
+- **Codex (headless).**
+  - **Which models:** a model's speed tiers come from Codex's model list (`models_cache.json`: `additional_speed_tiers`, and `service_tiers` with their names and descriptions, such as *Fast, 2x speed, increased usage*), never hard-coded. The switch shows the tier's own name and description, and only for models that have one.
+  - **Asking:** with fast on, Toryo passes `-c service_tier="…"`. Which value is right (`fast` or `priority`, both accepted by `exec`) is settled from Codex's own documentation or configuration schema, without real turns.
+  - **What ran:** the session log doesn't record the tier, so a Codex turn says fast was asked for and that Codex doesn't confirm it, unless the slice finds where Codex does.
+- **The Codex app.** It keeps the speed per thread, and Toryo can't set it through `codex queue`. The room shows the thread's current speed, read from its log's `thread_settings_applied` (`service_tier`), and says it's changed in the app. A turn records the speed its thread had.
+- **Cursor.** Fast versions are separate models in `agent models` (names ending in `-fast`). Proposed (the owner left this open): the switch picks the chosen model's fast version when the list has one, and isn't offered for a model without one. The alternative the owner allowed is a note that fast versions are in the model list.
+- **Grok.** Find out whether its CLI has a fast mode or fast models (it isn't installed on the machine this plan was written on). With neither, no switch.
+- **Each turn says whether it ran fast.**
+  - **Recorded:** what was asked and what the agent reported.
+  - **When it didn't run fast:** if fast was asked for and the agent says it's off or paused (`cooldown`), the room says why, in plain words with the agent's reason, rather than quietly running at standard speed.
+  - **Shown:** with the turn's usage (*910 in · 40 out · $0.01 at API rates · fast*), so the owner can see what fast costs.
+- **Not part of it:** changing the Codex app thread's speed, and forecasting what fast will cost.
+
+**Verification.** Fake agents and fixtures only; no real Claude, Codex, Cursor or Grok session, and no Codex app queue or thread.
+- **Claude:** the switch shows only for the models established as supporting fast mode. The fake's init reports `on`, `off` with each reason, and `cooldown`. The flag is passed only when fast is on. The turn records the state, and asked-but-off says why in the room. Not asked: no flag, nothing said.
+- **Codex:** a fixture model list with and without speed tiers. The switch appears only for a model with a tier, under its own name. `-c service_tier` is passed only when fast is on, with the value the slice settles on.
+- **The Codex app:** a synthetic thread log with `thread_settings_applied`. The room shows the thread's speed, and the turn records it.
+- **Cursor:** a fake `agent models` list with a model and its `-fast` version, and a model without one.
+- **Settings:** the desk default and the room's choice (default, on, off) through the page, the API, the command line and MCP, kept across a restart.
+- **The page:** the switch where it applies and nowhere else, the usage line, light and dark, and no sideways scrolling at 320 and 390 pixels.
+
+**Done when.** The owner can turn fast on for an agent in a room, or for the whole desk, only where it can work. Each turn says whether it ran fast, and why not when fast was asked for. The Codex app thread's speed is visible.
+
+### Slice 20: Serialize project checks and expose room environment values
 
 **Scope.** Run setup and checks one at a time per project across its rooms/worktrees, unless a project setting explicitly enables parallel execution. Show which room is using the slot and queue other steps. Supply TORYO_ROOM_ID, TORYO_WORKSPACE_PATH, and a stable persisted TORYO_PORT_OFFSET to room commands. The project chooses whether to use the offset; it is not a port reservation. Managed dev servers, general resource declarations, and test-database naming belong to Later.
 
@@ -488,7 +526,7 @@ The owner's fix slice (14 Oct; [the first note](../decisions.md#2026-10-14-follo
 
 **Done when.** Project setup/check concurrency follows the explicit setting and every command receives its room context. The UI states that ports/databases still need project-specific handling instead of promising service isolation.
 
-### Slice 20: Review the full room contribution and preview return conflicts
+### Slice 21: Review the full room contribution and preview return conflicts
 
 **Scope.** Add final snapshot R, full B → R review, current-main snapshot M, and a three-way return preview computed outside main. Display both the room's contribution and the proposed destination changes, with complete large-text/binary access. Add stale-review/preview identities, conflict presentation, and regeneration after explicit isolated resolution. Use the same preview through UI, CLI, and MCP; this slice has no Apply mutation.
 
@@ -496,7 +534,7 @@ The owner's fix slice (14 Oct; [the first note](../decisions.md#2026-10-14-follo
 
 **Done when.** The owner can inspect the full contribution and all conflicts from phone or desktop without any write to main, with honest handling of binaries and large diffs.
 
-### Slice 21: Apply an approved preview as uncommitted changes
+### Slice 22: Apply an approved preview as uncommitted changes
 
 **Scope.** Add the explicit preview-bound Apply operation, destination reservation, final checks, worktree-only writes, durable backups/journal, and interrupted-apply recovery. Preserve main staging/HEAD and reject stale approvals before writes. Record delivery and subsequent contribution baselines to prevent duplicate application. Add no commit action; returning files remains a complete no-commit workflow. Do not restart or deploy anything.
 
@@ -504,7 +542,7 @@ The owner's fix slice (14 Oct; [the first note](../decisions.md#2026-10-14-follo
 
 **Done when.** Only an explicitly approved, current preview can change main, no-commit projects need no exception, conflicts leave main untouched, and failures show a recoverable, truthful file state rather than silent partial success.
 
-### Slice 22: Measure and clean up room worktrees
+### Slice 23: Measure and clean up room worktrees
 
 **Scope.** Add bounded asynchronous disk measurements, measured-at/partial states, and the room-delete choice to keep or remove its worktree/branch. Show unapplied work and optional branch commits before discard. Verify ownership, drain Toryo-managed turns/setup/checks, preserve history/apply receipts, and retain cleanup recovery records. Complete the phone, CLI, and MCP cleanup flows and document the full worktree workflow.
 
