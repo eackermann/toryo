@@ -1772,6 +1772,9 @@ const sharedThreadNote = (thread, roomId) => {
 };
 
 /** Choose the Codex app's thread for this room: when adding the app, or changing its thread while it's idle. */
+/** Where you said a Codex app thread really works ("" when you haven't). */
+const threadFolder = (thread) => S.state?.config?.agents?.codexapp?.threadFolders?.[thread] ?? "";
+
 async function appThreadSheet(adding) {
   const r = room();
   const threads = await appThreads();
@@ -1781,14 +1784,27 @@ async function appThreadSheet(adding) {
     <p class="hint" style="margin:0">The Codex app works in one of your app's threads. Each room has its own; changing a thread here doesn't affect other rooms.</p>
     <div class="field"><label for="tThread">Thread for this room</label><select id="tThread">${threadOptions(threads, current, threads.length ? "" : "No app threads found")}</select>
       <span class="hint" id="tShared">${sharedThreadNote(current, r.id)}</span></div>
+    <div class="field"><label for="tFolder">This thread works in (optional)</label><input type="text" id="tFolder" value="" placeholder="${esc(project()?.path ?? "/home/you/project")}">
+      <span class="hint">Only if the thread does its work somewhere other than the folder the app opened it in (running its commands through <span class="mono">wsl</span>, say). Toryo sends the thread nothing unless its folder is this room's: it checks this folder instead of the app's. Leave it empty to use the app's.</span></div>
     <div style="display:flex;gap:8px"><button class="btn primary" type="submit">${adding ? "Add" : "Use this thread"}</button><button class="btn" type="button" data-close>Cancel</button></div></form>`);
-  $("#tThread").addEventListener("change", (e) => ($("#tShared").innerHTML = sharedThreadNote(e.target.value, r.id)));
+  // The folder saved for the thread actually selected (the first listed when there's no default), changed only when
+  // you edit it: a saved folder counts in every room on that thread, so it's never cleared by an untouched form.
+  let edited = false;
+  $("#tFolder").value = threadFolder($("#tThread").value);
+  $("#tFolder").addEventListener("input", () => (edited = true));
+  $("#tThread").addEventListener("change", (e) => {
+    $("#tShared").innerHTML = sharedThreadNote(e.target.value, r.id);
+    if (!edited) $("#tFolder").value = threadFolder(e.target.value);
+  });
   $("#threadForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const thread = $("#tThread").value;
+    const folder = $("#tFolder").value.trim();
     try {
       if (adding) await api("POST", `/api/rooms/${r.id}/control`, { action: "members", members: [...r.crew.members, "codexapp"], appThread: thread });
-      else await api("POST", `/api/rooms/${r.id}/control`, { action: "app-thread", thread });
+      else if (thread !== r.sessions?.codexapp) await api("POST", `/api/rooms/${r.id}/control`, { action: "app-thread", thread });
+      // Where the thread really works: set or cleared only when you changed it.
+      if (edited && folder !== threadFolder(thread)) await api("POST", `/api/rooms/${r.id}/control`, { action: "app-folder", folder });
       closeSheet();
     } catch (error) {
       fail(error);

@@ -10,7 +10,7 @@ import { Engine } from "../src/engine.mjs";
 import { Snapshots } from "../src/snapshots.mjs";
 import { Store } from "../src/store.mjs";
 import { lockReason, undoWorktree } from "../src/worktrees.mjs";
-import { mcp, setup, turns, waitFor, withServer } from "./helpers.mjs";
+import { fakeCodexApp, mcp, setup, turns, waitFor, withServer } from "./helpers.mjs";
 
 const git = (dir, ...args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
 const commit = (dir, msg) => git(dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg);
@@ -416,45 +416,6 @@ test("links pointing outside are kept as links, and nothing is written through t
   }
 });
 
-/**
- * A stand-in Codex app (as in appthread.test.mjs): a codex.exe whose `queue` logs the thread and finishes the turn in
- * its session log at once, and the app's thread list (state_5.sqlite) with the folder each thread was opened in.
- */
-async function fakeApp(base, threads) {
-  const home = join(base, "codex-home");
-  const day = join(home, "sessions", "2026", "10", "14");
-  mkdirSync(day, { recursive: true });
-  for (const id of Object.keys(threads)) writeFileSync(join(day, `rollout-2026-10-14T00-00-00-${id}.jsonl`), "");
-  const log = join(base, "queued.log");
-  const exe = join(base, "codex.exe");
-  writeFileSync(
-    exe,
-    `#!/usr/bin/env node
-const fs = require("fs");
-const a = process.argv.slice(2);
-const thread = a[a.indexOf("--thread") + 1];
-const msg = a[a.indexOf("--message") + 1];
-fs.appendFileSync(${JSON.stringify(log)}, thread + "\\n");
-const lines = [{ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: msg }] } }, { type: "event_msg", payload: { type: "task_complete", last_agent_message: "Answered.\\nTORYO: REPLY" } }];
-const file = fs.readdirSync(${JSON.stringify(day)}).find((n) => n.includes(thread));
-fs.appendFileSync(${JSON.stringify(day)} + "/" + file, lines.map((l) => JSON.stringify(l)).join("\\n") + "\\n");
-`,
-  );
-  chmodSync(exe, 0o755);
-  const { DatabaseSync } = await import("node:sqlite");
-  const db = new DatabaseSync(join(home, "state_5.sqlite"));
-  db.exec("create table threads (id text, name text, preview text, cwd text, updated_at_ms integer, archived integer, source text)");
-  // A thread given no folder (undefined) has a session log but isn't in the list.
-  for (const [id, cwd] of Object.entries(threads)) if (cwd !== undefined) db.prepare("insert into threads values (?, ?, '', ?, 0, 0, 'vscode')").run(id, id, cwd);
-  db.close();
-  const move = (id, cwd) => {
-    const d = new DatabaseSync(join(home, "state_5.sqlite"));
-    d.prepare("update threads set cwd = ? where id = ?").run(cwd, id);
-    d.close();
-  };
-  return { cfg: { exe, codexHome: home, openThread: "never", pollMs: 50 }, queued: () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []), move };
-}
-
 test("the Codex app stays in the project's folder, and gets nothing when its thread works in another folder", async () => {
   const t = await setup([], { engine: { folderDefault: "own" } });
   // The thread's folder is a WSL path from Windows: Toryo runs in that distribution here, whatever this machine is.
@@ -465,7 +426,7 @@ test("the Codex app stays in the project's folder, and gets nothing when its thr
     const elsewhere = join(t.base, "elsewhere");
     mkdirSync(elsewhere);
     // The app records a WSL folder the Windows way.
-    const app = await fakeApp(t.base, { [thread]: `\\\\wsl.localhost\\Ubuntu${elsewhere.replace(/\//g, "\\")}` });
+    const app = await fakeCodexApp(t.base, { [thread]: `\\\\wsl.localhost\\Ubuntu${elsewhere.replace(/\//g, "\\")}` });
     const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: { ...ADAPTERS.codexapp, detect: async () => ({ installed: true }), currentLimits: () => null } } });
     await e.init({ detect: false });
     e.updateConfig({ agents: { codexapp: app.cfg } });
@@ -476,7 +437,7 @@ test("the Codex app stays in the project's folder, and gets nothing when its thr
     // Tried twice (a failed turn is tried once more), then the room asks.
     await waitFor(() => !e.running.size && e.roomView(chat.id).questions.some((x) => x.kind === "error"), { label: "asked to retry" });
     const failedTurn = turns(e, chat.id).find((x) => x.state === "failed");
-    assert.match(failedTurn.error, new RegExp(`works in ${elsewhere}, not in this room's folder`));
+    assert.match(failedTurn.error, new RegExp(`records this thread's folder as .*\\(${elsewhere} here\\), not this room's folder \\(${t.repo}\\)\\. Toryo sent it nothing\\. If this thread really works in this room's folder`));
     assert.deepEqual(app.queued(), [], "nothing was sent to the app");
     // A folder this machine doesn't have can't be checked: refused too.
     app.move(thread, join(t.base, "not-here"));
@@ -504,11 +465,11 @@ test("a thread whose folder Toryo can't tell gets nothing: not listed, no folder
   try {
     const listed = "0aaaaaaa-0000-0000-0000-00000000000a";
     const unlisted = "0bbbbbbb-0000-0000-0000-00000000000b";
-    const app = await fakeApp(t.base, { [listed]: t.repo, [unlisted]: undefined });
+    const app = await fakeCodexApp(t.base, { [listed]: t.repo, [unlisted]: undefined });
     const send = async (thread) => {
       const turnDir = mkdtempSync(join(t.base, "turn-"));
       // The engine's check: the room's folder only.
-      return ADAPTERS.codexapp.run({ cfg: { ...app.cfg, thread }, prompt: "Hi.", sessionId: thread, turnDir, folderProblem: (p) => (p === t.repo ? null : `works in ${p}`), timeoutMs: 20_000 });
+      return ADAPTERS.codexapp.run({ cfg: { ...app.cfg, thread }, prompt: "Hi.", sessionId: thread, turnDir, folderProblem: (w) => (w.reason ? `${w.reason}. Toryo sent it nothing.` : w.path === t.repo ? null : `works in ${w.path}. Toryo sent it nothing.`), timeoutMs: 20_000 });
     };
     const refused = async (thread, why) => {
       const r = await send(thread);

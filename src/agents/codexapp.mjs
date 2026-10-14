@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sleep } from "../util.mjs";
 import { latestRateLimits, lineReader, parseRateLimits, scanBack } from "./logtail.mjs";
+import { stripStatus } from "../../web/status.js";
 
 /**
  * EXPERIMENTAL. Your Codex desktop app's own thread as a crew member, so the
@@ -147,7 +148,8 @@ export async function listAppThreads(cfg = {}) {
 /**
  * A folder as the app records it, as a path here: { path } or { reason }. A WSL path from Windows
  * (\\\\wsl.localhost\\<distro>\\…, \\\\wsl$\\<distro>\\…) is a path here only in this WSL distribution (`distro`); a Windows drive
- * (C:\\…) is /mnt/c/…; a path that's already one stays.
+ * (C:\\…) is /mnt/c/…; a path that's already one stays. Windows' long-path forms (\\\\?\\C:\\…, \\\\?\\UNC\\…, and \\\\.\\C:\\…)
+ * are the same folders.
  */
 export function localFolder(folder, { distro = process.env.WSL_DISTRO_NAME } = {}) {
   const f = String(folder ?? "").trim();
@@ -159,12 +161,15 @@ export function localFolder(folder, { distro = process.env.WSL_DISTRO_NAME } = {
     if (wsl[1].toLowerCase() !== distro.toLowerCase()) return { reason: `the thread's folder (${f}) is in another WSL distribution (${wsl[1]}; Toryo runs in ${distro})` };
     return { path: (wsl[2] ?? "\\").replace(/\\/g, "/") };
   }
-  const drive = f.match(/^([a-z]):[\\/](.*)$/i);
+  const drive = f.replace(/^\\\\[?.]\\(?=[a-z]:)/i, "").match(/^([a-z]):[\\/](.*)$/i);
   if (drive) return { path: `/mnt/${drive[1].toLowerCase()}/${drive[2].replace(/\\/g, "/")}`.replace(/\/$/, "") };
   return { reason: `the thread's folder (${f}) isn't a path Toryo can find here` };
 }
 
-/** The folder a thread works in (it was opened in), as a path here: { path } or { reason } it can't be told. */
+/**
+ * The folder a thread was opened in, as the app records it (`recorded`), and as a path here: { path, recorded } or
+ * { reason, recorded? } when it can't be told.
+ */
 async function threadFolderIn(home, thread) {
   let rows;
   try {
@@ -173,7 +178,23 @@ async function threadFolderIn(home, thread) {
     return { reason: `Toryo couldn't read the Codex app's list of threads (${String(error?.message ?? error).split("\n")[0]})` };
   }
   if (!rows.length) return { reason: "the Codex app doesn't list this thread" };
-  return localFolder(rows[0].cwd);
+  return { ...localFolder(rows[0].cwd), recorded: rows[0].cwd ?? null };
+}
+
+/** A message someone sent in a thread (the app logs it both ways). */
+const isUserMessage = (ev) => (ev.type === "response_item" && ev.payload?.type === "message" && ev.payload?.role === "user") || (ev.type === "event_msg" && ev.payload?.type === "user_message");
+
+/** What the app had written before its turn ended with an error: shown as that, without its status line. */
+function partialNote(text) {
+  const partial = stripStatus(String(text ?? "")).replace(/\s+/g, " ").trim();
+  return partial ? `. What it had written before that, which isn't taken as its answer: “${partial.length > 300 ? `${partial.slice(0, 300)}…` : partial}”` : "";
+}
+
+/** The error a `task_complete` carries, in words: its message and `codex_error_info`. */
+function appError(error) {
+  const message = typeof error === "string" ? error : (error?.message ?? "no message");
+  const info = typeof error === "object" ? error?.codex_error_info : null;
+  return `${String(message).trim()}${info ? ` (${typeof info === "string" ? info : JSON.stringify(info)})` : ""}`;
 }
 
 /** The name the app shows for a thread (or the start of its first message). */
@@ -230,13 +251,13 @@ export const codexapp = {
     if (!exe || !home || !thread) return { text: "", error: "The Codex app isn't set up: choose a thread for this room." };
     const rollout = rolloutFor(home, thread);
     if (!rollout) return { text: "", error: `Can't find the Codex app thread ${thread}.` };
-    // The thread works in the folder it was opened in, whatever Toryo asks: it gets a message only once that folder
-    // is known to be the room's (`folderProblem(path)` says why not, or null). Not known is never taken for the same.
+    // The thread works in a folder of its own, whatever Toryo asks: it gets a message only once that folder is known
+    // to be the room's (`folderProblem(where)` says why not, or null). Not known is never taken for the same. Where
+    // you said the thread really works (`cfg.threadFolders[thread]`, set only by you) counts over what the app records.
     if (!attach && folderProblem) {
-      const where = await threadFolderIn(home, thread);
-      const problem = where.reason
-        ? `Toryo can't tell which folder this room's Codex app thread works in: ${where.reason}. Toryo sent it nothing. Choose a thread opened in this room's folder (the room's settings), then retry.`
-        : folderProblem(where.path);
+      const set = cfg.threadFolders?.[thread];
+      const where = set ? { path: set, set: true } : await threadFolderIn(home, thread);
+      const problem = folderProblem(where);
       if (problem) return { text: "", error: problem };
     }
 
@@ -302,6 +323,9 @@ export const codexapp = {
     let stopNoted = false;
     let lateNoted = false;
     let limits = null;
+    // Following again goes past a turn the app ended with an error: the app can resume the same work later as a new
+    // turn in the thread (no new message), and that turn's reply is this one's (see `failed`).
+    let failed = null;
     while (true) {
       if (abandon?.aborted || signal?.reason === "shutdown") return { text: "", sessionId: thread, aborted: true };
       if (signal?.aborted && !stopNoted) {
@@ -362,8 +386,23 @@ export const codexapp = {
           } else if (ev.type === "response_item" && p.type === "message" && p.role === "assistant") {
             const t = (p.content ?? []).map((c) => c.text ?? "").join("");
             if (t.trim()) onActivity?.({ kind: "say", text: t });
+          } else if (failed && isUserMessage(ev) && !line.includes(marker)) {
+            // Someone else's message after the failed ending (before the work was resumed, or during it): the thread
+            // moved on, and no reply from here on is this turn's.
+            return { text: "", sessionId: thread, limits, error: `After the Codex app ended this turn with an error (${failed}), its thread moved on to another message, not Toryo's, so Toryo doesn't take that reply for this turn.` };
+          } else if (failed && ev.type === "event_msg" && p.type === "task_started") {
+            // The same work resumed. `failed` stays until its reply: a message of someone else's before then still counts.
+            onActivity?.({ kind: "say", text: "The Codex app resumed the work in this thread. Toryo follows it." });
           } else if (ev.type === "event_msg" && p.type === "task_complete") {
-            return { text: p.last_agent_message ?? "", sessionId: thread, limits };
+            const text = p.last_agent_message ?? "";
+            // An ending with an error is that error, never an empty message, and never an answer, whatever text came
+            // with it (that's only what the app had written so far, so its status line is never a verdict).
+            const error = p.error ? appError(p.error) : null;
+            if (!error) return { text, sessionId: thread, limits };
+            // The first time, the turn ends with it. Following it again, keep watching for the app to resume the work.
+            if (!attach) return { text: "", sessionId: thread, limits, error: `The Codex app ended its turn with an error: ${error}${partialNote(text)}` };
+            failed = error;
+            onActivity?.({ kind: "warn", text: `The Codex app ended this turn with an error (${error}). Toryo keeps following the thread: when the work is resumed there, Toryo takes its reply.` });
           }
         }
       }

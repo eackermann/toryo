@@ -20,7 +20,8 @@
  * fails too (`fail` with `rateLimit`), as a real turn can report it and then fail. For Codex, `codexUsage`
  * ({ primary, secondary }, as Codex logs them) is written to the session log under CODEX_HOME, where Toryo
  * reads Codex's usage. `sh` (a command or a list) runs shell commands in the working folder, each one's outcome
- * noted in the reply. The log records each call's working folder (`cwd`).
+ * noted in the reply. The log records each call's working folder (`cwd`). For Claude, `followUp` adds a later answer
+ * in the same run (a second result, after a background command's notice).
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -182,6 +183,15 @@ function emit() {
     for (const info of events) out({ type: "rate_limit_event", rate_limit_info: info });
     out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "git status" } }] } });
     out({ type: "assistant", message: { content: [{ type: "text", text: reply }] } });
-    out({ type: "result", subtype: "success", is_error: false, result: reply, session_id: session, usage: { input_tokens: 10, cache_read_input_tokens: 900, output_tokens: 40 }, total_cost_usd: 0.01 });
+    out({ type: "result", subtype: "success", is_error: false, result: reply, session_id: session, usage: { input_tokens: 10, cache_read_input_tokens: 900, output_tokens: 40 }, total_cost_usd: 0.01, num_turns: 3 });
+    // `followUp`: a later answer in the same run, as when a background command's notice wakes Claude after its answer.
+    // (Claude's cost is the run's so far; its tokens are the answer's own.)
+    if (rule?.followUp != null) {
+      out({ type: "system", subtype: "task_updated", task_id: "T1", patch: { status: "killed" } });
+      out({ type: "system", subtype: "task_notification", task_id: "T1", status: "stopped", summary: "A background command stopped." });
+      out({ type: "system", subtype: "init", session_id: session });
+      out({ type: "assistant", message: { content: [{ type: "text", text: rule.followUp }] } });
+      out({ type: "result", subtype: "success", is_error: false, result: rule.followUp, session_id: session, usage: { input_tokens: 5, cache_read_input_tokens: 100, output_tokens: 7 }, total_cost_usd: 0.015, num_turns: 1 });
+    }
   }
 }

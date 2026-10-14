@@ -120,7 +120,7 @@ export function preamble({ agentLabel, others, project, workspace = null }) {
     "Messages from the owner and the other agents arrive in your prompt under “Since your last turn”. Your final message is forwarded to them verbatim, so write it for them: concrete and self-contained, with file paths and line numbers where they help.",
     workspace ? worktreeBrief(workspace) : `Repository: ${project.path}. Follow its own conventions (CLAUDE.md, AGENTS.md and similar).`,
     `Decisions: when the owner decides something, or the crew agrees on something durable, record it in the repository. ${project.decisions || DEFAULT_DECISIONS} Never record something as decided that the owner has not decided.`,
-    "End every turn with exactly one status line, chosen from the ones your prompt allows: `TORYO: <STATUS> <optional detail>`.",
+    "End every turn with exactly one status line, chosen from the ones your prompt allows: `TORYO: <STATUS> <optional detail>`. Before your final message, stop any background commands you started (watchers, servers), so your answer ends the turn.",
     project.rules ? `House rules from the owner:\n${project.rules}` : "",
   ]
     .filter(Boolean)

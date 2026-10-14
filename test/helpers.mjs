@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -134,4 +134,46 @@ export function mcp(home) {
     },
     close: () => child.kill(),
   };
+}
+
+/**
+ * A stand-in Codex app: a codex.exe whose `queue` logs the thread and writes Toryo's message into the thread's session
+ * log, followed by `after` (log entries; by default the turn finishing at once with "Answered."), and the app's thread
+ * list (state_5.sqlite) with the folder each thread was opened in (undefined: a session log, but not in the list).
+ * `append(thread, entries)` writes more into a thread's log, as the app would; `move(thread, folder)` changes its folder.
+ */
+export async function fakeCodexApp(base, threads, { after = [{ type: "event_msg", payload: { type: "task_complete", last_agent_message: "Answered.\nTORYO: REPLY" } }] } = {}) {
+  const home = join(base, "codex-home");
+  const day = join(home, "sessions", "2026", "10", "14");
+  mkdirSync(day, { recursive: true });
+  const rollout = (id) => join(day, `rollout-2026-10-14T00-00-00-${id}.jsonl`);
+  for (const id of Object.keys(threads)) writeFileSync(rollout(id), "");
+  const log = join(base, "queued.log");
+  const exe = join(base, "codex.exe");
+  writeFileSync(
+    exe,
+    `#!/usr/bin/env node
+const fs = require("fs");
+const a = process.argv.slice(2);
+const thread = a[a.indexOf("--thread") + 1];
+const msg = a[a.indexOf("--message") + 1];
+fs.appendFileSync(${JSON.stringify(log)}, thread + "\\n");
+const lines = [{ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: msg }] } }, ...${JSON.stringify(after)}];
+const file = fs.readdirSync(${JSON.stringify(day)}).find((n) => n.includes(thread));
+fs.appendFileSync(${JSON.stringify(day)} + "/" + file, lines.map((l) => JSON.stringify(l)).join("\\n") + "\\n");
+`,
+  );
+  chmodSync(exe, 0o755);
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(join(home, "state_5.sqlite"));
+  db.exec("create table threads (id text, name text, preview text, cwd text, updated_at_ms integer, archived integer, source text)");
+  for (const [id, cwd] of Object.entries(threads)) if (cwd !== undefined) db.prepare("insert into threads values (?, ?, '', ?, 0, 0, 'vscode')").run(id, id, cwd);
+  db.close();
+  const move = (id, cwd) => {
+    const d = new DatabaseSync(join(home, "state_5.sqlite"));
+    d.prepare("update threads set cwd = ? where id = ?").run(cwd, id);
+    d.close();
+  };
+  const append = (id, entries) => appendFileSync(rollout(id), entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  return { cfg: { exe, codexHome: home, openThread: "never", pollMs: 50 }, queued: () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []), move, append, rollout };
 }

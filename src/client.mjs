@@ -351,6 +351,21 @@ export class ToryoClient {
     return lines.join("\n");
   }
 
+  /**
+   * Where a room's Codex app thread really works (`toryo app-folder`, `toryo_app_folder`): shown, set (`folder`), or
+   * cleared (`clear`), so the folder check compares it rather than the folder the app records.
+   */
+  async appFolder(ref, { folder, clear = false } = {}) {
+    const r = await this.resolveRoom(ref);
+    if (folder || clear) await this.call("POST", `/api/rooms/${r.id}/control`, { action: "app-folder", folder: clear ? "" : folder });
+    const { rooms } = await this.state();
+    const now = rooms.find((x) => x.id === r.id);
+    if (!now?.appThread) return `“${r.title}” has no Codex app thread.`;
+    return now.appThreadFolder
+      ? `“${r.title}”: its Codex app thread works in ${now.appThreadFolder} (you said so); Toryo checks that folder before sending it anything.`
+      : `“${r.title}”: Toryo checks the folder the Codex app records for its thread. If the thread really works elsewhere: toryo app-folder ${r.id} /path/to/folder`;
+  }
+
   async control(ref, action) {
     const r = await this.resolveRoom(ref);
     await this.call("POST", `/api/rooms/${r.id}/control`, { action });

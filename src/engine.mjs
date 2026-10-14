@@ -1111,6 +1111,8 @@ export class Engine extends EventEmitter {
       // Who is doing what right now, for the room list.
       working: this.#runningIn(room).map((r) => ({ agent: r.agent, kind: r.req.kind })),
       appThread: room.crew.members.includes("codexapp") ? room.sessions?.codexapp ?? null : null,
+      // Where you said that thread really works (null: the folder the app records counts).
+      appThreadFolder: room.crew.members.includes("codexapp") ? this.config.agents.codexapp?.threadFolders?.[room.sessions?.codexapp] ?? null : null,
       // Queued work that desk-wide controls hold up, and why.
       blocked: [...this.#heldUp(room)].map(([q, reasons]) => ({ agent: q.agent, kind: q.kind, reasons })),
       // Paused (or stopped) and held, apart from the status: a question waiting makes the status "waiting", and the
@@ -2167,6 +2169,37 @@ export class Engine extends EventEmitter {
         if (!members.includes(room.crew.builder)) room.crew.builder = members[0];
         if (!members.includes(room.crew.reviewer)) room.crew.reviewer = members.find((m) => m !== room.crew.builder) ?? members[0];
         this.#system(room, `Crew: ${members.map((m) => this.label(m)).join(", ")}.`);
+        break;
+      }
+      case "app-folder": {
+        // Where this room's Codex app thread really works (set only by you; never guessed): the folder check compares
+        // it, not the folder the app records. Empty: back to the app's.
+        if (!room.crew.members.includes("codexapp")) throw new UserError("The Codex app isn't in this room.");
+        const thread = room.sessions?.codexapp;
+        if (!thread) throw new UserError("Choose the Codex app thread for this room first.");
+        const folder = String(args.folder ?? "").trim();
+        const map = { ...(this.config.agents.codexapp?.threadFolders ?? {}) };
+        if (!folder) delete map[thread];
+        else {
+          if (!isAbsolute(folder)) throw new UserError("Give the folder's absolute path, as it is on this machine (/home/you/project).");
+          let real;
+          try {
+            real = realpathSync(folder);
+          } catch {
+            throw new UserError(`No folder at ${folder}.`);
+          }
+          if (!statSync(real).isDirectory()) throw new UserError(`${folder} isn't a folder.`);
+          map[thread] = real;
+        }
+        this.config.agents.codexapp = { ...this.config.agents.codexapp, threadFolders: map };
+        this.store.saveConfig(this.config);
+        this.emit("state");
+        this.#system(
+          room,
+          folder
+            ? `You said this room's Codex app thread works in ${map[thread]}. Toryo checks that folder, not the one the app records, before sending it anything (in every room using this thread).`
+            : "Toryo checks the folder the Codex app records for this room's thread again.",
+        );
         break;
       }
       case "app-thread": {
@@ -3292,7 +3325,7 @@ export class Engine extends EventEmitter {
     this.#wait(room, {
       kind: "app-lost",
       from: "codexapp",
-      question: `Toryo lost track of the Codex app's turn (${firstLine(ev?.error ?? "unknown error", 200)}). It may still be working in the app, so Toryo sends it nothing else until you decide.`,
+      question: `${/^The Codex app ended its turn with an error/.test(ev?.error ?? "") ? firstLine(ev.error, 300).replace(/\.?$/, ".") : `Toryo lost track of the Codex app's turn (${firstLine(ev?.error ?? "unknown error", 200)}).`} It may still be working in the app, so Toryo sends it nothing else until you decide. If you resume that work in the app (in the same thread, without a new message), then choose “Follow it again”: Toryo picks up the resumed turn's reply.`,
       recommendation: "Follow it again",
     });
   }
@@ -4620,16 +4653,26 @@ export class Engine extends EventEmitter {
   }
 
   /**
-   * A Codex app thread works in the folder it was opened in (`where`, as the app records it, as a path here), whatever
-   * Toryo asks: a room's message goes to it only when that's the room's folder (the same Git working tree, or one
-   * folder inside the other). Why not, or null. A folder this machine doesn't have can't be checked, so it's refused.
+   * A Codex app thread works in a folder of its own, whatever Toryo asks: a room's message goes to it only when that's
+   * the room's folder (the same Git working tree, or one folder inside the other). `where`: the folder you said the
+   * thread really works in ({ path, set }), or the one the app records ({ path, recorded }, or { reason } when it can't
+   * be told). Why not, saying what the app recorded, what the room expects and how to tell Toryo; or null.
    */
   #appFolderProblem(room, where, cwd) {
-    if (!existsSync(where)) return `This room's Codex app thread works in ${where}, which isn't a folder on this machine, so Toryo can't check it's this room's folder (${cwd}). Toryo sent it nothing. Choose a thread opened in this room's folder (the room's settings), then retry.`;
-    const theirs = this.#folderOf({ path: where });
+    const how = `If this thread really works in this room's folder (running its commands there through wsl, say), tell Toryo once: “This thread works in” in the room's Codex app thread setting, toryo app-folder ${room.id} "${cwd}", or MCP toryo_app_folder. Otherwise choose a thread opened in this folder.`;
+    const yours = `Change it in the room's Codex app thread setting (or toryo app-folder ${room.id}), or choose another thread.`;
+    if (where.reason) return `Toryo can't tell which folder this room's Codex app thread works in: ${where.reason}. This room works in ${cwd}. Toryo sent it nothing. ${how}`;
+    const recorded = where.recorded && where.recorded !== where.path ? `${where.recorded} (${where.path} here)` : where.path;
+    if (!existsSync(where.path))
+      return where.set
+        ? `You said this room's Codex app thread works in ${where.path}, which isn't a folder on this machine. This room works in ${cwd}. Toryo sent it nothing. ${yours}`
+        : `The Codex app records this thread's folder as ${recorded}, which isn't a folder on this machine, so Toryo can't check it's this room's folder (${cwd}). Toryo sent it nothing. ${how}`;
+    const theirs = this.#folderOf({ path: where.path });
     const ours = this.#roomFolder(room);
     if (ours && room.workspace?.kind !== "worktree" && this.#sameFolder(theirs, ours)) return null;
-    return `This room's Codex app thread works in ${where}, not in this room's folder (${cwd}). Toryo sent it nothing. Choose a thread opened in this folder (the room's settings), then retry.`;
+    return where.set
+      ? `You said this room's Codex app thread works in ${where.path}, not in this room's folder (${cwd}). Toryo sent it nothing. ${yours}`
+      : `The Codex app records this thread's folder as ${recorded}, not this room's folder (${cwd}). Toryo sent it nothing. ${how}`;
   }
 
   /** A snapshot of the room's workspace for a turn. One that can't be taken is said in the room, once per reason. */

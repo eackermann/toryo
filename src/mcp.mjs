@@ -118,6 +118,16 @@ const TOOLS = [
     },
   },
   {
+    name: "toryo_app_folder",
+    description:
+      "Where a room's Codex app thread really works. Toryo sends the thread nothing unless its folder is the room's; by default that's the folder the app records for the thread. A thread that does its work elsewhere (running its commands through wsl in the room's folder, say) passes once you set the folder it really works in. Shows it; folder sets it; clear goes back to the app's.",
+    inputSchema: {
+      type: "object",
+      properties: { room: { type: "string", description: "Room id or part of its title; defaults to the most recent room" }, folder: { type: "string", description: "Absolute path on this machine" }, clear: { type: "boolean" } },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "toryo_control",
     description: "Pause, resume or stop one room. (Pause everything, across rooms, is toryo_desk.)",
     inputSchema: {
@@ -236,6 +246,9 @@ export function runMcpServer(client = new ToryoClient()) {
           }
           case "toryo_control":
             text = await client.control(a.room, a.action);
+            break;
+          case "toryo_app_folder":
+            text = await client.appFolder(a.room, { folder: a.folder, clear: Boolean(a.clear) });
             break;
           case "toryo_setup":
             text = await client.setupText(a.room, { retry: Boolean(a.retry) });

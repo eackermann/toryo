@@ -80,6 +80,9 @@ From any terminal (or an agent) while Toryo runs
                                 what a room's own worktree gets: files copied in (only ones Git ignores; names only
                                 are shown) and a setup command run there before its first turn
   toryo setup [room] [--retry]  a worktree's setup: where it stands and what it printed; --retry runs it again
+  toryo app-folder [room] [/path] [--clear]
+                                where a room's Codex app thread really works (if not the folder the app opened it in):
+                                Toryo checks that folder before sending the thread anything
   toryo mcp                   MCP server for Claude Code / Codex (phone access through their apps)
   toryo doctor                which agent CLIs Toryo can find
 
@@ -190,6 +193,14 @@ try {
       const mode = modes.includes(rest[0]) ? rest.shift() : undefined;
       const str = (n) => (typeof flag(n, null) === "string" ? flag(n, null) : undefined);
       console.log(await client.newSession(ref, { keepMemory: Boolean(flag("keep-memory", false)), mode, text: rest.join(" "), planPath: str("plan"), builder: str("builder"), reviewer: str("reviewer"), wait: Boolean(flag("wait", false)), folder: folderFlag() }));
+      process.exit(0);
+    }
+    case "app-folder": {
+      // Where a room's Codex app thread really works: toryo app-folder [room] [/path] [--clear].
+      const rest = positional.slice(1);
+      const folder = rest.find((x) => x.startsWith("/"));
+      const ref = rest.find((x) => !x.startsWith("/")) ?? roomArg();
+      console.log(await client.appFolder(ref, { folder, clear: Boolean(flag("clear", false)) }));
       process.exit(0);
     }
     case "setup": {

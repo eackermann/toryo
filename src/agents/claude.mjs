@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { run, uuid, which } from "../util.mjs";
 import { lockFor, runAgentProcess, tryJson } from "./proc.mjs";
 import { claudeWindowType, normalizeWindow } from "../usage.mjs";
+import { parseStatus, statusLineIndex, stripStatus } from "../../web/status.js";
 
 /**
  * Claude Code, headless: `claude -p --output-format stream-json`.
@@ -64,6 +65,7 @@ export const claude = {
     if (denied.length) args.push("--disallowedTools", ...denied.flatMap((d) => editRules(d)));
 
     let text = "";
+    const results = [];
     let lastAssistant = "";
     let usage = null;
     let cost = null;
@@ -117,22 +119,27 @@ export const claude = {
             if (block.type === "tool_result" && block.is_error)
               onActivity?.({ kind: "warn", text: String(flatten(block.content)).slice(0, 200) });
         } else if (ev.type === "result") {
-          text = typeof ev.result === "string" ? ev.result : text;
+          // A run can answer more than once (a background command's notice can wake Claude after its answer): every
+          // answer is kept, in order. Tokens are per answer, so they add up; the cost is the run's so far, so the last
+          // one counts; the run's state is its latest answer's.
+          if (typeof ev.result === "string" && ev.result.trim()) results.push(ev.result);
           resultSession = ev.session_id ?? resultSession;
-          usage = ev.usage
-            ? {
-                input: (ev.usage.input_tokens ?? 0) + (ev.usage.cache_creation_input_tokens ?? 0),
-                cached: ev.usage.cache_read_input_tokens ?? 0,
-                output: ev.usage.output_tokens ?? 0,
-              }
-            : null;
-          cost = ev.total_cost_usd ?? null;
-          if (typeof ev.num_turns === "number") turns = ev.num_turns;
-          if (ev.is_error || (ev.subtype && ev.subtype !== "success"))
-            error = `Claude ended with ${ev.subtype ?? "an error"}${typeof ev.result === "string" ? `: ${ev.result.slice(0, 300)}` : ""}`;
+          if (ev.usage)
+            usage = {
+              input: (usage?.input ?? 0) + (ev.usage.input_tokens ?? 0) + (ev.usage.cache_creation_input_tokens ?? 0),
+              cached: (usage?.cached ?? 0) + (ev.usage.cache_read_input_tokens ?? 0),
+              output: (usage?.output ?? 0) + (ev.usage.output_tokens ?? 0),
+            };
+          if (typeof ev.total_cost_usd === "number") cost = ev.total_cost_usd;
+          if (typeof ev.num_turns === "number") turns = (turns ?? 0) + ev.num_turns;
+          error =
+            ev.is_error || (ev.subtype && ev.subtype !== "success")
+              ? `Claude ended with ${ev.subtype ?? "an error"}${typeof ev.result === "string" ? `: ${ev.result.slice(0, 300)}` : ""}`
+              : null;
         }
       },
     });
+    text = joinResults(results);
     if (!text.trim()) text = lastAssistant;
     // A dropped prompt is an error whatever text came with it: Claude never saw the prompt, so that text isn't an answer.
     if (dropped) error = `Claude never saw the prompt. ${firstSentence(dropped)} (a Claude Code hook stopped it; check the plugins and hooks in Claude Code's settings)`;
@@ -208,4 +215,26 @@ export function describeTool(block) {
 export function editRules(folder) {
   const root = folder.startsWith("/") ? `/${folder}` : folder;
   return [`Edit(${root}/**)`, `Write(${root}/**)`, `NotebookEdit(${root}/**)`];
+}
+
+/**
+ * A run's answers as one message: the main answer first, each later one after it, marked as a follow-up. The status
+ * is the last status line: when the last answer has none, the latest one before it moves to the end, so the relay
+ * still reads it (and the reviewer's verdict and the ledger's lines all stay in the text).
+ */
+export function joinResults(results) {
+  if (results.length <= 1) return results[0] ?? "";
+  const parts = results.map((r) => r.trim());
+  let status = null;
+  if (!parseStatus(parts.at(-1)).status)
+    for (let i = parts.length - 2; i >= 0; i--) {
+      const lines = parts[i].split(/\r?\n/);
+      const at = statusLineIndex(lines);
+      if (at < 0) continue;
+      status = lines[at].trim();
+      parts[i] = stripStatus(parts[i]);
+      break;
+    }
+  const text = parts.map((p, i) => (i === 0 ? p : `---\n\n**Follow-up** (Claude answered again later in the same run):\n\n${p}`)).join("\n\n");
+  return status ? `${text}\n\n${status}` : text;
 }

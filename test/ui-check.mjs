@@ -1506,6 +1506,25 @@ try {
   await page.click("#sheet [data-close]");
   await post(`api/rooms/${setupRoom.id}/control`, { action: "stop" });
 
+  // 5zb. The Codex app joining a room with no default thread: the form shows the folder saved for the thread it selects
+  // (the first listed), and an untouched form keeps it (a saved folder counts in every room on that thread).
+  const patchConfig = (body) => fetch(`${url}api/config`, { method: "PATCH", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify(body) });
+  const noDefault = await ownProject("nodefault");
+  await patchConfig({ agents: { codexapp: { thread: null, threadFolders: Object.fromEntries(THREADS.map((th) => [th.id, repo])) } } });
+  const joining = await post("api/rooms", { projectId: noDefault, mode: "chat", members: ["codex"], title: "No default thread" });
+  await openRoom(joining.id, "No default thread");
+  await page.click("[data-sidetab=crew]");
+  await page.click('#crewPane [data-add-agent="codexapp"]');
+  await page.waitForSelector("#threadForm");
+  const chosen = await page.inputValue("#tThread");
+  assert.ok(chosen, "a thread is selected");
+  assert.equal(await page.inputValue("#tFolder"), repo);
+  await page.click("#threadForm button[type=submit]");
+  await page.waitForSelector("#sheet", { state: "hidden" });
+  await until(async () => (await view(joining.id)).room.crew.members.includes("codexapp"));
+  assert.equal(JSON.parse(readFileSync(join(home, "config.json"), "utf8")).agents.codexapp.threadFolders[chosen], repo, "kept");
+  await patchConfig({ agents: { codexapp: { thread: THREADS[0].id, threadFolders: {} } } });
+
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");
   await page.waitForSelector(".reloadbar[data-kind=restart]", { timeout: 15_000 });
