@@ -49,6 +49,13 @@ export async function setup(rules, { gates = [], engine: engineOptions = {} } = 
     return engine;
   };
   const engine = await make();
+  // Another project, a Git repository of its own with the same checks: a build there doesn't share the first
+  // project's folder.
+  const project = (name, e = engine) => {
+    const path = join(base, name);
+    execFileSync("git", ["init", "-q", path]);
+    return e.addProject({ path, name, gates }).id;
+  };
   return {
     base,
     home,
@@ -56,6 +63,7 @@ export async function setup(rules, { gates = [], engine: engineOptions = {} } = 
     engine,
     notes,
     make,
+    project,
     calls: () =>
       existsSync(log)
         ? readFileSync(log, "utf8")

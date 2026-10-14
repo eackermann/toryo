@@ -185,6 +185,8 @@ test("a stopped Codex app turn is still followed after a restart, and holds back
     await waitFor(() => finish, { label: "followed again" });
     assert.deepEqual(calls, ["send", "follow"]);
     assert.equal(second.summary(second.rooms.get(room.id)).status, "stopping");
+    // Stopped, but the app still has its turn and may be writing: the folder is still this room's.
+    assert.throws(() => second.createRoom({ projectId: "repo", mode: "build", members: ["claude"], task: "Elsewhere", title: "Elsewhere" }), (err) => err.code === "folder-busy" && err.room.id === room.id);
     // A new build waits for the app's turn rather than sending another one over it.
     const follow = finish;
     finish = null;
@@ -198,6 +200,12 @@ test("a stopped Codex app turn is still followed after a restart, and holds back
     second.control(room.id, "stop");
     second.control(room.id, "stop");
     await waitFor(() => second.running.size === 0, { label: "let go" });
+    // Let go, with nothing left running: the folder is free.
+    assert.equal(second.summary(second.rooms.get(room.id)).folder, null);
+    const elsewhere = second.createRoom({ projectId: "repo", mode: "build", members: ["claude"], task: "Elsewhere", title: "Elsewhere", settings: { gates: false } });
+    assert.equal(second.summary(second.rooms.get(elsewhere.id)).folder.holding, true);
+    second.control(elsewhere.id, "stop");
+    await waitFor(() => second.running.size === 0, { label: "stopped" });
   } finally {
     t.cleanup();
   }

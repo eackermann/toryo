@@ -42,7 +42,7 @@ const TOOLS = [
       "Answer a question a room is waiting on. Set accept to take the asking agent's recommendation. `question` is the id of the question you're answering (toryo_status and toryo_room list them); it can be left out only when just one question is open (in the room named, or in any room when no room is named).",
     inputSchema: {
       type: "object",
-      properties: { room: { type: "string" }, text: { type: "string" }, accept: { type: "boolean" }, question: { type: "string" } },
+      properties: { room: { type: "string" }, text: { type: "string" }, accept: { type: "boolean" }, question: { type: "string" }, wait: { type: "boolean", description: "Accepting a ready plan starts its build: if another room is building in the same folder, wait for it" } },
       additionalProperties: false,
     },
   },
@@ -117,6 +117,7 @@ const TOOLS = [
         planPath: { type: "string" },
         builder: { type: "string", enum: ["codex", "claude", "cursor", "grok", "codexapp"] },
         reviewer: { type: "string", enum: ["codex", "claude", "cursor", "grok", "codexapp"] },
+        wait: { type: "boolean", description: "A build as first step: if another room is building in the same folder, wait for it" },
       },
       additionalProperties: false,
     },
@@ -139,6 +140,7 @@ const TOOLS = [
         handoff: { type: "string", description: "The builder's handoff message, for reviewFirst" },
         slice: { type: "string" },
         appThread: { type: "string", description: "With the Codex app in the crew: its thread id for this room (defaults to the project's, then the global default)" },
+        wait: { type: "boolean", description: "Build only: if another room is building in the same folder, wait for it instead of being refused" },
       },
       required: ["mode", "text"],
       additionalProperties: false,
@@ -186,7 +188,7 @@ export function runMcpServer(client = new ToryoClient()) {
             text = await client.say(a.room, a.text, { to: a.to ?? "auto", now: Boolean(a.now), intent: a.intent });
             break;
           case "toryo_answer":
-            text = await client.answer(a.room, a.text ?? "", { accept: Boolean(a.accept), question: a.question });
+            text = await client.answer(a.room, a.text ?? "", { accept: Boolean(a.accept), question: a.question, wait: Boolean(a.wait) });
             break;
           case "toryo_plan":
             text = await client.plan(a.room, a.action, { question: a.question, from: a.from, checkers: a.checkers });

@@ -4,6 +4,12 @@ import { toryoHome, truncate } from "./util.mjs";
 import { stripStatus } from "./protocol.mjs";
 import { durationWords, earlierWords, sessionWords } from "../web/phases.js";
 
+/** A build refused because another room is building in its folder: how to have it wait instead. */
+const waitHint = (error) => {
+  if (error.code === "folder-busy") error.message += " To have it wait, run it again with --wait (wait: true in MCP).";
+  throw error;
+};
+
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor", grok: "Grok", codexapp: "Codex app" };
 const name = (a) => NAMES[a] ?? a;
 /** One open question as text, with the id that answers it. */
@@ -77,7 +83,7 @@ export class ToryoClient {
       throw new Error(`Toryo isn't running on port ${port}. Start it with: toryo`);
     }
     const data = (res.headers.get("content-type") ?? "").includes("json") ? await res.json() : await res.text();
-    if (!res.ok) throw new Error(data?.error ?? String(data));
+    if (!res.ok) throw Object.assign(new Error(data?.error ?? String(data)), { code: data?.code, room: data?.room });
     return data;
   }
 
@@ -108,6 +114,9 @@ export class ToryoClient {
       // The session's length, where the line has room for it; `toryo show` says it phase by phase.
       const session = r.session?.length >= 60_000 ? ` · ${durationWords(r.session.length)} this session` : "";
       lines.push(`• ${r.title} [${r.mode}, ${r.status}${who}${session}] (id ${r.id})`);
+      // One builder per folder: the room it waits for, or the rooms waiting for it.
+      if (r.folder?.waitsFor) lines.push(`    waits for its folder: “${r.folder.waitsFor.title}” is building in it`);
+      if (r.folder?.waiting?.length) lines.push(`    building in ${r.folder.path}; waiting for this folder: ${r.folder.waiting.map((w) => `“${w.title}”`).join(", ")}`);
       for (const q of r.questions ?? (r.waiting ? [r.waiting] : [])) lines.push(`    waiting for you: ${asked(q)}`);
     }
     lines.push(`Agents: ${Object.entries(agents ?? {}).map(([id, a]) => `${name(id)} ${a.installed ? "✓" : "✗"}`).join("  ")}`);
@@ -119,6 +128,8 @@ export class ToryoClient {
     const view = await this.call("GET", `/api/rooms/${summary.id}`);
     const r = view.room;
     const lines = [`${r.title} · ${r.mode} · ${r.status} (id ${r.id})`];
+    if (summary.folder?.waitsFor) lines.push(`Waits for its folder: “${summary.folder.waitsFor.title}” is building in ${summary.folder.path}. Its build starts when that one is done or stopped.`);
+    else if (summary.folder?.holding) lines.push(`Building in ${summary.folder.path}${summary.folder.waiting.length ? `; waiting for this folder: ${summary.folder.waiting.map((w) => `“${w.title}”`).join(", ")}` : ""}.`);
     if (summary.session) {
       lines.push(`${summary.session.n > 1 ? `Session ${summary.session.n}. ` : ""}${sessionWords(summary.session)}`);
       for (const e of summary.session.earlier ?? []) lines.push(`Earlier, ${earlierWords(e)}`);
@@ -155,7 +166,7 @@ export class ToryoClient {
    * With several open, nothing is sent; the reply lists them with their ids. (The desk refuses an id that's no
    * longer open.)
    */
-  async answer(ref, text, { accept = false, question } = {}) {
+  async answer(ref, text, { accept = false, question, wait = false } = {}) {
     const rooms = ref ? [await this.resolveRoom(ref)] : (await this.state()).rooms;
     if (!rooms.length) throw new Error("There are no rooms yet.");
     // A desk started before questions had ids (not restarted since this update): it can't take an answer to a
@@ -177,7 +188,7 @@ export class ToryoClient {
       const line = (x) => `  ${ref ? "" : `“${x.room.title}”: `}${asked(x)}`;
       throw new Error([`${open.length} questions are open${where}. Say which one you're answering by its id:`, ...open.map(line)].join("\n"));
     }
-    await this.call("POST", `/api/rooms/${q.room.id}/answer`, { text, accept, questionId: q.id });
+    await this.call("POST", `/api/rooms/${q.room.id}/answer`, { text, accept, questionId: q.id, wait }).catch(waitHint);
     return `Answered in “${q.room.title}”${q.question ? `: ${truncate(q.question, 120)}` : ""}.`;
   }
 
@@ -274,12 +285,12 @@ export class ToryoClient {
    * Start a new session in a room (`toryo session new`, `toryo_session_new`), ending the one it's in now: refused
    * while anything runs there, as on the page. `mode` and `text`: a first step, as `start` takes them.
    */
-  async newSession(ref, { keepMemory = false, mode, text, planPath, builder, reviewer } = {}) {
+  async newSession(ref, { keepMemory = false, mode, text, planPath, builder, reviewer, wait = false } = {}) {
     const r = await this.resolveRoom(ref);
     const n = r.session?.n ?? 1;
     if (mode && !["chat", "plan", "build"].includes(mode)) throw new Error("The first step is chat, plan or build.");
-    const then = !mode ? undefined : mode === "chat" ? { mode, text, to: "everyone" } : mode === "plan" ? { mode, topic: text } : { mode, task: text, planPath, builder, reviewer };
-    await this.call("POST", `/api/rooms/${r.id}/control`, { action: "new-session", ends: n, keepMemory, then });
+    const then = !mode ? undefined : mode === "chat" ? { mode, text, to: "everyone" } : mode === "plan" ? { mode, topic: text } : { mode, task: text, planPath, builder, reviewer, wait };
+    await this.call("POST", `/api/rooms/${r.id}/control`, { action: "new-session", ends: n, keepMemory, then }).catch(waitHint);
     const first = { chat: "your message went to the crew", plan: "a planning round started", build: "the build started" }[mode];
     return `Session ${n + 1} started in “${r.title}”; session ${n} is kept in its history. ${keepMemory ? "The agents keep their memory." : "Each agent starts fresh on its next turn (the Codex app keeps its thread)."} ${first ? `Then ${first}.` : "Nothing runs until you send something."}`;
   }
@@ -290,7 +301,7 @@ export class ToryoClient {
     return `${action[0].toUpperCase()}${action.slice(1)} “${r.title}”.`;
   }
 
-  async start({ mode, text, project, planPath, title, builder, reviewer, reviewFirst, handoff, slice, appThread }) {
+  async start({ mode, text, project, planPath, title, builder, reviewer, reviewFirst, handoff, slice, appThread, wait = false }) {
     const { config } = await this.state();
     const p = project ? config.projects.find((x) => x.id === project || x.name === project) : config.projects[0];
     if (!p) throw new Error("No such project.");
@@ -298,10 +309,10 @@ export class ToryoClient {
     if (mode === "chat") Object.assign(body, { text, to: "everyone" });
     if (mode === "plan") Object.assign(body, { topic: text });
     if (mode === "build") {
-      Object.assign(body, { task: text, planPath, builder, reviewer, reviewFirst, handoff, slice });
+      Object.assign(body, { task: text, planPath, builder, reviewer, reviewFirst, handoff, slice, wait });
       if (builder || reviewer) body.members = [...new Set([builder ?? "codex", reviewer ?? "claude"])];
     }
-    const r = await this.call("POST", "/api/rooms", body);
-    return `Started “${r.title}” (${mode}, id ${r.id}) in ${p.name}.`;
+    const r = await this.call("POST", "/api/rooms", body).catch(waitHint);
+    return `Started “${r.title}” (${mode}, id ${r.id}) in ${p.name}.${r.folder?.waitsFor ? ` It waits for its folder: “${r.folder.waitsFor.title}” is building in it.` : ""}`;
   }
 }

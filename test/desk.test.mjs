@@ -21,7 +21,8 @@ test("holding Codex lets its turns finish in two rooms, starts no new Codex turn
   ]);
   try {
     const a = t.engine.createRoom({ projectId: "repo", mode: "build", task: "A" });
-    const b = t.engine.createRoom({ projectId: "repo", mode: "build", task: "B" });
+    // In a folder of its own: one builder per folder.
+    const b = t.engine.createRoom({ projectId: t.project("other"), mode: "build", task: "B" });
     // Really started (the agent has the prompt), not still being prepared: a hold then would send it back unsent.
     const working = (id) => t.engine.roomView(id).live.some((l) => l.agent === "codex" && l.phase === "working");
     await waitFor(() => working(a.id) && working(b.id), { label: "both building" });
@@ -55,10 +56,11 @@ test("Pause everything: running checks finish, queued checks wait, new rooms and
     { gates: [{ name: "Slow check", command: "sleep 0.5; true" }] },
   );
   try {
-    const c = t.engine.createRoom({ projectId: "repo", mode: "build", task: "ASK-ME" });
+    // Each build in a folder of its own: one builder per folder.
+    const c = t.engine.createRoom({ projectId: t.project("asking"), mode: "build", task: "ASK-ME" });
     await waitFor(() => t.engine.rooms.get(c.id).waiting, { label: "builder's question" });
     const a = t.engine.createRoom({ projectId: "repo", mode: "build", task: "build it" });
-    const d = t.engine.createRoom({ projectId: "repo", mode: "build", task: "SLOW-BUILD" });
+    const d = t.engine.createRoom({ projectId: t.project("slow"), mode: "build", task: "SLOW-BUILD" });
     await waitFor(() => summary(t.engine, a.id).working.some((w) => w.kind === "gates"), { label: "A's checks running" });
     t.engine.deskControl("pause");
     // A's checks finish; its review waits. D's builder finishes; its checks wait.
@@ -467,7 +469,8 @@ test("a notes turn queues as new work: another room's older request on the share
     const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
     await e.init({ detect: false });
     const a = e.createRoom({ projectId: "repo", mode: "chat", members: ["codexapp", "claude"], appThread: "t1", settings: { snapshots: false } });
-    const b = e.createRoom({ projectId: "repo", mode: "chat", members: ["codexapp", "claude"], appThread: "t1", settings: { snapshots: false } });
+    // The same app thread, but a folder of its own: one builder per folder.
+    const b = e.createRoom({ projectId: t.project("other", e), mode: "chat", members: ["codexapp", "claude"], appThread: "t1", settings: { snapshots: false } });
     e.control(a.id, "start-build", { task: "TASK-A", builder: "codexapp", reviewer: "claude" });
     assert.deepEqual(order, ["A1"]);
     e.control(b.id, "start-build", { task: "TASK-B", builder: "codexapp", reviewer: "claude" });

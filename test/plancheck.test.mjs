@@ -166,7 +166,8 @@ test("accepting that recommendation, in a build and in chat, sends exactly “Go
     const dq = t.engine.summary(room(t, delim.id)).questions[0];
     assert.deepEqual([dq.question, dq.recommendation], ["Delimiter?", "use ')' as the closing token"]);
     t.engine.answer(delim.id, { questionId: dq.id, accept: true });
-    const quoting = t.engine.createRoom({ projectId: "repo", mode: "build", task: "Pick the quoting" });
+    // A build in a folder of its own: the first build is still going (one builder per folder).
+    const quoting = t.engine.createRoom({ projectId: t.project("quoting"), mode: "build", task: "Pick the quoting" });
     await waitFor(() => room(t, quoting.id).waiting, { label: "quoting question" });
     assert.equal(room(t, quoting.id).waiting.recommendation, 'write "say \\"(\\" here" as it is');
     t.engine.answer(quoting.id, { questionId: room(t, quoting.id).waiting.eventId, accept: true });

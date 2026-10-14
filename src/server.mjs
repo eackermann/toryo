@@ -90,7 +90,8 @@ export function createServer({ engine, page, webDir, host = "127.0.0.1", port = 
     } catch (error) {
       const status = error instanceof UserError ? error.status : 500;
       if (status === 500) console.error("[toryo]", error);
-      return json(res, status, { error: error.message ?? String(error) });
+      // A refusal can say why in a way a client acts on (`code`), and name what it's about (`room`).
+      return json(res, status, { error: error.message ?? String(error), ...(error.code ? { code: error.code } : {}), ...(error.room ? { room: error.room } : {}) });
     }
   });
 

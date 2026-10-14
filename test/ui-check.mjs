@@ -581,9 +581,17 @@ try {
   }
   await page.unroute(`**/api/rooms/${pending.id}/messages`);
 
+  // A project of its own, in a Git folder of its own: one builder per folder, and the App room's build (step 2) still
+  // has the ui project's folder (the app's turn there never ends).
+  const ownProject = async (name) => {
+    const path = join(base, name);
+    execFileSync("git", ["init", "-q", path]);
+    return (await post("api/projects", { path, name, gates: [{ name: "Slow check", command: "true", timeoutMin: 45 }] })).id;
+  };
+
   // 5l. A queued note you're changing stays open, with your text and the focus, when a turn ends and the timeline
   // is drawn again: here a note to the reviewer while the builder works.
-  const slowRoom = await post("api/rooms", { projectId: "ui", mode: "build", task: "Slow build of the parser", title: "Slow room", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  const slowRoom = await post("api/rooms", { projectId: await ownProject("parser"), mode: "build", task: "Slow build of the parser", title: "Slow room", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
   await openRoom(slowRoom.id, "Slow room");
   await page.waitForSelector(".turn.live");
   await page.click("#recipients [data-route=claude]");
@@ -623,7 +631,7 @@ try {
   // 5n. A note that goes to the crew while you're changing it: your change can't be saved, but it isn't lost. It
   // stays under the note, whole, across a reload, until you send it as a new note (or dismiss it).
   const longText = "Please also check the docs, the examples and the changelog, and say which of them still mention the old flag. ".repeat(3).trim();
-  const lexer = await post("api/rooms", { projectId: "ui", mode: "build", task: "Slow review of the lexer", title: "Lexer room", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  const lexer = await post("api/rooms", { projectId: await ownProject("lexer"), mode: "build", task: "Slow review of the lexer", title: "Lexer room", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
   await openRoom(lexer.id, "Lexer room");
   await page.waitForSelector(".turn.live");
   await page.click("#recipients [data-route=claude]");
@@ -646,7 +654,7 @@ try {
 
   // 5o. Saving a change while the note goes to the crew: the desk refuses it (delivery came first), and your change
   // stays under the note. Dismissed, it's gone for good.
-  const docs = await post("api/rooms", { projectId: "ui", mode: "build", task: "Slow review of the docs", title: "Docs room", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  const docs = await post("api/rooms", { projectId: await ownProject("docs"), mode: "build", task: "Slow review of the docs", title: "Docs room", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
   await openRoom(docs.id, "Docs room");
   await page.waitForSelector(".turn.live");
   await page.click("#recipients [data-route=claude]");
@@ -1218,9 +1226,10 @@ try {
 
   // 5v. Checks on the strip: watched as they start (their first news is their output, which doesn't say what they
   // are), and in a room opened while they run. Once done, each page has them once, no longer running.
-  const projectGates = (gates) => fetch(`${url}api/projects/ui`, { method: "PATCH", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify({ gates }) });
+  const checksProject = await ownProject("checks");
+  const projectGates = (gates) => fetch(`${url}api/projects/${checksProject}`, { method: "PATCH", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify({ gates }) });
   await projectGates([{ name: "Slow check", command: "sleep 4", timeoutMin: 45 }]);
-  const checksRoom = await post("api/rooms", { projectId: "ui", mode: "build", task: "Strip checks", title: "Checks strip", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  const checksRoom = await post("api/rooms", { projectId: checksProject, mode: "build", task: "Strip checks", title: "Checks strip", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
   await openRoom(checksRoom.id, "Checks strip");
   const checksSeg = '#sessionStrip .ss-lane[data-lane="checks"] .ss-seg';
   const runningChecks = (sel) => [...document.querySelectorAll(sel)].some((x) => /^The checks: .*–now/.test(x.title));
@@ -1336,6 +1345,44 @@ try {
   assert.deepEqual(await page.$$eval("#log details.sessionfold > summary b", (bs) => bs.map((b) => b.textContent)), ["Session 1", "Session 2"]);
   assert.equal(await page.isVisible(`#log [data-id="${sprintReply.id}"]`), false, "session 2's reply is in its fold");
   await page.waitForFunction(() => /^Session 3 · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+
+  // 5y. One builder per folder. The App room (step 2) is still building in the ui project's folder: a ready plan's
+  // Start building on Home is refused, naming it, and offers to wait; so does the new-room form. Waiting rooms say
+  // what they wait for, and the App room says who waits for its folder.
+  const errorsBeforeFolder = errors.length;
+  const appRoom = (await (await fetch(`${url}api/state`)).json()).rooms.find((r) => r.title === "App room");
+  assert.equal(appRoom.folder.holding, true);
+  await until(async () => (await questions(homePlan.id)).some((q) => q.kind === "plan-ready"));
+  const readyNow = (await questions(homePlan.id)).find((q) => q.kind === "plan-ready");
+  await page.click("a.brand");
+  const readyCard = `#home .ask[data-q="${readyNow.id}"]`;
+  await page.click(`${readyCard} [data-act="accept"]`);
+  await page.waitForSelector(`${readyCard} .err`);
+  assert.match(await page.innerText(`${readyCard} .err`), /^“App room” is building in this folder \(.+\), so this build can't start now\. You can have it wait/);
+  assert.match(await page.innerText(`${readyCard} [data-act="accept-wait"]`), /Wait for “App room”, then build/);
+  assert.equal((await questions(homePlan.id)).some((q) => q.id === readyNow.id), true, "the plan is still ready");
+  await clearToasts();
+  await page.click(`${readyCard} [data-act="accept-wait"]`);
+  await toastSays(/The build waits for its folder/);
+  await until(async () => (await view(homePlan.id)).room.mode === "build");
+  // The App room, building: who waits for its folder, on Home and in its header.
+  await page.waitForFunction(() => /“Home plan” waits for this folder to start building\./.test(document.querySelector("#home")?.innerText ?? ""));
+  await openRoom(appRoom.id, "App room");
+  await page.waitForFunction(() => /“Home plan” waits for this folder to start building\./.test(document.querySelector("#roomhead")?.innerText ?? ""));
+  // The new-room form: refused, then waiting; the room it opens says what it waits for.
+  await page.click("#newRoomBtn");
+  await page.click(".modecard[data-mode=build]");
+  await page.selectOption("#nrProject", "ui");
+  await page.fill("#nrTask", "Another build here");
+  await page.fill("#nrTitle", "Waiting build");
+  await page.click("#newRoomForm button[type=submit]");
+  await page.waitForSelector("#newRoomForm .ns-busy:not([hidden]) [data-wait]");
+  assert.match(await page.innerText("#newRoomForm .ns-busy"), /^“App room” is building in this folder/);
+  await page.click("#newRoomForm [data-wait]");
+  await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Waiting build");
+  await page.waitForFunction(() => /Held\s*Waiting: “App room” is building in this folder/.test(document.querySelector("#roomhead")?.innerText ?? ""));
+  // The two refusals, as the browser logs them, and nothing else.
+  assert.deepEqual(errors.splice(errorsBeforeFolder).map((e) => /status of 409/.test(e)), [true, true]);
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");

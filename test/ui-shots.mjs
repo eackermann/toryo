@@ -133,7 +133,13 @@ try {
   await until(async () => (await view(ready.id)).live.length === 0 && (await view(ready.id)).events.some((e) => e.type === "turn" && /old export/.test(e.text ?? "")), "Claude's reply");
 
   // A room in every state a ring shows, and several rooms working at once.
-  const room = (body) => post("api/rooms", { mode: "build", members: ["codex", "claude"], builder: "codex", reviewer: "claude", ...body });
+  // Each build in a project of its own (a Git folder of its own): one builder per folder.
+  const own = async (name) => {
+    const path = join(base, name.replace(/\W+/g, "-").toLowerCase());
+    execFileSync("git", ["init", "-q", path]);
+    return (await post("api/projects", { path, name, gates: [{ name: "Tests", command: "true" }] })).id;
+  };
+  const room = async (body) => post("api/rooms", { mode: "build", members: ["codex", "claude"], builder: "codex", reviewer: "claude", ...body, projectId: body.projectId === "demo" ? await own(body.title) : body.projectId });
   const busy = [];
   for (let i = 1; i <= 4; i++) busy.push(await room({ projectId: "demo", task: `Busy build ${i}`, title: `Busy build ${i}` }));
   const checked = await room({ projectId: "slow", task: "Checked build", title: "Checked build" });

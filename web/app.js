@@ -130,6 +130,8 @@ const S = {
   homePending: new Set(),
   // Questions a send from Home found already answered elsewhere: their cards say so until dismissed.
   homeStale: new Set(),
+  // Ready plans whose build was refused because another room is building in the folder: that room, to wait for.
+  homeFolder: new Map(),
   deskResult: null,
   // The open room's session timeline (phases.js), kept event by event, and what it last showed.
   timeline: null,
@@ -148,7 +150,7 @@ async function api(method, path, body) {
   });
   const type = res.headers.get("content-type") ?? "";
   const data = type.includes("json") ? await res.json() : await res.text();
-  if (!res.ok) throw Object.assign(new Error(data?.error ?? data ?? res.statusText), { status: res.status });
+  if (!res.ok) throw Object.assign(new Error(data?.error ?? data ?? res.statusText), { status: res.status, code: data?.code, room: data?.room });
   return data;
 }
 
@@ -539,6 +541,8 @@ function stateSentence(r) {
   } else if (r.activeGate || r.status === "checking") parts.push(`<span class="act-k">${ic("checks")}Checks</span><span>The project's checks are running.</span>`);
   if (asks) parts.push(`<span class="act-k" data-k="you">${ic("hand")}Needs you</span><span>${asks === 1 ? `${r.waiting?.from ? `${esc(name(r.waiting.from))} asks you something` : "A question is waiting"}` : `${asks} questions are waiting`}</span>`);
   if (r.status === "held") parts.push(`<span class="act-k">${ic("lock")}Held</span><span>Waiting: ${esc([...new Set((sum?.blocked ?? []).flatMap((b) => b.reasons))].join("; ") || "held")}</span>`);
+  // One builder per folder: the rooms whose build waits for this one.
+  if (sum?.folder?.waiting?.length) parts.push(`<span class="act-k">${ic("lock")}Folder</span><span>${esc(waitingWords(sum.folder.waiting))}</span>`);
   if (r.status === "queued" && !live.length) parts.push(`<span>Starting…</span>`);
   if (!parts.length) parts.push(`<span>Idle. Write to the crew to start.</span>`);
   return parts.join("");
@@ -1745,6 +1749,29 @@ const wireHandoff = (p) => $(`#${p}ReviewFirst`).addEventListener("change", (e) 
 const handoffBody = (p) =>
   $(`#${p}ReviewFirst`).checked ? { reviewFirst: true, handoff: $(`#${p}Handoff`).value, slice: $(`#${p}Slice`).value } : {};
 
+/** The rooms waiting for a build's folder, in words: "“Docs” waits for this folder to start building." */
+const waitingWords = (rooms) => `${rooms.map((w) => `“${w.title}”`).join(" and ")} ${rooms.length > 1 ? "wait" : "waits"} for this folder to start building.`;
+
+/**
+ * A build refused because another room is building in its folder: the desk's words in `box`, and the choice to wait
+ * for that room (the build then starts when it's done or stopped). `go(true)` sends the request again, waiting.
+ */
+function offerWait(box, error, go) {
+  box.hidden = false;
+  box.innerHTML = `<span>${esc(error.message)}</span> <button class="btn small you" type="button" data-wait>Wait for “${esc(error.room?.title ?? "it")}”, then build</button>`;
+  const btn = $("[data-wait]", box);
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      await go(true);
+    } catch (e) {
+      btn.disabled = false;
+      fail(e);
+    }
+  });
+  btn.focus();
+}
+
 function newRoomSheet(mode = "chat") {
   const projects = S.state.config.projects;
   const current = project()?.id ?? projects[0]?.id;
@@ -1773,6 +1800,7 @@ function newRoomSheet(mode = "chat") {
       ${handoffFields("nr")}
     </div>
     <div class="field"><label for="nrTitle">Room name (optional)</label><input type="text" id="nrTitle" placeholder="Named after the first message if left empty"></div>
+    <div class="ns-busy" role="alert" hidden></div>
     <div style="display:flex;gap:8px"><button class="btn primary" type="submit">Start</button><button class="btn" type="button" data-close>Cancel</button></div>
   </form>`);
   // The Codex app works in a thread of its own per room; offer the project's default, else the general one.
@@ -1855,10 +1883,13 @@ function newRoomSheet(mode = "chat") {
             ? `Paste ${name(body.builder)}'s handoff message, or choose Codex app as the builder to use your app thread's last reply.`
             : `Paste ${name(body.builder)}'s handoff message, so the reviewer knows what to review.`,
         );
-      const created = await api("POST", "/api/rooms", body);
-      closeSheet();
-      history.pushState(null, "", `#/r/${created.id}`);
-      await loadRoom(created.id, { open: true });
+      const go = async (wait) => {
+        const created = await api("POST", "/api/rooms", { ...body, wait });
+        closeSheet();
+        history.pushState(null, "", `#/r/${created.id}`);
+        await loadRoom(created.id, { open: true });
+      };
+      await go(false).catch((error) => (error.code === "folder-busy" ? offerWait($("#newRoomForm .ns-busy"), error, go) : Promise.reject(error)));
     } catch (error) {
       fail(error);
     }
@@ -1895,13 +1926,17 @@ function startBuildSheet(planPath) {
     <div class="pair"><div class="field"><label for="bBuilder">Builder</label><select id="bBuilder">${agentOptions(r.crew.members, r.crew.builder)}</select></div>
     <div class="field"><label for="bReviewer">Reviewer</label><select id="bReviewer">${agentOptions(r.crew.members, r.crew.reviewer)}</select></div></div>
     ${handoffFields("b")}
+    <div class="ns-busy" role="alert" hidden></div>
     <div style="display:flex;gap:8px"><button class="btn primary" type="submit">Start building</button><button class="btn" type="button" data-close>Cancel</button></div></form>`);
   wireHandoff("b");
   $("#buildForm").addEventListener("submit", async (e) => {
     e.preventDefault();
-    try {
-      await api("POST", `/api/rooms/${r.id}/control`, { action: "start-build", planPath: $("#bPlan").value, task: $("#bTask").value, builder: $("#bBuilder").value, reviewer: $("#bReviewer").value, ...handoffBody("b") });
+    const go = async (wait) => {
+      await api("POST", `/api/rooms/${r.id}/control`, { action: "start-build", planPath: $("#bPlan").value, task: $("#bTask").value, builder: $("#bBuilder").value, reviewer: $("#bReviewer").value, ...handoffBody("b"), wait });
       closeSheet();
+    };
+    try {
+      await go(false).catch((error) => (error.code === "folder-busy" ? offerWait($("#buildForm .ns-busy"), error, go) : Promise.reject(error)));
     } catch (error) {
       fail(error);
     }
@@ -2335,15 +2370,20 @@ function newSessionSheet() {
             : undefined;
     if (then?.reviewFirst && !then.task.trim()) then.task = "After the review, carry on with the remaining work.";
     go.disabled = true;
-    try {
-      await api("POST", `/api/rooms/${r.id}/control`, { action: "new-session", ends: n, keepMemory: $("#nsKeep").checked, then });
+    const send = async (wait) => {
+      await api("POST", `/api/rooms/${r.id}/control`, { action: "new-session", ends: n, keepMemory: $("#nsKeep").checked, then: then && { ...then, wait } });
       closeSheet();
       toast(`Session ${n + 1} started`, `Session ${n} is folded in the room, with its totals.`);
       S.shownSession = null;
       await loadRoom(r.id, { keepScroll: false });
+    };
+    try {
+      await send(false);
     } catch (error) {
       go.disabled = false;
-      showBusy(error.message);
+      // A build as the first step, refused because another room is building in this folder: it can wait instead.
+      if (error.code === "folder-busy") offerWait(busyBox, error, send);
+      else showBusy(error.message);
     }
   });
 }
@@ -2710,7 +2750,9 @@ function askCard(q, { stale = false } = {}) {
     actions = q.complete && q.author ? homeBtn(`${ic("check")}Accept all recommendations: ${esc(name(q.author))} writes the plan`, "accept-checkpoint", { q: q.id }, "btn small you") : "";
     if (!q.complete && !stale) more += `<p class="hint">Some have no recommendation: answer them in the form.</p>`;
   } else if (q.kind === "plan-ready") {
-    actions = homeBtn(`${ic("build")}Start building with this plan`, "accept", { q: q.id }, "btn small you") + ((q.checkers ?? []).length ? homeBtn(`Ask ${esc(q.checkers.map(name).join(" and "))} to check it`, "plan-check", { q: q.id }) : "") + write("Ask for changes");
+    // Refused because another room is building in this folder: the choice to wait for it.
+    const busy = S.homeFolder.get(q.id);
+    actions = (busy ? homeBtn(`${ic("build")}Wait for “${esc(busy.title)}”, then build`, "accept-wait", { q: q.id }, "btn small you") : homeBtn(`${ic("build")}Start building with this plan`, "accept", { q: q.id }, "btn small you")) + ((q.checkers ?? []).length ? homeBtn(`Ask ${esc(q.checkers.map(name).join(" and "))} to check it`, "plan-check", { q: q.id }) : "") + write("Ask for changes");
   } else if (q.kind === "error") {
     actions = homeBtn("Retry", "accept", { q: q.id }, "btn small you") + write("Retry with a note");
   } else if (q.kind === "app-lost") {
@@ -2878,7 +2920,7 @@ async function homeAct(btn) {
     const call =
       act === "accept-checkpoint" ? ["control", { action: "accept-checkpoint", questionId: qid }]
       : act === "plan-check" ? ["control", { action: "plan-check", questionId: qid }]
-      : ["answer", act === "send" ? { text, questionId: qid } : { accept: true, questionId: qid }];
+      : ["answer", act === "send" ? { text, questionId: qid } : { accept: true, questionId: qid, wait: act === "accept-wait" }];
     // While it's on its way: nothing in the card can change or be pressed (what's sent is what you see).
     S.homePending.add(qid);
     S.homeErrors.delete(qid);
@@ -2895,10 +2937,18 @@ async function homeAct(btn) {
       setHomeDraft(qid, null);
       // Who it reached: the author for a checkpoint, the checkers for a check, the agent asking for an answer (a
       // ready plan's Start building: whoever the build queued), and whether each is held up, from the desk's reply.
-      const who = act === "accept-checkpoint" ? [q?.author] : act === "plan-check" ? q?.checkers ?? [] : q?.kind === "plan-ready" && act === "accept" ? null : [q?.from];
-      const title = act === "accept-checkpoint" ? "Your call is in: the plan is next" : act === "plan-check" ? "The check is asked for" : q?.kind === "plan-ready" && act === "accept" ? "The build starts" : "Answer sent";
+      const building = q?.kind === "plan-ready" && (act === "accept" || act === "accept-wait");
+      const who = act === "accept-checkpoint" ? [q?.author] : act === "plan-check" ? q?.checkers ?? [] : building ? null : [q?.from];
+      const title = act === "accept-checkpoint" ? "Your call is in: the plan is next" : act === "plan-check" ? "The check is asked for" : building ? (sum?.folder?.waitsFor ? "The build waits for its folder" : "The build starts") : "Answer sent";
+      S.homeFolder.delete(qid);
       toast(title, reachedText(sum, who) || q?.roomTitle);
     } catch (error) {
+      if (error.code === "folder-busy") {
+        // Another room is building in this folder: the question stays open, with the choice to wait for that room.
+        S.homeErrors.set(qid, error.message);
+        S.homeFolder.set(qid, error.room ?? { title: "the other room" });
+        return;
+      }
       // Answered elsewhere meanwhile (another tab, a terminal, your phone): nothing was sent, and your text stays.
       S.homeErrors.set(qid, error.status === 409 ? `Not sent: ${error.message}` : `That didn't work: ${error.message} Your text is kept.`);
       if (error.status === 409) S.homeStale.add(qid);
@@ -3017,6 +3067,7 @@ function homeWorking(h) {
         ${workPhases(w) ? `<div class="wc-phase">${workPhases(w)}</div>` : ""}
         <div class="wc-act mono" data-activity>${esc(w.activity ?? "")}</div>
         ${w.shared?.length ? `<div class="wc-shared">${sharedText(w.shared)}</div>` : ""}
+        ${w.folderWaiting?.length ? `<div class="wc-shared">${ic("lock")} ${esc(waitingWords(w.folderWaiting))}</div>` : ""}
       </div>
       <div class="wc-time"><span class="big" data-since="${esc(since0)}">${since(since0)}</span><span class="muted">${w.phase === "working" || w.agent === "toryo" ? "working" : w.phase === "preparing" ? "since it started" : "since it was sent"}${w.lastOutputAt ? ` · last output <span data-ago="${esc(w.lastOutputAt)}">${ago(w.lastOutputAt)}</span>` : ""}</span></div>
     </a>`;

@@ -64,6 +64,8 @@ From any terminal (or an agent) while Toryo runs
                                 its history stays, the agents start fresh unless --keep-memory; refused while work runs
   toryo start chat|plan|build "text" [--plan docs/plans/x.md] [--project name]
   toryo start build "text" --review-first [--builder codexapp] [--reviewer claude] [--handoff-file f.md] [--slice name]
+  toryo start build "text" --wait   another room is building in this folder: start when it's done or stopped
+                                (one builder per folder; --wait also works with session new and answer --accept)
                                 the builder already finished a round: the reviewer goes first
                                 with the Codex app in the crew, --thread <id> picks its thread for this room
   toryo mcp                   MCP server for Claude Code / Codex (phone access through their apps)
@@ -112,7 +114,7 @@ try {
       console.log(await client.say(roomArg(), positional.slice(1).join(" "), { to: typeof flag("to", "auto") === "string" ? flag("to", "auto") : "auto", now: Boolean(flag("now", false)), intent: flag("ask", false) ? "ask" : flag("tell", false) ? "tell" : undefined }));
       process.exit(0);
     case "answer":
-      console.log(await client.answer(roomArg(), positional.slice(1).join(" "), { accept: Boolean(flag("accept", false)), question: typeof flag("question", null) === "string" ? flag("question", null) : undefined }));
+      console.log(await client.answer(roomArg(), positional.slice(1).join(" "), { accept: Boolean(flag("accept", false)), question: typeof flag("question", null) === "string" ? flag("question", null) : undefined, wait: Boolean(flag("wait", false)) }));
       process.exit(0);
     case "plan": {
       const str = (n) => (typeof flag(n, null) === "string" ? flag(n, null) : undefined);
@@ -163,7 +165,7 @@ try {
       const ref = modes.includes(rest[0]) ? roomArg() : (rest.shift() ?? roomArg());
       const mode = modes.includes(rest[0]) ? rest.shift() : undefined;
       const str = (n) => (typeof flag(n, null) === "string" ? flag(n, null) : undefined);
-      console.log(await client.newSession(ref, { keepMemory: Boolean(flag("keep-memory", false)), mode, text: rest.join(" "), planPath: str("plan"), builder: str("builder"), reviewer: str("reviewer") }));
+      console.log(await client.newSession(ref, { keepMemory: Boolean(flag("keep-memory", false)), mode, text: rest.join(" "), planPath: str("plan"), builder: str("builder"), reviewer: str("reviewer"), wait: Boolean(flag("wait", false)) }));
       process.exit(0);
     }
     case "start": {
@@ -182,6 +184,7 @@ try {
           handoff: handoffFile ? readFileSync(handoffFile, "utf8") : undefined,
           slice: flag("slice", undefined),
           appThread: flag("thread", undefined),
+          wait: Boolean(flag("wait", false)),
         }),
       );
       process.exit(0);

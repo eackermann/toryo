@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -93,6 +94,8 @@ export class Engine extends EventEmitter {
     this.deskJournal = [];
     // Each room's sessions (web/phases.js), kept event by event: how long each spent on each phase.
     this.timelines = new Map();
+    // Deleted rooms whose turns are still finishing: they keep their folder until those end (see #keepsFolder).
+    this.draining = new Map();
     // While acting on a turn's outcome (#actOnOutcome): rooms whose saves wait for one save at the end, and the turn
     // whose outcome it is (questions asked then remember it, so acting on it again after a restart doesn't ask twice).
     this.outcomeRooms = new Set();
@@ -717,9 +720,12 @@ export class Engine extends EventEmitter {
   }
 
   /** What, desk-wide, keeps a queued request from starting. Following a turn the Codex app already has is never held up. */
-  blockersFor(req) {
+  blockersFor(req, room = null) {
     if (req.attach) return [];
     const out = [];
+    // A build's work waits while another room is building in the same folder (one builder per folder).
+    const holder = room && this.#needsFolder(room, req) ? this.#folderBlocker(room) : null;
+    if (holder) out.push(`“${holder.title}” is building in this folder`);
     if (this.deskProblem) out.push(this.deskProblem.kind === "unreadable" ? "Toryo can't read its desk controls" : "Toryo couldn't save your desk controls");
     if (this.desk.paused) out.push("everything is paused");
     // Holds are on agents: Toryo's own checks aren't held, only paused with everything else.
@@ -753,6 +759,8 @@ export class Engine extends EventEmitter {
         if (this.shuttingDown) break;
         // A window that has reset since the last look (a desk that slept through it, say) is decided before anything starts.
         this.#expireGuards();
+        // Folders whose builds are over are let go before anything is started in them.
+        this.#settleClaims(touched);
         for (const room of this.rooms.values()) {
           if (room.archived) continue;
           // A turn the Codex app has accepted is followed even in a paused or stopped room: it runs in the app anyway.
@@ -770,6 +778,7 @@ export class Engine extends EventEmitter {
           }
           if (!best) break;
           best.room.queue.splice(best.room.queue.indexOf(best.req), 1);
+          if (this.#needsFolder(best.room, best.req)) this.#takeFolder(best.room);
           if (best.req.kind === "gates") this.#startChecks(best.room, best.req);
           else this.#startTurn(best.room, best.req);
           touched.add(best.room);
@@ -778,7 +787,7 @@ export class Engine extends EventEmitter {
         // loop: whoever hears it may change something (release a hold, queue a note), and that's looked at at once.
         for (const room of this.rooms.values()) {
           if (room.archived) continue;
-          const reasons = [...new Set(room.queue.flatMap((q) => this.blockersFor(q)))].join("; ");
+          const reasons = [...new Set(room.queue.flatMap((q) => this.blockersFor(q, room)))].join("; ");
           if (reasons === (room.deskNotice ?? "")) continue;
           const was = room.deskNotice;
           room.deskNotice = reasons || undefined;
@@ -809,7 +818,7 @@ export class Engine extends EventEmitter {
     const out = new Map();
     let first = null;
     for (const req of room.queue) {
-      const own = this.blockersFor(req);
+      const own = this.blockersFor(req, room);
       if (own.length) {
         out.set(req, own);
         if (!req.parallel) first ??= req;
@@ -874,6 +883,11 @@ export class Engine extends EventEmitter {
     }
     // Rooms saved before runs were tracked: what they have queued belongs to their current run.
     room.flow ??= shortId("f");
+    // A build in progress from before folders were claimed: it claims its folder from when it started, so the
+    // earliest of two such builds in one folder goes on and the other waits for it.
+    const project = this.project(room.projectId);
+    if (room.folderClaim === undefined && room.mode === "build" && room.build && !room.done && project)
+      room.folderClaim = { ...this.#folderOf(project), at: room.build.startedAt ?? room.createdAt };
     // Older versions kept final-review intent only in room.build.final; reviews, checks and the reviewer's
     // questions carry it themselves now. Fill it in from there for anything saved before that.
     const legacyFinal = Boolean(room.build?.final);
@@ -1029,6 +1043,8 @@ export class Engine extends EventEmitter {
       held: room.queue.length > 0 && room.queue.every((q) => this.#heldUp(room).has(q)),
       // The session so far, phase by phase (until rooms have sessions, a room's whole history).
       session: this.#session(room),
+      // A build's folder: whether this room is building in it (and who waits for it), or waits for the room that is.
+      folder: this.#folderView(room),
       updatedAt: room.updatedAt,
       crew: room.crew,
     };
@@ -1127,6 +1143,8 @@ export class Engine extends EventEmitter {
           lastOutputAt: last?.at ?? run.workingAt ?? null,
           activity: last?.text ?? null,
           questions: this.#allWaiting(room).length + (room.openChat?.length ?? 0),
+          // Rooms whose build waits for this one's folder (one builder per folder).
+          folderWaiting: this.#folderView(room)?.waiting ?? [],
         };
       })
       .sort((a, b) => (a.startedAt ?? "").localeCompare(b.startedAt ?? ""));
@@ -1251,9 +1269,11 @@ export class Engine extends EventEmitter {
 
   // ---------------------------------------------------------------- rooms
 
-  createRoom({ projectId, title, mode = "chat", members, builder, reviewer, settings, task, planPath, topic, text, to, discuss, allowWrite, reviewFirst, handoff, slice, appThread }) {
+  createRoom({ projectId, title, mode = "chat", members, builder, reviewer, settings, task, planPath, topic, text, to, discuss, allowWrite, reviewFirst, handoff, slice, appThread, wait = false }) {
     const project = this.project(projectId);
     if (!project) throw new UserError("Choose a project first.");
+    // A build in a folder another room is building in: refused before the room exists, unless it's to wait.
+    if (mode === "build" && !wait) this.#checkFolder(project, null);
     const order = Object.keys(this.adapters);
     members = [...new Set((members?.length ? members : ["codex", "claude"]).filter((a) => this.adapters[a]))].sort(
       (a, b) => order.indexOf(a) - order.indexOf(b),
@@ -1299,7 +1319,7 @@ export class Engine extends EventEmitter {
     this.#system(room, `Room opened in ${project.name} (${project.path}) with ${members.map((m) => this.label(m)).join(" and ")}.`);
     if (thread) this.#warnSharedThread(room);
     this.#save(room);
-    if (mode === "build") this.startBuild(room.id, { task: task ?? text, planPath, reviewFirst, handoff, slice });
+    if (mode === "build") this.startBuild(room.id, { task: task ?? text, planPath, reviewFirst, handoff, slice, wait });
     else if (mode === "plan") this.startPlan(room.id, { topic: topic ?? text });
     else if (text?.trim()) this.postMessage(room.id, { text, to: to ?? "everyone", discuss, allowWrite });
     this.emit("state");
@@ -1308,20 +1328,33 @@ export class Engine extends EventEmitter {
 
   deleteRoom(roomId) {
     const room = this.#room(roomId);
+    // The app may go on writing in the folder after Toryo stops following it, with no telling when it ends: a room
+    // with a Codex app turn going on (being prepared, handed over, followed, or just ended and still being recorded)
+    // or kept isn't deleted until that turn is over or you let it go.
+    if (room.appTurn || this.#runningIn(room).some((r) => r.agent === "codexapp"))
+      throw new UserError("The Codex app still has a turn from this room and may be writing in its folder. Wait for it to end, or stop the room and press Stop again to let that turn go; then delete the room.", 409);
     for (const run of this.#runningIn(room)) {
       run.controller.abort("delete");
       run.abandon?.abort();
     }
     room.archived = true;
     this.rooms.delete(room.id);
+    // Its turns still finishing keep its folder until they've ended.
+    if (room.folderClaim && this.#runningIn(room).length) this.draining.set(room.id, room);
     this.notable.delete(room.id);
     this.timelines.delete(room.id);
     this.store.saveRoom(room);
     this.emit("state");
+    // A room waiting for the folder this one was building in can go on.
+    this.#schedule();
   }
 
-  startBuild(roomId, { task, planPath, builder, reviewer, reviewFirst, handoff, slice } = {}) {
+  startBuild(roomId, { task, planPath, builder, reviewer, reviewFirst, handoff, slice, wait = false } = {}) {
     const room = this.#room(roomId);
+    // Another room building in this folder: refused, unless it's to wait (its work starts when the folder is free).
+    const project = this.project(room.projectId);
+    if (!wait) this.#checkFolder(project, room);
+    const kept = this.#keepsFolder(room);
     // Check the handoff before changing anything, so a failed start leaves the room as it was.
     const nextBuilder = builder && room.crew.members.includes(builder) ? builder : room.swapPending ? room.crew.reviewer : room.crew.builder;
     if (reviewFirst) handoff = this.#handoffFor(this.project(room.projectId), nextBuilder, handoff, room.sessions.codexapp);
@@ -1333,6 +1366,8 @@ export class Engine extends EventEmitter {
     room.mode = "build";
     room.done = false;
     room.stopped = false;
+    // The folder: kept if this room already had it, taken if it's free; otherwise taken when its work can start.
+    room.folderClaim = kept ? room.folderClaim : !this.#folderHolder(this.#folderOf(project), room) ? { ...this.#folderOf(project), at: nowIso() } : null;
     this.#markPause(room);
     this.#clearWaiting(room, "(superseded: building started)");
     room.discuss = null;
@@ -1724,7 +1759,7 @@ export class Engine extends EventEmitter {
     return { event: ev };
   }
 
-  answer(roomId, { text, accept, questionId }) {
+  answer(roomId, { text, accept, questionId, wait = false }) {
     const room = this.#room(roomId);
     const w = this.#allWaiting(room).find((x) => !questionId || x.eventId === questionId);
     if (!w) {
@@ -1739,9 +1774,10 @@ export class Engine extends EventEmitter {
     if (w.kind === "plan-checkpoint") return accept ? this.acceptCheckpoint(roomId, { questionId: w.eventId }) : this.synthesize(roomId, { questionId: w.eventId, decisions: text });
     // The plan-ready recommendation is an action: start building with the plan. A written answer asks for changes.
     if (w.kind === "plan-ready" && accept) {
+      if (!wait) this.#checkFolder(this.project(room.projectId), room);
       this.#takeWaiting(room, w);
       this.#closeQuestion(room, "Start building", w);
-      return this.startBuild(roomId, { planPath: w.planPath || room.plan?.planPath });
+      return this.startBuild(roomId, { planPath: w.planPath || room.plan?.planPath, wait });
     }
     const body = accept ? acceptRecommendation(w.recommendation) : String(text ?? "").trim();
     if (!body) throw new UserError("Write an answer first.");
@@ -2005,7 +2041,7 @@ export class Engine extends EventEmitter {
         break;
       }
       case "start-build":
-        return this.startBuild(roomId, { task: args.task, planPath: args.planPath ?? room.plan?.planPath, builder: args.builder, reviewer: args.reviewer, reviewFirst: args.reviewFirst, handoff: args.handoff, slice: args.slice });
+        return this.startBuild(roomId, { task: args.task, planPath: args.planPath ?? room.plan?.planPath, builder: args.builder, reviewer: args.reviewer, reviewFirst: args.reviewFirst, handoff: args.handoff, slice: args.slice, wait: Boolean(args.wait) });
       case "start-plan":
         return this.startPlan(roomId, { topic: args.topic, participants: args.participants });
       case "new-session":
@@ -2539,17 +2575,19 @@ export class Engine extends EventEmitter {
       this.store.saveRoom(room);
       return;
     }
-    const after = snapOn ? await this.snapshots.take(project, `after ${turnId} ${req.agent} ${req.kind}`) : null;
-    const files = before && after ? await this.snapshots.changes(project, before.commit, after.commit) : [];
-    this.running.delete(turnId);
-    if (result.sessionId) room.sessions[req.agent] = result.sessionId;
     // Handing the message to the Codex app ended without an answer (it ran out of time, or was stopped): the app may
     // have it. Keep the thread, and follow the turn by its marker if the app sends it; never send it again by itself.
+    // Kept at once, before the snapshot below is awaited, so nothing in between (a deletion, say) takes it for unsent.
     if (result.uncertain && !room.appTurn) {
       room.appTurn = this.#appTurnFrom(room, this.#followReq(req, ev));
       room.appTurn.uncertain = true;
       run.uncertain = true;
+      this.#save(room);
     }
+    const after = snapOn ? await this.snapshots.take(project, `after ${turnId} ${req.agent} ${req.kind}`) : null;
+    const files = before && after ? await this.snapshots.changes(project, before.commit, after.commit) : [];
+    this.running.delete(turnId);
+    if (result.sessionId) room.sessions[req.agent] = result.sessionId;
     // A Cursor chat that had an Ask-mode turn keeps Ask mode: remember it, so its next turn that writes starts a new chat.
     if (result.askMode && result.sessionId) (room.askMode ??= {})[req.agent] = result.sessionId;
     // Usually the reading the turn already streamed; that one isn't news.
@@ -3569,6 +3607,138 @@ export class Engine extends EventEmitter {
     return from > 0 ? events.slice(from) : events;
   }
 
+  // ---------------------------------------------------------------- one builder per folder
+
+  /**
+   * The folder a project's builds write in, as one identity: the top of its Git working tree, so another project
+   * naming the same repository, a link to it, or a folder inside it is the same folder (a linked worktree is a
+   * folder of its own); outside Git, the real folder. Found once per project folder.
+   */
+  #folderOf(project) {
+    this.folders ??= new Map();
+    if (!this.folders.has(project.path)) {
+      let real = resolve(project.path);
+      try {
+        real = realpathSync(real);
+      } catch {
+        /* a folder that isn't there: its path as given */
+      }
+      let id = { root: real, git: false };
+      try {
+        const top = execFileSync("git", ["-C", real, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+        if (top) id = { root: realpathSync(top), git: true };
+      } catch {
+        /* not a Git folder */
+      }
+      this.folders.set(project.path, id);
+    }
+    return this.folders.get(project.path);
+  }
+
+  /** Two folders are the same when they're one Git working tree, or (outside Git) one is inside the other. */
+  #sameFolder(a, b) {
+    if (a.root === b.root) return true;
+    if (a.git && b.git) return false;
+    return a.root.startsWith(b.root + sep) || b.root.startsWith(a.root + sep);
+  }
+
+  /**
+   * Whether a room still has its folder. As long as anything it started is still going, whatever has happened to the
+   * room since (stopped, moved on to chat or planning, deleted): a turn running, or a Codex app turn it keeps, which
+   * the app may still be writing in. Otherwise, while its build is in progress: building, checks and reviews,
+   * paused, held or waiting for you. Not once the build is done, the room has moved on, or it was stopped.
+   */
+  #keepsFolder(room) {
+    if (!room.folderClaim) return false;
+    if (this.#runningIn(room).length || room.appTurn) return true;
+    return !room.archived && room.mode === "build" && Boolean(room.build) && !room.done && !room.stopped;
+  }
+
+  /**
+   * The rooms holding a folder, best first, the same order everywhere (refusals, what waits, what's shown): work
+   * actually going on there (a turn running, a Codex app turn kept) before a claim with nothing running, whatever
+   * their ages; then the earlier claim; then the room's id, so two claims made at the same moment don't both win.
+   */
+  #claimants(folder) {
+    const rank = (r) => [this.#runningIn(r).length || r.appTurn ? 0 : 1, r.folderClaim.at ?? "", r.id];
+    return [...this.rooms.values(), ...this.draining.values()]
+      .filter((r) => this.#keepsFolder(r) && this.#sameFolder(r.folderClaim, folder))
+      .map((r) => ({ r, k: rank(r) }))
+      .sort((a, b) => a.k[0] - b.k[0] || (a.k[1] < b.k[1] ? -1 : a.k[1] > b.k[1] ? 1 : 0) || (a.k[2] < b.k[2] ? -1 : a.k[2] > b.k[2] ? 1 : 0))
+      .map((x) => x.r);
+  }
+
+  /** The room building in a folder, if it isn't `except`. */
+  #folderHolder(folder, except) {
+    const top = this.#claimants(folder)[0] ?? null;
+    return top === except ? null : top;
+  }
+
+  /** The room a build's work waits for: the room holding its folder, when that isn't this one. */
+  #folderBlocker(room) {
+    const project = this.project(room.projectId);
+    if (!project) return null;
+    return this.#folderHolder(room.folderClaim ?? this.#folderOf(project), room);
+  }
+
+  /**
+   * Claims that have lapsed are let go for good (and saved), so a room that goes on later (resumed, written to)
+   * takes its folder again through the guard, never with its old place. A deleted room is forgotten once its last
+   * turn has ended.
+   */
+  #settleClaims(touched) {
+    for (const room of [...this.rooms.values(), ...this.draining.values()]) {
+      if (room.folderClaim && !this.#keepsFolder(room)) {
+        room.folderClaim = null;
+        if (!room.archived) touched?.add(room);
+      }
+      if (room.archived && !this.#runningIn(room).length) this.draining.delete(room.id);
+    }
+  }
+
+  /** A build's own work needs its folder; replies and discussions in the room don't. */
+  #needsFolder(room, req) {
+    return room.mode === "build" && Boolean(room.build) && !room.done && !FREE_KINDS.has(req.kind);
+  }
+
+  /** The folder becomes the room's as its build's work starts (it was free: the scheduler checked). */
+  #takeFolder(room) {
+    if (this.#keepsFolder(room)) return;
+    room.folderClaim = { ...this.#folderOf(this.project(room.projectId)), at: nowIso() };
+  }
+
+  /** A build can't start in a folder another room is building in: refused, naming that room, with the choices. */
+  #checkFolder(project, room) {
+    this.#settleClaims();
+    const holder = this.#folderHolder(this.#folderOf(project), room);
+    if (!holder) return;
+    throw Object.assign(
+      new UserError(
+        `“${holder.title}” is building in this folder (${this.#folderOf(project).root}), so this build can't start now. You can have it wait: it starts when “${holder.title}” is done or stopped. A copy of the folder for each room (a worktree) comes in a later update.`,
+        409,
+      ),
+      { code: "folder-busy", room: { id: holder.id, title: holder.title } },
+    );
+  }
+
+  /** For the summary: the folder a build uses, whether this room has it, which room it waits for, and who waits for it. */
+  #folderView(room) {
+    const project = this.project(room.projectId);
+    if (!project || room.mode !== "build" || !room.build || room.done) return null;
+    const id = room.folderClaim ?? this.#folderOf(project);
+    const blocker = this.#folderBlocker(room);
+    // Waiting means work queued that waits for the folder (a stopped room's next start would wait too, but nothing waits now).
+    const waitsFor = (room) => {
+      const b = this.#folderBlocker(room);
+      return b && room.queue.length && !room.stopped ? b : null;
+    };
+    const holding = !blocker && this.#keepsFolder(room) && this.#claimants(id)[0] === room;
+    if (!holding && !waitsFor(room)) return null;
+    const waiting = [];
+    if (holding) for (const r of this.rooms.values()) if (r !== room && !r.archived && r.mode === "build" && r.build && !r.done && waitsFor(r) === room) waiting.push({ id: r.id, title: r.title });
+    return { path: id.root, holding, waitsFor: holding ? null : { id: blocker.id, title: blocker.title }, waiting };
+  }
+
   /** What keeps a room busy, in words: turns and checks running, work queued, a Codex app turn it still keeps. */
   #busyWith(room) {
     const doing = { build: "building", review: "reviewing", plan: "planning", checks: "running", chat: "replying" };
@@ -3600,10 +3770,11 @@ export class Engine extends EventEmitter {
     }
     if (then.mode === "build") {
       if (!String(then.task ?? "").trim() && !String(then.planPath ?? "").trim()) throw new UserError("Give a task or a plan file.");
+      if (!then.wait) this.#checkFolder(this.project(room.projectId), room);
       // A build that starts by reviewing work already handed over needs the handoff now, before anything changes.
       const builder = then.builder && room.crew.members.includes(then.builder) ? then.builder : room.crew.builder;
       const handoff = then.reviewFirst ? this.#handoffFor(this.project(room.projectId), builder, then.handoff, room.sessions.codexapp) : undefined;
-      return () => this.startBuild(room.id, { task: then.task, planPath: then.planPath, builder: then.builder, reviewer: then.reviewer, reviewFirst: then.reviewFirst, handoff, slice: then.slice });
+      return () => this.startBuild(room.id, { task: then.task, planPath: then.planPath, builder: then.builder, reviewer: then.reviewer, reviewFirst: then.reviewFirst, handoff, slice: then.slice, wait: Boolean(then.wait) });
     }
     throw new UserError("The first step is a message (chat), a planning topic (plan) or a build task (build).");
   }

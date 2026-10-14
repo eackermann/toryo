@@ -757,3 +757,34 @@ test("a stop while a restarted desk is acting on that outcome: still one review,
     }
   }
 });
+
+test("a build whose Codex app turn Toryo lost track of keeps its folder when stopped, until you let that turn go", async () => {
+  const t = await setup([{ agent: "claude", hang: true }]);
+  try {
+    const { app, calls } = fakeApp();
+    const e = await engineWith(t, { codexapp: app });
+    const a = e.createRoom({ projectId: "repo", mode: "build", members: ["codexapp", "claude"], builder: "codexapp", reviewer: "claude", task: "APP-BUILD", title: "App build", appThread: "t1", settings: { snapshots: false } });
+    await waitFor(() => calls.length === 1, { label: "sent" });
+    calls[0].args.onSubmitted();
+    calls[0].settle({ text: "", sessionId: "t1", error: "Timed out following the Codex app.", timedOut: true });
+    await waitFor(() => e.rooms.get(a.id)?.appTurn?.lost, { label: "lost track of it" });
+    // Stopped, nothing running: the app may still be writing, so the folder is still this room's.
+    e.control(a.id, "stop");
+    assert.equal(e.running.size, 0);
+    assert.throws(() => e.createRoom({ projectId: "repo", mode: "build", members: ["claude"], task: "Elsewhere" }), (err) => err.code === "folder-busy" && err.room.id === a.id);
+    // Nor can the room be deleted: nothing would be left to say the app may be writing there.
+    assert.throws(() => e.deleteRoom(a.id), (err) => err.status === 409 && /The Codex app still has a turn from this room and may be writing in its folder/.test(err.message));
+    assert.ok(e.rooms.has(a.id));
+    // Let go (Stop again): the folder is free.
+    e.control(a.id, "stop");
+    assert.equal(e.rooms.get(a.id).appTurn, null);
+    assert.equal(e.summary(e.rooms.get(a.id)).folder, null);
+    const b = e.createRoom({ projectId: "repo", mode: "build", members: ["claude"], task: "Elsewhere", title: "After", settings: { gates: false, snapshots: false } });
+    assert.equal(e.summary(e.rooms.get(b.id)).folder.holding, true);
+    e.control(b.id, "stop");
+    await waitFor(() => e.running.size === 0, { label: "stopped" });
+    e.shutdown();
+  } finally {
+    t.cleanup();
+  }
+});
