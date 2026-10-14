@@ -141,6 +141,42 @@ try {
   page.on("pageerror", (e) => errors.push(String(e.stack ?? e)));
   page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
   page.on("request", (r) => !r.url().startsWith(url) && outside.push(r.url()));
+  // For the steps on Home that have failed now and then (5s's Back, 5t's question cards): when one times out, what
+  // the page was doing, to tell a page bug from the check's timing.
+  const inflight = new Map();
+  const navigations = [];
+  page.on("request", (r) => inflight.set(r, Date.now()));
+  page.on("requestfinished", (r) => inflight.delete(r));
+  page.on("requestfailed", (r) => inflight.delete(r));
+  page.on("framenavigated", (f) => f === page.mainFrame() && navigations.push(`${new Date().toISOString().slice(11, 23)} ${f.url()}`));
+  const explained = async (step, wait, more = async () => "") => {
+    try {
+      return await wait();
+    } catch (error) {
+      const shown = await page
+        .evaluate(() => ({ hash: location.hash, home: !document.querySelector("#home").hidden, room: document.querySelector("#roomTitle")?.textContent ?? null, cards: [...document.querySelectorAll("#home .ask")].map((n) => n.dataset.q) }))
+        .catch((e) => String(e));
+      const path = (r) => new URL(r.url()).pathname + new URL(r.url()).search;
+      console.error(`${step} timed out. The page: ${JSON.stringify(shown)}`);
+      // The live-update stream never finishes, and Playwright doesn't report one replaced by a reload as closed, so
+      // there's one per page load: counted, not listed.
+      const pending = [...inflight].filter(([r]) => path(r) !== "/api/events");
+      console.error(`Requests on their way: ${pending.map(([r, t]) => `${r.method()} ${path(r)} for ${Date.now() - t} ms`).join("; ") || "none"} (and ${inflight.size - pending.length} live-update streams, one per page load)`);
+      console.error(`Latest navigations: ${navigations.slice(-6).join("; ") || "none"}`);
+      // Whether the page can still reach the desk now (a page whose connections are all held would wait here too).
+      const fresh = await page
+        .evaluate(async () => {
+          const t = performance.now();
+          const answer = await Promise.race([fetch("/api/state").then(() => "back"), new Promise((r) => setTimeout(() => r("not back"), 5000))]);
+          return `${answer} after ${Math.round(performance.now() - t)} ms`;
+        })
+        .catch((e) => String(e));
+      console.error(`A request sent from the page now: ${fresh}`);
+      const extra = await more().catch((e) => String(e));
+      if (extra) console.error(extra);
+      throw error;
+    }
+  };
   await page.goto(url);
   await page.waitForSelector("#newRoomBtn");
 
@@ -903,7 +939,7 @@ try {
   await page.keyboard.press("Enter");
   await page.waitForFunction((id) => location.hash === `#/r/${id}`, hostile.id);
   await page.goBack();
-  await page.waitForFunction(() => !document.querySelector("#home").hidden);
+  await explained("Home after Back (5s)", () => page.waitForFunction(() => !document.querySelector("#home").hidden));
   // A turn's times: preparing first (it takes a while to start), then working, with what it runs.
   const phased = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], title: "Phases room", text: "Phases for Home.", to: "codex" });
   const card = `#home .workcard[href="#/r/${phased.id}"]`;
@@ -1010,7 +1046,10 @@ try {
     const r = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], title, text: "Ask me.", to: "codex" });
     await until(async () => (await questions(r.id)).length === 1 && (await view(r.id)).live.length === 0);
     const [q] = await questions(r.id);
-    await page.waitForSelector(`#home .ask[data-q="${q.id}"]`);
+    await explained(`Home's card for ${title}'s question (5t)`, () => page.waitForSelector(`#home .ask[data-q="${q.id}"]`), async () => {
+      const home = await (await fetch(`${url}api/home`)).json();
+      return `The desk's Home lists ${home.questionCount} questions: ${home.questions.map((x) => x.id).join(", ")}; this one is ${q.id}.`;
+    });
     return { room: r, q, card: `#home .ask[data-q="${q.id}"]` };
   };
   await page.click("a.brand");
@@ -1207,10 +1246,13 @@ try {
   await page.waitForSelector('#sessionStrip:not([hidden]) .ss-lane[data-lane="other"] .ss-seg');
   const stripSeg = '#sessionStrip .ss-lane[data-lane="other"] .ss-seg';
   assert.match(await page.getAttribute(stripSeg, "title"), /^Codex, reply: \d\d:\d\d–now \(\d+ s\)$/);
-  const segWidth = await page.$eval(stripSeg, (a) => a.getBoundingClientRect().width);
+  // It grows while it runs: its length (a segment that started with the session fills the strip throughout, so its
+  // width alone can't say).
+  const seconds = async () => Number((await page.getAttribute(stripSeg, "title")).match(/\((\d+) s\)/)?.[1] ?? NaN);
+  const ranFor = await seconds();
   await until(async () => (await view(stripRoom.id)).live.length === 0);
   await page.waitForFunction((sel) => !/now/.test(document.querySelector(sel)?.title ?? "now"), stripSeg);
-  assert.ok((await page.$eval(stripSeg, (a) => a.getBoundingClientRect().width)) > segWidth, "it grew while it ran");
+  assert.ok((await seconds()) > ranFor, "it grew while it ran");
   assert.match(await page.innerText("#sessionStrip .ss-words"), /^Other work \d+ s · \d+ s in all$/);
   const stripTurn = (await view(stripRoom.id)).events.find((e) => e.type === "turn");
   // A piece of the strip: its turn, in view.
@@ -1279,6 +1321,21 @@ try {
     longEvents.push({ id: `s${i}`, type: "system", text: `Note ${i}.`, level: "info", at: stamp(2 * i + 1) });
   }
   writeFileSync(join(home3, "rooms", longId, "events.jsonl"), longEvents.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  // A session with a 9-hour break: two hours of work, nothing for nine, an hour more, ending now.
+  const breakId = "rbreakroom001";
+  const breakStart = Date.now() - 12 * 3_600_000;
+  const at = (h) => new Date(breakStart + h * 3_600_000).toISOString();
+  mkdirSync(join(home3, "rooms", breakId), { recursive: true });
+  writeFileSync(
+    join(home3, "rooms", breakId, "room.json"),
+    JSON.stringify({ id: breakId, projectId: "ui", title: "Break room", mode: "chat", createdAt: at(0), updatedAt: at(12), crew: { members: ["codex"], builder: "codex", reviewer: "codex" }, sessions: {}, seen: {}, queue: [], flow: "fbreak", paused: false, stopped: false, done: false, waiting: null, waitingQueue: [], settings: { ...DEFAULT_SETTINGS }, build: null, plan: null, discuss: null, stats: { turns: 0, agents: {} } }),
+  );
+  const breakEvents = [
+    [0, 1],
+    [1, 2],
+    [11, 12],
+  ].map(([a, b], i) => ({ id: `b${i}`, type: "turn", agent: "codex", role: "builder", kind: "build", state: "done", at: at(a), startedAt: at(a), endedAt: at(b), text: `Turn ${i}.` }));
+  writeFileSync(join(home3, "rooms", breakId, "events.jsonl"), breakEvents.map((e) => JSON.stringify(e)).join("\n") + "\n");
   const port3 = await new Promise((resolve) => {
     const srv = createServer().listen(0, "127.0.0.1", () => {
       const p3 = srv.address().port;
@@ -1309,6 +1366,47 @@ try {
     assert.ok(longest < 1000, `a refresh of a room with 3000 events held the page for ${Math.round(longest)} ms`);
     assert.match(await long.innerText("#sessionStrip .ss-words"), longWords);
     await long.close();
+    // The ruler's labels never overlap, whatever the width: a break's length is drawn whole, centred on the break,
+    // and clock times too close to it (or to each other) are left out, their ticks kept.
+    const rulerFits = async (brk, where) => {
+      const layout = await brk.$eval("#sessionStrip .ss-ruler", (rule) => {
+        const r = rule.getBoundingClientRect();
+        const labels = [...rule.querySelectorAll(".ss-tick, .ss-rlabel")].filter((n) => n.textContent).map((n) => {
+          const b = n.getBoundingClientRect();
+          return { text: n.textContent, a: b.left, b: b.right, clipped: n.scrollWidth > n.clientWidth + 1 };
+        });
+        const hatch = rule.querySelector(".ss-rbreak").getBoundingClientRect();
+        const label = rule.querySelector(".ss-rlabel").getBoundingClientRect();
+        return { left: r.left, right: r.right, width: r.width, labels: labels.sort((x, y) => x.a - y.a), breakMid: (hatch.left + hatch.right) / 2, labelMid: (label.left + label.right) / 2 };
+      });
+      where = `${where} (a ruler ${Math.round(layout.width)} px wide)`;
+      for (let i = 1; i < layout.labels.length; i++) assert.ok(layout.labels[i].a >= layout.labels[i - 1].b - 0.5, `${where}: “${layout.labels[i - 1].text}” and “${layout.labels[i].text}” overlap`);
+      assert.ok(layout.labels.every((l) => l.a >= layout.left - 0.5 && l.b <= layout.right + 0.5 && !l.clipped), `${where}: a label is cut off`);
+      assert.ok(layout.labels.some((l) => l.text === "9 h 00"), `${where}: the break's length is drawn`);
+      assert.ok(Math.abs(layout.labelMid - layout.breakMid) < 1, `${where}: the break's length is centred on it`);
+    };
+    const openBreak = async (width) => {
+      const brk = await (await browser.newContext({ viewport: { width, height: 800 } })).newPage();
+      brk.on("pageerror", (e) => errors.push(String(e)));
+      await brk.goto(`http://localhost:${port3}/#/r/${breakId}`);
+      await brk.waitForSelector("#sessionStrip:not([hidden]) .ss-ruler .ss-rlabel");
+      return brk;
+    };
+    for (const width of [1344, 1100, 900]) {
+      const brk = await openBreak(width);
+      await rulerFits(brk, `at ${width} px`);
+      await brk.context().close();
+    }
+    // A ruler already open, its window made narrower: the labels are laid out again at once, with nothing else
+    // happening in the room. (Above 1180 px the side column stays, so the ruler narrows with the window: about 928,
+    // 628 and 509 px here.)
+    const resized = await openBreak(1600);
+    for (const width of [1300, 1181]) {
+      await resized.setViewportSize({ width, height: 800 });
+      await resized.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      await rulerFits(resized, `resized to ${width} px`);
+    }
+    await resized.context().close();
   } finally {
     desk3.kill("SIGTERM");
     await new Promise((r) => desk3.once("exit", r));
@@ -1357,6 +1455,110 @@ try {
   await page.waitForSelector('#log .sessionmark:has-text("Session 3 started")');
   assert.deepEqual(await page.$$eval("#log details.sessionfold > summary b", (bs) => bs.map((b) => b.textContent)), ["Session 1", "Session 2"]);
   assert.equal(await page.isVisible(`#log [data-id="${sprintReply.id}"]`), false, "session 2's reply is in its fold");
+  await page.waitForFunction(() => /^Session 3 · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+
+  // 5xa. Opening an earlier session in the transcript shows it on the strip; folding it again, or Back, returns the
+  // strip to the current one. The strip takes the whole width, the totals their own line under it, a ruler of clock
+  // times along it. It zooms with the wheel around the pointer (not the page), pans by dragging (a drag never a click),
+  // fits with a double-click, and does all of it from the keyboard.
+  const fold2 = '#log details.sessionfold[data-session="1"] > summary';
+  await page.click(fold2);
+  await page.waitForFunction(() => /^Session 2 \(earlier\) · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+  await page.click(fold2);
+  await page.waitForFunction(() => /^Session 3 · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+  await page.click(fold2);
+  await page.waitForFunction(() => /^Session 2 \(earlier\) · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+  await page.click("#sessionStrip .ss-back");
+  await page.waitForFunction(() => /^Session 3 · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+  assert.equal(await page.$eval('#log details.sessionfold[data-session="1"]', (d) => d.open), true, "Back leaves the fold as it was");
+  // The transcript drawn again (a saved room setting fetches the room afresh) draws the open fold again: that isn't
+  // you opening it, so the strip stays on the current session.
+  await page.$eval('#log details.sessionfold[data-session="1"]', (d) => (d.dataset.old = "1"));
+  await page.click("#roomTitle");
+  await page.click('#roomForm button[type="submit"]');
+  await page.waitForFunction(() => {
+    const d = document.querySelector('#log details.sessionfold[data-session="1"]');
+    return d && !d.dataset.old;
+  });
+  await page.waitForTimeout(200);
+  assert.equal(await page.$eval('#log details.sessionfold[data-session="1"]', (d) => d.open), true);
+  assert.match(await page.innerText("#sessionStrip .ss-words"), /^Session 3 · /, "a fold drawn again isn't you choosing it");
+  await page.click(fold2);
+  await page.click(fold2);
+  await page.waitForFunction(() => /^Session 2 \(earlier\) · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+  const box = (sel) => page.$eval(sel, (n) => { const r = n.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; });
+  const strip = await box("#sessionStrip .ss-view");
+  const head = await box("#roomhead");
+  assert.ok(strip.w > head.w * 0.85, `the strip spans the column (${strip.w} of ${head.w})`);
+  assert.ok((await box("#sessionStrip .ss-side")).y >= strip.y + strip.h - 1, "the totals are on their own line, under it");
+  const ticks = await page.$$eval("#sessionStrip .ss-ruler .ss-tick", (ts) => ts.map((t) => t.textContent));
+  assert.ok(ticks.length >= 1 && ticks.every((t) => /^(\d{1,2} [A-Z][a-z]{2} )?\d\d:\d\d(:\d\d)?$/.test(t)), ticks.join(", "));
+  const scrolls = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("#main, .relay, #log")].map((n) => n.scrollTop)]);
+  const scrolled = await scrolls();
+  const segLeft = () => page.$eval("#sessionStrip .ss-seg", (n) => parseFloat(n.style.left));
+  const whole = await segLeft();
+  // A drag that starts and ends on a segment isn't a click on it. Shown whole, the strip has nowhere to pan, so
+  // nothing is drawn again under the pointer: only the strip's own guards keep the click from the segment.
+  await page.evaluate(() => {
+    window.__segClicks = 0;
+    document.addEventListener("click", (e) => e.target.closest?.("#sessionStrip [data-seg]") && window.__segClicks++);
+  });
+  const seg = await box("#sessionStrip .ss-seg");
+  await page.mouse.move(seg.x + 4, seg.y + seg.h / 2);
+  await page.mouse.down();
+  await page.mouse.move(seg.x + 80, seg.y + seg.h / 2, { steps: 4 });
+  await page.mouse.move(seg.x + 4, seg.y + seg.h / 2, { steps: 4 });
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => window.__segClicks), 0, "a drag is never a click");
+  assert.match(await page.innerText("#sessionStrip .ss-words"), /^Session 2 \(earlier\) · /, "and nothing followed the link");
+  assert.equal(await page.innerText("#roomTitle"), "Strip room");
+  assert.equal(await segLeft(), whole, "nowhere to pan");
+  // Whether or not anything could scroll under it, the wheel over the strip is the strip's alone.
+  await page.evaluate(() => {
+    window.__wheels = [];
+    document.addEventListener("wheel", (e) => window.__wheels.push(e.defaultPrevented), { passive: true });
+  });
+  await page.mouse.move(strip.x + strip.w * 0.3, strip.y + strip.h / 2);
+  await page.mouse.wheel(0, -600);
+  await page.waitForSelector("#sessionStrip [data-strip=fit]:not([hidden])");
+  assert.deepEqual(await scrolls(), scrolled, "the wheel zoomed the strip, not the page");
+  assert.deepEqual([...new Set(await page.evaluate(() => window.__wheels))], [true], "the page never takes the strip's wheel");
+  assert.notEqual(await segLeft(), whole);
+  // A press released outside the strip before it became a drag (the pointer went down, off the strip) ends there:
+  // coming back over the strip with no button pressed doesn't pan it.
+  const zoomedLeft = await segLeft();
+  await page.mouse.move(strip.x + strip.w * 0.6, strip.y + strip.h - 4);
+  await page.mouse.down();
+  await page.mouse.move(strip.x + strip.w * 0.6 + 2, strip.y + strip.h + 160, { steps: 4 });
+  await page.mouse.up();
+  await page.mouse.move(strip.x + strip.w * 0.6 - 120, strip.y + strip.h - 4, { steps: 6 });
+  assert.equal(await segLeft(), zoomedLeft, "no button pressed, no panning");
+  assert.equal(await page.$eval("#sessionStrip .ss-view", (n) => n.classList.contains("dragging")), false);
+  assert.match(await page.innerText("#sessionStrip .ss-words"), /^Session 2 \(earlier\) · /);
+  const beforePan = await segLeft();
+  await page.mouse.move(strip.x + strip.w * 0.6, strip.y + strip.h - 4);
+  await page.mouse.down();
+  await page.mouse.move(strip.x + strip.w * 0.6 - 120, strip.y + strip.h - 4, { steps: 4 });
+  await page.mouse.up();
+  assert.ok((await segLeft()) < beforePan, "dragging left moves the time to the left");
+  // A double-click shows it whole again.
+  await page.dblclick("#sessionStrip .ss-ruler");
+  await page.waitForSelector("#sessionStrip [data-strip=fit]", { state: "hidden" });
+  const fitted = await segLeft();
+  // The keyboard: = zooms in, the arrows pan, 0 shows it whole.
+  await page.focus("#sessionStrip .ss-view");
+  await page.keyboard.press("=");
+  await page.waitForSelector("#sessionStrip [data-strip=fit]:not([hidden])");
+  const zoomed = await segLeft();
+  await page.keyboard.press("ArrowRight");
+  assert.ok((await segLeft()) < zoomed, "the right arrow shows later time");
+  await page.keyboard.press("0");
+  await page.waitForSelector("#sessionStrip [data-strip=fit]", { state: "hidden" });
+  assert.equal(await segLeft(), fitted, "the double-click and 0 show the same whole session");
+  // A click on a segment still goes to its turn.
+  await page.click("#sessionStrip .ss-seg");
+  await page.waitForFunction((id) => document.querySelector(`#log [data-id="${id}"]`)?.checkVisibility(), sprintReply.id);
+  await page.click(fold2);
   await page.waitForFunction(() => /^Session 3 · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
 
   // 5y. One builder per folder, and a room's own worktree. "Busy here" builds in the Home plan's folder (shared): the

@@ -221,6 +221,156 @@ export class Sessions {
   }
 }
 
+// ---------------------------------------------------------------- the strip's axis, ruler and zoom
+
+/**
+ * A session's place on the strip's x-axis: time to a fraction of the axis (0 to 1). Breaks (long stretches with
+ * nothing running) are drawn as 3% of the time worked each, so the work stays readable however long the room waited;
+ * the rest is to scale. `active`: the time that's to scale (the session less its breaks).
+ */
+export function sessionAxis(v) {
+  const removed = v.breaks.reduce((n, b) => n + (b.to - b.from), 0);
+  const active = Math.max(1, v.length - removed);
+  const short = active * 0.03;
+  const total = active + short * v.breaks.length;
+  const pos = (t) => {
+    let p = 0;
+    let cur = v.start;
+    for (const b of v.breaks) {
+      if (t <= b.from) break;
+      p += b.from - cur;
+      if (t < b.to) return (p + (short * (t - b.from)) / (b.to - b.from)) / total;
+      p += short;
+      cur = b.to;
+    }
+    return Math.min(total, p + Math.max(0, t - cur)) / total;
+  };
+  return { pos, active, total };
+}
+
+/** The ruler's steps between ticks, finest first: seconds to days. */
+const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800].map((s) => s * 1000);
+
+/**
+ * The ruler under the strip, for the part of the session in view (`from` to `to`, fractions of the axis): ticks at
+ * clock times, as many as fit (`maxTicks`), finer as you zoom in, a date where the day changes (and on the first tick
+ * when the session spans days); and each break in view, shown as a break with its length, never as time to scale.
+ * Positions are fractions of the view. Times are local, as the page shows them.
+ *
+ * Given the ruler's width in pixels (`px`) and a way to measure a label (`measure`, text to pixels), the labels are
+ * also laid out so none touches another (see `placeLabels`): each tick's `shown` says whether its label is drawn,
+ * `end` whether it sits left of its tick (near the right edge), and each break's `labelAt` where its length is drawn.
+ */
+export function ruler(v, { from = 0, to = 1, maxTicks = 8, px = null, measure = (text) => text.length * 6.2 } = {}) {
+  const { pos } = sessionAxis(v);
+  const width = Math.max(1e-9, to - from);
+  const at = (t) => (pos(t) - from) / width;
+  // The stretches drawn to scale, and how much of each is in view.
+  const stretches = [];
+  let cur = v.start;
+  for (const b of v.breaks) {
+    if (b.from > cur) stretches.push([cur, b.from]);
+    cur = Math.max(cur, b.to);
+  }
+  if (v.end > cur) stretches.push([cur, v.end]);
+  const inView = [];
+  for (const [a, b] of stretches) {
+    const pa = pos(a);
+    const pb = pos(b);
+    if (pb <= from || pa >= to || pb <= pa) continue;
+    const ta = a + ((Math.max(pa, from) - pa) / (pb - pa)) * (b - a);
+    const tb = a + ((Math.min(pb, to) - pa) / (pb - pa)) * (b - a);
+    inView.push([ta, tb]);
+  }
+  const shown = inView.reduce((n, [a, b]) => n + (b - a), 0);
+  const step = STEPS.find((s) => shown / s <= maxTicks) ?? STEPS.at(-1);
+  const multiDay = dayOf(v.start) !== dayOf(v.end);
+  const ticks = [];
+  let lastDay = null;
+  for (const [a, b] of inView) {
+    // Aligned to the local day (whole minutes, hours, days), not to the epoch.
+    const midnight = new Date(a);
+    midnight.setHours(0, 0, 0, 0);
+    const base = midnight.getTime();
+    for (let t = base + Math.ceil((a - base) / step) * step; t <= b; t += step) {
+      const d = new Date(t);
+      const day = dayOf(t);
+      const clock = `${pad(d.getHours())}:${pad(d.getMinutes())}${step < 60_000 ? `:${pad(d.getSeconds())}` : ""}`;
+      const newDay = lastDay != null ? day !== lastDay : multiDay;
+      const date = d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+      const isMidnight = d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0;
+      ticks.push({ at: t, pos: at(t), label: newDay ? (isMidnight && step >= 3_600_000 ? date : `${date} ${clock}`) : clock, date, clock, dated: newDay });
+      lastDay = day;
+    }
+  }
+  const breaks = v.breaks
+    .filter((b) => pos(b.to) > from && pos(b.from) < to)
+    .map((b) => ({ from: at(b.from), to: at(b.to), length: b.to - b.from, label: durationWords(b.to - b.from), why: b.why }));
+  if (px) placeLabels(ticks, breaks, px, measure);
+  return { step, ticks, breaks };
+}
+
+/**
+ * The ruler's labels on its one line, none touching another. A break's length comes first, centred on the break
+ * (a break is drawn narrow, often narrower than its label) and kept within the ruler. Then the ticks' clock times, left
+ * to right, each after its tick (or before it, near the right edge), leaving out any that would touch one already
+ * placed: its tick still shows, without a label. A date left out goes on the next label shown.
+ */
+function placeLabels(ticks, breaks, px, measure) {
+  const GAP = 6;
+  const PAD = 4;
+  const placed = [];
+  const free = (a, b) => a >= -0.5 && b <= px + 0.5 && placed.every(([x, y]) => b + GAP <= x || a >= y + GAP);
+  for (const b of breaks) {
+    const w = measure(b.label) + 2 * PAD;
+    const mid = ((b.from + b.to) / 2) * px;
+    const c = Math.min(Math.max(mid, w / 2), px - w / 2);
+    b.labelAt = c / px;
+    b.labelShown = mid >= 0 && mid <= px && free(c - w / 2, c + w / 2);
+    if (b.labelShown) placed.push([c - w / 2, c + w / 2]);
+  }
+  let date = null;
+  for (const t of ticks) {
+    const label = date && !t.dated ? `${t.date} ${t.clock}` : t.label;
+    const w = measure(label) + PAD;
+    const x = t.pos * px;
+    const end = x + w > px;
+    const [a, b] = end ? [x - w, x] : [x, x + w];
+    t.shown = free(a, b);
+    t.end = end;
+    if (t.shown) {
+      placed.push([a, b]);
+      t.label = label;
+      date = null;
+    } else if (t.dated) date = t.date;
+  }
+}
+
+/** The narrowest view of a session: half a minute of the time drawn to scale, or half of a session shorter than a minute. */
+export function minView(v) {
+  const { total } = sessionAxis(v);
+  return Math.min(0.5, 30_000 / total);
+}
+
+/**
+ * Zooming the strip's view (`view`: { from, to }, fractions of the axis) by `factor` (under 1: closer) around a point
+ * (`around`, a fraction of the axis), kept within the session and no narrower than `minView`. Panning is a zoom by 1
+ * with `shift` (a fraction of the axis).
+ */
+export function zoomView(v, view, { factor = 1, around = (view.from + view.to) / 2, shift = 0 } = {}) {
+  const span = Math.min(1, Math.max(minView(v), (view.to - view.from) * factor));
+  const ratio = (around - view.from) / Math.max(1e-9, view.to - view.from);
+  let from = around - ratio * span + shift;
+  from = Math.min(Math.max(0, from), 1 - span);
+  return { from, to: from + span };
+}
+
+const pad = (n) => String(n).padStart(2, "0");
+const dayOf = (t) => {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+};
+
 /** Intervals ([from, to] pairs, or { from, to }) merged where they touch. */
 function union(items) {
   const xs = items

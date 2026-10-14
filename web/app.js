@@ -3,7 +3,7 @@ import { noteIntent } from "./intent.js";
 import { limitMeters } from "./meters.js";
 import { stripStatus } from "./status.js";
 import { markAnimation, phases, rethemeSparklers, ringFor, ringParts, wakeSparklers, workKind } from "./rings.js";
-import { LANES, Sessions, durationWords, phaseList, sessionWords, workWords } from "./phases.js";
+import { LANES, Sessions, durationWords, phaseList, ruler, sessionAxis, sessionWords, workWords, zoomView } from "./phases.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -2560,9 +2560,12 @@ function newSessionSheet() {
 const LANE_NAMES = { plan: "Planning", build: "Building", review: "Reviewing", checks: "Checks", other: "Other work" };
 
 /**
- * The strip at the top of the room: one lane per phase on one time axis, long breaks drawn short, waiting for you
- * shaded, paused or held hatched, and the totals in words, which open the full list (for the keyboard and screen
- * readers). On a phone, one bar of the totals. Drawn from the room's events as they come, and once a minute.
+ * The strip at the top of the room, the whole width of the middle column: one lane per phase on one time axis, long
+ * breaks drawn short, waiting for you shaded, paused or held hatched, a ruler of clock times under it, and the totals
+ * in words on their own line, which open the full list (for the keyboard and screen readers). It zooms and pans (the
+ * wheel around the pointer, dragging, the keyboard, or its buttons; Fit and a double-click show it whole). It shows
+ * the session going on, or an earlier one you opened in the transcript. On a phone, one bar of the totals. Drawn from
+ * the room's events as they come, and once a minute.
  */
 function renderSession() {
   const box = $("#sessionStrip");
@@ -2583,7 +2586,12 @@ function renderSession() {
     return;
   }
   box.hidden = false;
-  const x = sessionAxis(v);
+  // The part of the session in view: all of it, until you zoom (kept per session shown).
+  const key = `${r.id}:${S.sessionShown.i}`;
+  if (S.stripZoom?.key !== key) S.stripZoom = { key, from: 0, to: 1 };
+  const { from: vFrom, to: vTo } = S.stripZoom;
+  const { pos } = sessionAxis(v);
+  const x = (t) => ((pos(t) - vFrom) / Math.max(1e-9, vTo - vFrom)) * 100;
   const span = (a, b, min = 0) => `left:${x(a).toFixed(3)}%;width:${Math.max(min, x(b) - x(a)).toFixed(3)}%`;
   const lanes = LANES.filter((lane) => lane !== "other" || v.totals.other > 0);
   const list = phaseList(v.totals);
@@ -2591,12 +2599,14 @@ function renderSession() {
   const worked = LANES.reduce((n, l) => n + v.totals[l], 0) || 1;
   // Built once, then changed in place, each part only when it changed: the words keep the focus while news comes in.
   if (!box.firstElementChild) {
-    box.innerHTML = `<div class="ss-track" role="img"></div><div class="ss-bar" aria-hidden="true"></div>
-      <div class="ss-side"><button type="button" class="ss-words" data-session-list title="The session, phase by phase"></button><button type="button" class="linkbtn ss-back" data-show-session="now" hidden></button></div>`;
+    box.innerHTML = `<div class="ss-view" tabindex="0" role="group" aria-keyshortcuts="+ - ArrowLeft ArrowRight 0" aria-label="The session's timeline: + and − zoom, the arrow keys pan, 0 shows it whole"><div class="ss-track" role="img"></div><div class="ss-ruler" aria-hidden="true"></div></div><div class="ss-bar" aria-hidden="true"></div>
+      <div class="ss-side"><button type="button" class="ss-words" data-session-list title="The session, phase by phase"></button><span class="ss-zoom"><button type="button" class="btn small quiet" data-strip="out" aria-label="Zoom out" title="Zoom out (−)">−</button><button type="button" class="btn small quiet" data-strip="in" aria-label="Zoom in" title="Zoom in (+)">+</button><button type="button" class="btn small quiet" data-strip="fit" title="The whole session (0, or double-click)" hidden>Fit</button></span><button type="button" class="linkbtn ss-back" data-show-session="now" hidden></button></div>`;
+    wireStrip(box);
   }
   const back = $(".ss-back", box);
   back.hidden = shown == null;
   back.textContent = `Back to session ${S.timeline.n}`;
+  $("[data-strip=fit]", box).hidden = vFrom <= 0 && vTo >= 1;
   const track = $(".ss-track", box);
   track.setAttribute("aria-label", sessionWords(v, shown != null ? `Session ${n}` : "This session"));
   setHtml(track, `${v.waiting.map(([a, b]) => `<i class="ss-shade" data-k="waiting" style="${span(a, b)}"></i>`).join("")}
@@ -2608,13 +2618,143 @@ function renderSession() {
             // A link to its turn or checks; work with nothing in the room yet (checks running) or ever (checks cut short) isn't one.
             s.inRoom === false
               ? `<i class="ss-seg" style="${span(s.from, s.to, 0.5)}" title="${esc(segmentWords(s))}"></i>`
-              : `<a href="#" class="ss-seg" data-seg="${esc(s.id)}" tabindex="-1" style="${span(s.from, s.to, 0.5)}" title="${esc(segmentWords(s))}"></a>`,
+              : `<a href="#" class="ss-seg" data-seg="${esc(s.id)}" tabindex="-1" draggable="false" style="${span(s.from, s.to, 0.5)}" title="${esc(segmentWords(s))}"></a>`,
           )
           .join("")}</div>`)
         .join("")}
-      ${v.breaks.map((b) => `<span class="ss-break" style="${span(b.from, b.to)}" title="${esc(`${durationWords(b.to - b.from)} ${b.why === "waiting" ? "waiting for you" : "with nothing running"}`)}">${esc(durationWords(b.to - b.from))}</span>`).join("")}`);
+      ${v.breaks.map((b) => `<span class="ss-break" style="${span(b.from, b.to)}" title="${esc(`${durationWords(b.to - b.from)} ${b.why === "waiting" ? "waiting for you" : "with nothing running"}`)}"></span>`).join("")}`);
+  // The ruler: clock times as many as fit, finer as you zoom in; breaks as breaks, with their lengths. Labels that
+  // would touch are left out (their ticks stay), measured in the ruler's own font.
+  const rule = $(".ss-ruler", box);
+  const px = track.clientWidth || 640;
+  const scale = ruler(v, { from: vFrom, to: vTo, maxTicks: Math.max(2, Math.floor(px / 84)), px, measure: measurer(rule) });
+  setHtml(
+    rule,
+    `${scale.breaks
+      .map((b) => `<span class="ss-rbreak" style="left:${(b.from * 100).toFixed(3)}%;width:${Math.max(0.5, (b.to - b.from) * 100).toFixed(3)}%" title="${esc(`${b.label} ${b.why === "waiting" ? "waiting for you" : "with nothing running"}, not to scale`)}"></span>`)
+      .join("")}${scale.ticks.map((t) => `<span class="ss-tick" ${t.end ? "data-end" : ""} style="left:${(t.pos * 100).toFixed(3)}%">${t.shown ? esc(t.label) : ""}</span>`).join("")}${scale.breaks
+      .filter((b) => b.labelShown)
+      .map((b) => `<span class="ss-rlabel" style="left:${(b.labelAt * 100).toFixed(3)}%">${esc(b.label)}</span>`)
+      .join("")}`,
+  );
   setHtml($(".ss-bar", box), LANES.filter((l) => v.totals[l] > 0).map((l) => `<i data-lane="${l}" style="width:${((v.totals[l] / worked) * 100).toFixed(2)}%"></i>`).join(""));
   setHtml($(".ss-words", box), `${esc(words)}${v.overlap ? `<span class="muted"> (phases overlap)</span>` : ""}`);
+}
+
+/** Text to its width in pixels, in a node's font (the ruler's labels). */
+let measuring = null;
+function measurer(node) {
+  measuring ??= document.createElement("canvas").getContext("2d");
+  const cs = getComputedStyle(node);
+  const font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  return (text) => {
+    measuring.font = font;
+    return measuring.measureText(text).width;
+  };
+}
+
+/**
+ * The strip's zoom and pan, wired once: the wheel over it zooms around the pointer (not the page), dragging pans (a
+ * drag is never a click on what it ends over), a double-click shows it whole, and so do its buttons and keys (+, −,
+ * the arrow keys, 0) when it has the focus.
+ */
+function wireStrip(box) {
+  const view = $(".ss-view", box);
+  const track = $(".ss-track", box);
+  // The ruler's labels are laid out for the strip's width: drawn again as soon as it changes (a resized window, a
+  // side panel opening), not a minute later.
+  let width = track.clientWidth;
+  new ResizeObserver(() => {
+    if (!track.clientWidth || track.clientWidth === width) return;
+    width = track.clientWidth;
+    renderSession();
+  }).observe(track);
+  const set = (next) => {
+    if (!S.session || !S.stripZoom) return;
+    S.stripZoom = { ...S.stripZoom, ...next };
+    renderSession();
+  };
+  const zoom = (opts) => S.session && S.stripZoom && set(zoomView(S.session, S.stripZoom, opts));
+  const pointAt = (clientX) => {
+    const rect = track.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (clientX - rect.left) / Math.max(1, rect.width)));
+    return S.stripZoom.from + f * (S.stripZoom.to - S.stripZoom.from);
+  };
+  view.addEventListener(
+    "wheel",
+    (e) => {
+      if (!S.stripZoom) return;
+      e.preventDefault();
+      zoom({ factor: Math.pow(1.0018, e.deltaY * (e.deltaMode === 1 ? 33 : 1)), around: pointAt(e.clientX) });
+    },
+    { passive: false },
+  );
+  let drag = null;
+  view.addEventListener("pointerdown", (e) => {
+    // A press starts afresh: a click swallowed after a drag is only ever the one that ended it.
+    end();
+    S.stripDragged = false;
+    if (e.button !== 0 || !S.stripZoom) return;
+    // Its release or cancellation ends it wherever it happens: until the drag starts the strip doesn't hold the
+    // pointer, and a release outside it would otherwise leave it panning under a pointer with no button pressed.
+    const done = new AbortController();
+    for (const type of ["pointerup", "pointercancel"]) window.addEventListener(type, (ev) => ev.pointerId === e.pointerId && end(), { capture: true, signal: done.signal });
+    drag = { id: e.pointerId, x: e.clientX, from: S.stripZoom.from, to: S.stripZoom.to, moved: false, done };
+  });
+  // The browser's own dragging of a segment (a link) would take the drag, and could follow the link when dropped.
+  view.addEventListener("dragstart", (e) => e.preventDefault());
+  view.addEventListener("pointermove", (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    // The button let go where the strip couldn't hear it (another window, say): the press is over.
+    if (!(e.buttons & 1)) return end();
+    const dx = e.clientX - drag.x;
+    if (!drag.moved && Math.abs(dx) < 4) return;
+    if (!drag.moved) {
+      drag.moved = true;
+      view.setPointerCapture(e.pointerId);
+      view.classList.add("dragging");
+    }
+    // From where the drag began, so it follows the pointer whatever came between.
+    if (S.session && S.stripZoom) set(zoomView(S.session, { from: drag.from, to: drag.to }, { shift: (-dx / Math.max(1, track.clientWidth)) * (drag.to - drag.from) }));
+  });
+  function end() {
+    if (drag?.moved) S.stripDragged = true;
+    drag?.done.abort();
+    drag = null;
+    view.classList.remove("dragging");
+  }
+  view.addEventListener("pointerup", end);
+  view.addEventListener("pointercancel", end);
+  // A drag that ends over a segment isn't a click on it.
+  view.addEventListener(
+    "click",
+    (e) => {
+      if (!S.stripDragged) return;
+      S.stripDragged = false;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true,
+  );
+  view.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    set({ from: 0, to: 1 });
+  });
+  view.addEventListener("keydown", (e) => {
+    if (!S.stripZoom) return;
+    const span = S.stripZoom.to - S.stripZoom.from;
+    const keys = { "+": { factor: 0.5 }, "=": { factor: 0.5 }, "-": { factor: 2 }, _: { factor: 2 }, ArrowLeft: { shift: -span / 4 }, ArrowRight: { shift: span / 4 } };
+    if (e.key === "0" || e.key === "Home") set({ from: 0, to: 1 });
+    else if (keys[e.key]) zoom(keys[e.key]);
+    else return;
+    e.preventDefault();
+  });
+  box.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-strip]");
+    if (!b) return;
+    if (b.dataset.strip === "fit") set({ from: 0, to: 1 });
+    else zoom({ factor: b.dataset.strip === "in" ? 0.5 : 2 });
+  });
 }
 
 /** Sets an element's HTML only when it differs from what it was last given. */
@@ -2623,29 +2763,6 @@ function setHtml(node, html) {
   if (lastHtml.get(node) === html) return;
   lastHtml.set(node, html);
   node.innerHTML = html;
-}
-
-/**
- * Time to a position on the strip, in percent. Breaks (long stretches with nothing running) are drawn as 3% of the
- * time worked each, so the work stays readable however long the room has waited.
- */
-function sessionAxis(v) {
-  const removed = v.breaks.reduce((n, b) => n + (b.to - b.from), 0);
-  const active = Math.max(1, v.length - removed);
-  const short = active * 0.03;
-  const total = active + short * v.breaks.length;
-  return (t) => {
-    let pos = 0;
-    let cur = v.start;
-    for (const b of v.breaks) {
-      if (t <= b.from) break;
-      pos += b.from - cur;
-      if (t < b.to) return ((pos + (short * (t - b.from)) / (b.to - b.from)) / total) * 100;
-      pos += short;
-      cur = b.to;
-    }
-    return (Math.min(total, pos + Math.max(0, t - cur)) / total) * 100;
-  };
 }
 
 /** One piece of work on the strip, in words: who, what, when, how long. */
@@ -3762,7 +3879,17 @@ $("#themeBtn").addEventListener("click", () => {
 // A folded round you open stays open when the timeline is drawn again.
 document.addEventListener("toggle", (e) => {
   const key = e.target.dataset?.fold;
-  if (key) e.target.open ? S.openFolds.add(key) : S.openFolds.delete(key);
+  if (!key) return;
+  const was = S.openFolds.has(key);
+  e.target.open ? S.openFolds.add(key) : S.openFolds.delete(key);
+  // An earlier session you open in the transcript shows on the strip; folding it again shows the current one. (A fold
+  // drawn again as it was isn't you choosing it.)
+  if (e.target.classList.contains("sessionfold") && was !== e.target.open) {
+    const k = Number(e.target.dataset.session);
+    if (e.target.open) S.shownSession = k;
+    else if (S.shownSession === k) S.shownSession = null;
+    renderSession();
+  }
 }, true);
 // Icons and labels that never change.
 for (const b of $$("#modes button")) {

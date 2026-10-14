@@ -486,9 +486,20 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
    others show the header, the tabs, then that panel. */
 
 /* ---------- The session's timeline, at the bottom of the room's header ---------- */
-.sessionstrip { flex-basis: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 14px; align-items: center; min-width: 0; }
+.sessionstrip { flex-basis: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; align-items: center; min-width: 0; }
+/* The timeline and its ruler: the whole width; the wheel zooms, dragging pans. */
+.ss-view { position: relative; min-width: 0; cursor: grab; touch-action: pan-y; border-radius: 4px; user-select: none; }
+.ss-view.dragging { cursor: grabbing; }
+.ss-ruler { position: relative; height: 13px; overflow: hidden; font: 500 10px/13px var(--f-mono); color: var(--muted); border-top: 1px solid var(--line); }
+.ss-tick { position: absolute; top: 0; height: 100%; padding-left: 3px; border-left: 1px solid var(--line-strong); white-space: nowrap; }
+.ss-tick[data-end] { padding: 0 3px 0 0; border-left: 0; border-right: 1px solid var(--line-strong); transform: translateX(-100%); }
+.ss-rbreak { position: absolute; top: 0; height: 100%; background: repeating-linear-gradient(90deg, transparent 0 3px, color-mix(in srgb, var(--ink) 10%, transparent) 3px 4px); border-left: 1px dashed var(--line-strong); border-right: 1px dashed var(--line-strong); }
+/* A break's length, centred on it (a break is often narrower than its label), over the ticks' lines. */
+.ss-rlabel { position: absolute; top: 0; height: 100%; padding: 0 4px; transform: translateX(-50%); white-space: nowrap; color: var(--ink-2); background: var(--surface); border-radius: 3px; }
+.ss-zoom { display: inline-flex; gap: 2px; }
+.ss-zoom .btn { min-height: 0; padding: 0 7px; line-height: 20px; }
 .sessionstrip[hidden] { display: none; }
-.ss-track { position: relative; display: grid; gap: 2px; padding: 3px 0; min-width: 0; }
+.ss-track { position: relative; display: grid; gap: 2px; padding: 3px 0; min-width: 0; overflow: hidden; }
 .ss-lane { position: relative; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--ink) 6%, transparent); }
 .ss-seg { position: absolute; top: 0; bottom: 0; border-radius: 3px; min-width: 2px; }
 .ss-lane[data-lane="plan"] .ss-seg, .ss-bar [data-lane="plan"] { background: var(--plan); }
@@ -500,12 +511,12 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .ss-shade[data-k="waiting"] { background: color-mix(in srgb, var(--you) 16%, transparent); }
 .ss-shade[data-k="paused"] { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ink) 12%, transparent) 0 3px, transparent 3px 6px); }
 .ss-break { position: absolute; top: -2px; bottom: -2px; display: grid; place-items: center; font: 600 10px/1 var(--f-body); color: var(--muted); background: var(--surface); border-left: 1px dashed var(--line-strong); border-right: 1px dashed var(--line-strong); overflow: hidden; white-space: nowrap; }
-.ss-words { border: 0; background: none; padding: 2px 4px; font: 500 12.5px/1.3 var(--f-body); color: var(--ink-2); text-align: right; cursor: pointer; border-radius: 6px; }
+.ss-words { border: 0; background: none; padding: 2px 4px; font: 500 12.5px/1.3 var(--f-body); color: var(--ink-2); text-align: left; cursor: pointer; border-radius: 6px; }
 .ss-words:hover { background: var(--sunk); color: var(--ink); }
 .ss-bar { display: none; height: 8px; border-radius: 4px; overflow: hidden; background: color-mix(in srgb, var(--ink) 6%, transparent); }
 .ss-bar i { display: block; height: 100%; float: left; }
 .ss-list { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 4px; }
-.ss-side { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; justify-content: flex-end; min-width: 0; }
+.ss-side { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; justify-content: flex-start; min-width: 0; }
 .ss-back { font-size: 12.5px; }
 .sessionmark .no { background: var(--surface); border: 1.5px solid var(--line-strong); }
 .sessionfold > summary b { font-family: var(--f-display); }
@@ -669,7 +680,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   .toasts { top: auto; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
   /* The session on a phone: one bar of the totals, and the totals in words (which open the list). */
   .sessionstrip { grid-template-columns: minmax(0, 1fr); }
-  .ss-track { display: none; }
+  .ss-track, .ss-view, .ss-zoom { display: none; }
   .ss-bar { display: block; }
   .ss-words { text-align: left; min-height: 44px; }
   .ss-side { justify-content: flex-start; }
