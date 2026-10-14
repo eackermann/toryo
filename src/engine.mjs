@@ -7,6 +7,7 @@ import { ADAPTERS, detectAgents } from "./agents/index.mjs";
 import { lastAppMessage } from "./agents/codexapp.mjs";
 import { readOnlyPaths, readOnlySupport } from "./agents/readonly.mjs";
 import { runGates } from "./gates.mjs";
+import { createWorktree, gitPaths, undoWorktree, writableGitPaths } from "./worktrees.mjs";
 import { parseSlices, shortDuration, sliceMatches, sliceTimes } from "./plan.mjs";
 import { acceptRecommendation, catchUp, parseQuestions, parseStatus, preamble, prompts, rulesKey, rulesUpdate, splitRecommendation, stripStatus } from "./protocol.mjs";
 import { UsageBook, groupOf, normalizeGroups, windowLabel } from "./usage.mjs";
@@ -63,8 +64,14 @@ export function defaultConfig() {
 }
 
 export class Engine extends EventEmitter {
-  constructor({ store, snapshots, notifier, adapters = ADAPTERS, usagePollMs = 5 * 60_000, guardPollMs = 30_000, now = Date.now }) {
+  constructor({ store, snapshots, notifier, adapters = ADAPTERS, usagePollMs = 5 * 60_000, guardPollMs = 30_000, now = Date.now, folderDefault = "own", worktreeHooks = {} }) {
     super();
+    // Where a new Build room with a headless crew works when nobody says: its own worktree ("own"; tests of other
+    // things use "shared", the project's own folder). `worktreeHooks`: see createWorktree (tests).
+    this.folderDefault = folderDefault;
+    this.worktreeHooks = worktreeHooks;
+    // Rooms whose worktree is being made right now.
+    this.provisioning = new Set();
     this.setMaxListeners(100);
     this.store = store;
     this.snapshots = snapshots;
@@ -931,6 +938,13 @@ export class Engine extends EventEmitter {
     room.flow ??= shortId("f");
     // Rooms from before workspaces work in their project's own folder.
     if (!room.workspace && this.project(room.projectId)) room.workspace = this.#mainWorkspace(this.project(room.projectId));
+    // Toryo stopped while it was making the room's worktree: what it made so far isn't used. Retry undoes it and
+    // makes it again; nothing runs there until then.
+    if (room.workspace?.kind === "worktree" && room.workspace.state === "creating") {
+      room.workspace.state = "failed";
+      room.workspace.error = "Toryo stopped while it was making it";
+      this.#askWorkspace(room);
+    }
     // A build in progress from before folders were claimed: it claims its folder from when it started, so the
     // earliest of two such builds in one folder goes on and the other waits for it.
     const project = this.project(room.projectId);
@@ -1093,6 +1107,8 @@ export class Engine extends EventEmitter {
       session: this.#session(room),
       // A build's folder: whether this room is building in it (and who waits for it), or waits for the room that is.
       folder: this.#folderView(room),
+      // Where the room works: the project's own folder (shared) or its own worktree.
+      workspace: this.#workspaceView(room),
       updatedAt: room.updatedAt,
       crew: room.crew,
     };
@@ -1141,17 +1157,12 @@ export class Engine extends EventEmitter {
     const now = this.now();
     const rooms = [...this.rooms.values()].filter((r) => !r.archived);
     const project = (r) => this.config.projects.find((p) => p.id === r.projectId) ?? null;
-    // Rooms working in the same folder: a builder there can change what the others read.
-    const byFolder = new Map();
-    for (const r of rooms) {
-      const f = project(r)?.path;
-      if (f) byFolder.set(f, [...(byFolder.get(f) ?? []), r]);
-    }
-    const where = (r) => ({
-      project: project(r)?.name ?? null,
-      folder: project(r)?.path ?? null,
-      shared: (byFolder.get(project(r)?.path) ?? []).filter((x) => x !== r).map((x) => ({ id: x.id, title: x.title })),
-    });
+    // Rooms working in the same folder: a builder there can change what the others read. (A room's own worktree is
+    // its alone.)
+    const where = (r) => {
+      const ws = this.#workspaceView(r);
+      return { project: project(r)?.name ?? null, folder: ws.path, workspace: ws, shared: ws.others };
+    };
     // What a question's card needs to act on it from Home: a checkpoint's default author (as the room's form has
     // it) and whether every question has a recommendation; a ready plan's author and the planners who can check it.
     const extra = (r, q) => {
@@ -1242,7 +1253,7 @@ export class Engine extends EventEmitter {
     if (b.slice && !(b.approved ?? []).includes(b.slice)) return b.slice;
     if (b.planPath)
       try {
-        const next = parseSlices(this.readProjectFile(room.projectId, b.planPath).content).find(
+        const next = parseSlices(this.#readRoomFile(room, b.planPath).content).find(
           (s) => !(b.approved ?? []).some((a) => sliceMatches(s, a)) && !s.markedDone && !(s.checks > 0 && s.checks === s.checked),
         );
         if (next) return `${next.kind ?? "Slice"} ${next.number}: ${next.name}`;
@@ -1317,16 +1328,22 @@ export class Engine extends EventEmitter {
 
   // ---------------------------------------------------------------- rooms
 
-  createRoom({ projectId, title, mode = "chat", members, builder, reviewer, settings, task, planPath, topic, text, to, discuss, allowWrite, reviewFirst, handoff, slice, appThread, wait = false }) {
+  createRoom({ projectId, title, mode = "chat", members, builder, reviewer, settings, task, planPath, topic, text, to, discuss, allowWrite, reviewFirst, handoff, slice, appThread, wait = false, folder, roomId, workspacePath }) {
     const project = this.project(projectId);
     if (!project) throw new UserError("Choose a project first.");
-    // A build in a folder another room is building in: refused before the room exists, unless it's to wait.
-    if (mode === "build" && !wait) this.#checkFolder(project, null);
     const order = Object.keys(this.adapters);
     members = [...new Set((members?.length ? members : ["codex", "claude"]).filter((a) => this.adapters[a]))].sort(
       (a, b) => order.indexOf(a) - order.indexOf(b),
     );
     if (!members.length) throw new UserError("Pick at least one agent.");
+    // Where a build works: its own worktree, or the project's folder (shared). Checked before the room exists.
+    const own = mode === "build" && this.#ownFolder(project, members, folder, null);
+    // A build in a folder another room is building in: refused before the room exists, unless it's to wait.
+    if (mode === "build" && !own && !wait) this.#checkFolder(project, null, members);
+    // The id the new-room form showed the worktree's path with (see previewWorkspace), if it's still free.
+    const id = roomId == null ? shortId("r") : this.#freeRoomId(roomId);
+    // The folder shown before starting (`workspacePath`) is the one it gets, or it doesn't start.
+    if (own) this.#sameWorktreePath(this.#newWorktree(project, id), workspacePath);
     // Default crew: Codex builds and Claude reviews when both are present.
     builder = members.includes(builder) ? builder : ["codex", "codexapp"].find((a) => members.includes(a)) ?? members[0];
     reviewer =
@@ -1339,7 +1356,7 @@ export class Engine extends EventEmitter {
     const thread = members.includes("codexapp") ? this.#appThreadFor(project, appThread) : null;
     if (mode === "build" && reviewFirst) handoff = this.#handoffFor(project, builder, handoff, thread);
     const room = {
-      id: shortId("r"),
+      id,
       projectId,
       title: title?.trim() || defaultTitle(mode, topic || task || text),
       mode: "chat",
@@ -1361,14 +1378,20 @@ export class Engine extends EventEmitter {
       plan: null,
       discuss: null,
       stats: { turns: 0, agents: {} },
-      workspace: this.#mainWorkspace(project),
+      workspace: own ? this.#newWorktree(project, id) : this.#mainWorkspace(project),
     };
     this.rooms.set(room.id, room);
     this.events.set(room.id, []);
-    this.#system(room, `Room opened in ${project.name} (${project.path}) with ${members.map((m) => this.label(m)).join(" and ")}.`);
+    const ws = room.workspace;
+    this.#system(
+      room,
+      ws.kind === "worktree"
+        ? `Room opened in ${project.name} with ${members.map((m) => this.label(m)).join(" and ")}. It works in its own worktree, ${ws.cwd} (branch ${ws.branch}), which Toryo makes from ${project.path} as it is now, uncommitted changes included.`
+        : `Room opened in ${project.name} (${project.path}) with ${members.map((m) => this.label(m)).join(" and ")}.`,
+    );
     if (thread) this.#warnSharedThread(room);
     this.#save(room);
-    if (mode === "build") this.startBuild(room.id, { task: task ?? text, planPath, reviewFirst, handoff, slice, wait });
+    if (mode === "build") this.startBuild(room.id, { task: task ?? text, planPath, reviewFirst, handoff, slice, wait, folder: own ? "own" : "shared" });
     else if (mode === "plan") this.startPlan(room.id, { topic: topic ?? text });
     else if (text?.trim()) this.postMessage(room.id, { text, to: to ?? "everyone", discuss, allowWrite });
     this.emit("state");
@@ -1399,12 +1422,17 @@ export class Engine extends EventEmitter {
     this.#schedule();
   }
 
-  startBuild(roomId, { task, planPath, builder, reviewer, reviewFirst, handoff, slice, wait = false } = {}) {
+  startBuild(roomId, { task, planPath, builder, reviewer, reviewFirst, handoff, slice, wait = false, folder, workspacePath } = {}) {
     const room = this.#room(roomId);
-    // Another room building in this folder: refused, unless it's to wait (its work starts when the folder is free).
     const project = this.project(room.projectId);
-    if (!wait) this.#checkFolder(project, room);
-    const kept = this.#keepsFolder(room);
+    // Its own worktree, or the project's folder; a room moves to a worktree of its own only here, between builds.
+    const own = this.#ownFolder(project, room.crew.members, folder, room);
+    const moving = own && room.workspace?.kind !== "worktree";
+    const next = moving ? this.#newWorktree(project, room.id) : null;
+    if (next) this.#sameWorktreePath(next, workspacePath);
+    // Another room building in this folder: refused, unless it's to wait (its work starts when the folder is free).
+    if (!wait && !own) this.#checkFolder(project, room);
+    const kept = !moving && this.#keepsFolder(room);
     // Check the handoff before changing anything, so a failed start leaves the room as it was.
     const nextBuilder = builder && room.crew.members.includes(builder) ? builder : room.swapPending ? room.crew.reviewer : room.crew.builder;
     if (reviewFirst) handoff = this.#handoffFor(this.project(room.projectId), nextBuilder, handoff, room.sessions.codexapp);
@@ -1413,11 +1441,19 @@ export class Engine extends EventEmitter {
     if (reviewer && room.crew.members.includes(reviewer)) room.crew.reviewer = reviewer;
     if (room.crew.builder === room.crew.reviewer && room.crew.members.length > 1)
       room.crew.reviewer = room.crew.members.find((m) => m !== room.crew.builder);
+    // Moving to its own worktree: made from the project's folder as it is now. The agents start fresh sessions there
+    // (theirs were in the other folder); the room's messages and its plan are what they go on from.
+    if (moving) {
+      room.workspace = next;
+      for (const a of room.crew.members) if (canStartFresh(a) && room.sessions[a]) (room.fresh ??= {})[a] = "folder";
+      this.#system(room, `This build works in the room's own worktree, ${room.workspace.cwd} (branch ${room.workspace.branch}), which Toryo makes from ${project.path} as it is now, uncommitted changes included.`);
+    }
     room.mode = "build";
     room.done = false;
     room.stopped = false;
     // The folder: kept if this room already had it, taken if it's free; otherwise taken when its work can start.
-    room.folderClaim = kept ? room.folderClaim : !this.#folderHolder(this.#folderOf(project), room) ? { ...this.#folderOf(project), at: nowIso() } : null;
+    const folderId = this.#roomFolder(room);
+    room.folderClaim = kept ? room.folderClaim : !this.#folderHolder(folderId, room) ? { ...folderId, at: nowIso() } : null;
     this.#markPause(room);
     this.#clearWaiting(room, "(superseded: building started)");
     room.discuss = null;
@@ -1448,6 +1484,7 @@ export class Engine extends EventEmitter {
       const ev = this.#append(room, { type: "turn", agent: room.crew.builder, role: "builder", kind: "build", state: "done", imported: true, text: handoff.trim(), status: named.status ?? "REVIEW", detail: named.detail || room.build.slice, slice: room.build.slice, startedAt: now, endedAt: now });
       room.seen[room.crew.builder] = [...new Set([...(room.seen[room.crew.builder] ?? []), ev.id])];
       this.#checksThenReview(room, false);
+      this.#makeWorktree(room);
       return this.summary(room);
     }
     this.#system(room, `Build started: ${b} builds, ${r} reviews.${room.build.planPath ? ` Plan: ${room.build.planPath}.` : ""}`, { forAgents: true });
@@ -1457,6 +1494,7 @@ export class Engine extends EventEmitter {
       access: "write",
       instruction: prompts.buildKickoff({ reviewer: r, task: room.build.task, planPath: room.build.planPath }),
     });
+    this.#makeWorktree(room);
     return this.summary(room);
   }
 
@@ -1824,10 +1862,18 @@ export class Engine extends EventEmitter {
     if (w.kind === "plan-checkpoint") return accept ? this.acceptCheckpoint(roomId, { questionId: w.eventId }) : this.synthesize(roomId, { questionId: w.eventId, decisions: text });
     // The plan-ready recommendation is an action: start building with the plan. A written answer asks for changes.
     if (w.kind === "plan-ready" && accept) {
-      if (!wait) this.#checkFolder(this.project(room.projectId), room);
+      if (!wait && !this.#ownFolder(this.project(room.projectId), room.crew.members, undefined, room)) this.#checkFolder(this.project(room.projectId), room);
       this.#takeWaiting(room, w);
       this.#closeQuestion(room, "Start building", w);
       return this.startBuild(roomId, { planPath: w.planPath || room.plan?.planPath, wait });
+    }
+    // The room's worktree couldn't be made: any answer is to try again (Toryo's own question; no agent hears it).
+    if (w.kind === "workspace") {
+      this.#takeWaiting(room, w);
+      this.#closeQuestion(room, "Retry", w);
+      this.#save(room);
+      this.#makeWorktree(room);
+      return this.summary(room);
     }
     const body = accept ? acceptRecommendation(w.recommendation) : String(text ?? "").trim();
     if (!body) throw new UserError("Write an answer first.");
@@ -2064,9 +2110,13 @@ export class Engine extends EventEmitter {
         if (busy.length) throw new UserError(`${busy.map((a) => this.label(a)).join(" and ")} is working; remove it when its turn has finished.`);
         if (room.mode === "build" && leaving.some((a) => a === room.crew.builder || a === room.crew.reviewer))
           throw new UserError("Give the builder's or reviewer's role to someone else before removing them.");
-        if (leaving.length) room.queue = room.queue.filter((q) => !leaving.includes(q.agent));
         const joining = members.includes("codexapp") && !room.crew.members.includes("codexapp");
-        if (joining) room.sessions.codexapp = this.#appThreadFor(this.project(room.projectId), args.appThread ?? room.sessions.codexapp, room);
+        // The Codex app works in the project's own folder only: not in a room with its own worktree (made or being made).
+        if (joining && room.workspace?.kind === "worktree") throw new UserError("The Codex app works in the project's own folder only, and this room works in its own worktree, so it can't join this crew.");
+        // Everything that can refuse the change is asked first; only then does anything change (queue, crew, thread).
+        const thread = joining ? this.#appThreadFor(this.project(room.projectId), args.appThread ?? room.sessions.codexapp, room) : null;
+        if (leaving.length) room.queue = room.queue.filter((q) => !leaving.includes(q.agent));
+        if (joining) room.sessions.codexapp = thread;
         room.crew.members = [...new Set(members)];
         if (joining) this.#warnSharedThread(room);
         if (!members.includes(room.crew.builder)) room.crew.builder = members[0];
@@ -2091,7 +2141,7 @@ export class Engine extends EventEmitter {
         break;
       }
       case "start-build":
-        return this.startBuild(roomId, { task: args.task, planPath: args.planPath ?? room.plan?.planPath, builder: args.builder, reviewer: args.reviewer, reviewFirst: args.reviewFirst, handoff: args.handoff, slice: args.slice, wait: Boolean(args.wait) });
+        return this.startBuild(roomId, { task: args.task, planPath: args.planPath ?? room.plan?.planPath, builder: args.builder, reviewer: args.reviewer, reviewFirst: args.reviewFirst, handoff: args.handoff, slice: args.slice, wait: Boolean(args.wait), folder: args.folder, workspacePath: args.workspacePath });
       case "start-plan":
         return this.startPlan(roomId, { topic: args.topic, participants: args.participants });
       case "new-session":
@@ -2174,11 +2224,28 @@ export class Engine extends EventEmitter {
   readProjectFile(projectId, path) {
     const project = this.project(projectId);
     if (!project) throw new UserError("Unknown project.", 404);
+    return this.#readIn(project.path, path, `The project folder ${project.path} is missing.`);
+  }
+
+  /** A file in the folder a room works in: its own worktree's, or the project's. A worktree room never reads the main folder's. */
+  readRoomFile(roomId, path) {
+    return this.#readRoomFile(this.#room(roomId), path);
+  }
+
+  #readRoomFile(room, path) {
+    const project = this.project(room.projectId);
+    if (!project) throw new UserError("Unknown project.", 404);
+    const ws = room.workspace;
+    if (ws?.kind === "worktree" && ws.state !== "ready") throw new UserError("This room's worktree isn't ready yet.", 409);
+    return this.#readIn(this.#cwdOf(room, project), path, ws?.kind === "worktree" ? `This room's worktree ${ws.cwd} is missing.` : `The project folder ${project.path} is missing.`);
+  }
+
+  #readIn(folder, path, missing) {
     let root;
     try {
-      root = realpathSync(project.path);
+      root = realpathSync(folder);
     } catch {
-      throw new UserError(`The project folder ${project.path} is missing.`, 404);
+      throw new UserError(missing, 404);
     }
     const asked = resolve(root, String(path ?? ""));
     const rel = relative(root, asked);
@@ -2216,7 +2283,7 @@ export class Engine extends EventEmitter {
     if (!path) return { path: null, slices: [], times: sliceTimes(this.events.get(room.id) ?? []).done };
     let slices = [];
     try {
-      const file = this.readProjectFile(room.projectId, path);
+      const file = this.#readRoomFile(room, path);
       slices = parseSlices(file.content);
     } catch {
       return { path, slices: [], missing: true };
@@ -2454,7 +2521,15 @@ export class Engine extends EventEmitter {
     const role = this.#roleOf(room, req.agent);
     run.role = role;
     const others = room.crew.members.filter((a) => a !== req.agent).map((a) => this.label(a));
-    const pre = preamble({ agentLabel: this.label(req.agent), others, project });
+    // The folder it works in: the room's own worktree, or the project's. A worktree that isn't there (or isn't
+    // finished) is never swapped for the main folder: the turn fails instead.
+    const cwd = this.#cwdOf(room, project);
+    const ws = room.workspace;
+    if (ws?.kind === "worktree" && (ws.state !== "ready" || !existsSync(cwd)))
+      throw new Error(ws.state !== "ready" ? "This room's worktree isn't ready; Toryo won't run the turn in the project's main folder instead." : `This room's worktree (${cwd}) isn't there; Toryo won't run the turn in the project's main folder instead.`);
+    // The Codex app works in the project's own folder only (a room saved with it in a worktree gets nothing).
+    if (ws?.kind === "worktree" && req.agent === "codexapp") throw new Error("The Codex app works in the project's own folder only, and this room works in its own worktree. Toryo sent it nothing; take the Codex app out of this room's crew.");
+    const pre = preamble({ agentLabel: this.label(req.agent), others, project, workspace: this.#briefWorkspace(room, project) });
 
     // A session that hasn't had Toryo's introduction yet (the agent's first turn here, or a different Codex app
     // thread) gets it, and gets the agent's own earlier messages in this room along with everyone else's.
@@ -2550,12 +2625,16 @@ export class Engine extends EventEmitter {
     const skip = run.abandon.signal.aborted || (run.controller.signal.aborted && !req.attach);
     const result = skip ? { text: "", aborted: true } : await adapter.run({
       cfg,
-      cwd: project.path,
+      cwd,
       prompt,
       sessionId: room.sessions[req.agent] ?? null,
       access: req.access,
       // `"readOnlyMount": false` in an agent's config turns the read-only mount off for that agent.
-      readOnlyPaths: req.access === "write" || cfg.readOnlyMount === false ? null : this.#readOnlyPaths(project),
+      readOnlyPaths: req.access === "write" || cfg.readOnlyMount === false ? null : this.#readOnlyPaths(cwd),
+      // A worktree room's turn, writing or not: the main folder is protected (see #protectMain).
+      protect: ws?.kind === "worktree" ? await this.#protectMain(room, project, cfg) : null,
+      // The Codex app's thread works in the folder it was opened in: one that isn't this room's gets nothing.
+      folderProblem: (where) => this.#appFolderProblem(room, where, cwd),
       systemPrompt: usesSystemPrompt ? pre : undefined,
       turnDir: dir,
       signal: run.controller.signal,
@@ -2817,7 +2896,9 @@ export class Engine extends EventEmitter {
             ? "Your last chat here was read-only in Ask mode, which it would keep, and this turn changes files, so Toryo started you in a new chat."
             : why === "session"
               ? "The owner started a new session in this room: what came before it is finished, so you start fresh."
-              : "The owner started you fresh in this room.",
+              : why === "folder"
+                ? "This room now works in its own worktree, a different folder from your earlier session's, so Toryo started you fresh there. The room's messages and its plan are what you go on from."
+                : "The owner started you fresh in this room.",
       "You don't remember earlier turns here. This is what you need; read the files it names for the rest.",
     ];
     const events = this.#sessionEvents(room);
@@ -2906,10 +2987,10 @@ export class Engine extends EventEmitter {
     return lines.join("\n");
   }
 
-  /** The folders a read-only turn can't write to (see agents/readonly.mjs). */
-  #readOnlyPaths(project) {
-    if (!this.lockPaths.has(project.path)) this.lockPaths.set(project.path, readOnlyPaths(project.path));
-    return this.lockPaths.get(project.path);
+  /** The folders a read-only turn in this folder can't write to (see agents/readonly.mjs). */
+  #readOnlyPaths(folder) {
+    if (!this.lockPaths.has(folder)) this.lockPaths.set(folder, readOnlyPaths(folder));
+    return this.lockPaths.get(folder);
   }
 
   #catchUpItems(room, agent, hideKinds, focus, { own = false } = {}) {
@@ -3351,7 +3432,11 @@ export class Engine extends EventEmitter {
     const { req } = run;
     let results = [];
     try {
+      const cwd = this.#cwdOf(room, project);
+      const ws = room.workspace;
+      if (ws?.kind === "worktree" && (ws.state !== "ready" || !existsSync(cwd))) throw new Error(`This room's worktree (${cwd}) isn't there; Toryo won't run the checks in the project's main folder instead.`);
       results = await runGates(project, {
+        cwd,
         signal: run.controller.signal,
         onActivity: (item) => this.emit("activity", { roomId: room.id, turnId: run.turnId, agent: "toryo", item: { ...item, at: nowIso() } }),
       });
@@ -3468,7 +3553,7 @@ export class Engine extends EventEmitter {
   /** A fingerprint of the plan file, to tell whether it changed while it was being checked. */
   #planHash(room) {
     try {
-      return createHash("sha256").update(this.readProjectFile(room.projectId, room.plan.planPath).content).digest("hex").slice(0, 16);
+      return createHash("sha256").update(this.#readRoomFile(room, room.plan.planPath).content).digest("hex").slice(0, 16);
     } catch {
       return null;
     }
@@ -3560,13 +3645,13 @@ export class Engine extends EventEmitter {
     const named = String(detail ?? "").split(/\s+/).find((w) => /\.(md|mdx|markdown|txt)$/i.test(w));
     if (!named || named === plan.planPath) return;
     try {
-      this.readProjectFile(room.projectId, plan.planPath);
+      this.#readRoomFile(room, plan.planPath);
       return; // the agreed path exists; keep it
     } catch {
       /* missing: try the path the agent named */
     }
     try {
-      this.readProjectFile(room.projectId, named);
+      this.#readRoomFile(room, named);
       this.#system(room, `${this.label(plan.synthesizer)} wrote the plan to ${named}; using that path.`);
       plan.planPath = named.replace(/^\.\//, "");
     } catch {
@@ -3716,6 +3801,9 @@ export class Engine extends EventEmitter {
    */
   #accessBlock(room, req) {
     if (req.attach) return null; // following a turn the Codex app already has
+    // Nothing runs in a room's worktree before it's made.
+    const ws = room.workspace;
+    if (ws?.kind === "worktree" && ws.state !== "ready") return ws.state === "failed" ? "its worktree couldn't be made" : "Toryo is making its worktree";
     const folder = this.#roomFolder(room);
     if (!folder) return null;
     if (this.#youUse(folder)) return "you're using this folder";
@@ -3757,8 +3845,9 @@ export class Engine extends EventEmitter {
     return req.access === "write" || req.kind === "gates" || req.agent === "codexapp";
   }
 
-  /** The folder a room works in. */
+  /** The folder a room works in, as one identity (see #folderOf): its own worktree, or its project's folder. */
   #roomFolder(room) {
+    if (room.workspace?.kind === "worktree") return { root: room.workspace.root, git: true };
     const project = this.project(room.projectId);
     return project ? this.#folderOf(project) : null;
   }
@@ -3915,9 +4004,8 @@ export class Engine extends EventEmitter {
 
   /** The room a build's work waits for: the room holding its folder, when that isn't this one. */
   #folderBlocker(room) {
-    const project = this.project(room.projectId);
-    if (!project) return null;
-    return this.#folderHolder(room.folderClaim ?? this.#folderOf(project), room);
+    const folder = room.folderClaim ?? this.#roomFolder(room);
+    return folder ? this.#folderHolder(folder, room) : null;
   }
 
   /**
@@ -3943,17 +4031,21 @@ export class Engine extends EventEmitter {
   /** The folder becomes the room's as its build's work starts (it was free: the scheduler checked). */
   #takeFolder(room) {
     if (this.#keepsFolder(room)) return;
-    room.folderClaim = { ...this.#folderOf(this.project(room.projectId)), at: nowIso() };
+    room.folderClaim = { ...this.#roomFolder(room), at: nowIso() };
   }
 
-  /** A build can't start in a folder another room is building in: refused, naming that room, with the choices. */
-  #checkFolder(project, room) {
+  /**
+   * A build can't start in a folder another room is building in: refused, naming that room, with the choices
+   * (waiting; its own worktree, where the crew can have one).
+   */
+  #checkFolder(project, room, members = room?.crew.members ?? []) {
     this.#settleClaims();
     const holder = this.#folderHolder(this.#folderOf(project), room);
     if (!holder) return;
+    const canOwn = this.#folderOf(project).git && !members.includes("codexapp");
     throw Object.assign(
       new UserError(
-        `“${holder.title}” is building in this folder (${this.#folderOf(project).root}), so this build can't start now. You can have it wait: it starts when “${holder.title}” is done or stopped. A copy of the folder for each room (a worktree) comes in a later update.`,
+        `“${holder.title}” is building in this folder (${this.#folderOf(project).root}), so this build can't start now. You can have it wait: it starts when “${holder.title}” is done or stopped.${canOwn ? " Or give it its own worktree, a separate copy of the folder, where it can start now." : ""}`,
         409,
       ),
       { code: "folder-busy", room: { id: holder.id, title: holder.title } },
@@ -3964,7 +4056,7 @@ export class Engine extends EventEmitter {
   #folderView(room) {
     const project = this.project(room.projectId);
     if (!project || room.mode !== "build" || !room.build || room.done) return null;
-    const id = room.folderClaim ?? this.#folderOf(project);
+    const id = room.folderClaim ?? this.#roomFolder(room);
     const blocker = this.#folderBlocker(room);
     // Waiting means work queued that waits for the folder (a stopped room's next start would wait too, but nothing waits now).
     const waitsFor = (room) => {
@@ -3998,7 +4090,280 @@ export class Engine extends EventEmitter {
   /** The workspace a room's snapshots are taken of: null for the project's own folder. */
   #workspaceOf(room) {
     const ws = room.workspace;
-    return !ws || ws.id === "main" ? null : { id: ws.id, path: ws.path };
+    if (!ws || ws.id === "main") return null;
+    return { id: ws.id, path: ws.kind === "worktree" ? ws.cwd : ws.path };
+  }
+
+  /** The folder a room's agents, checks and file readers work in: its own worktree (at the project's place in it), or the project's. */
+  #cwdOf(room, project = this.project(room.projectId)) {
+    const ws = room.workspace;
+    return ws?.kind === "worktree" ? ws.cwd : project?.path;
+  }
+
+  /**
+   * A room's own worktree, before it's made: TORYO_HOME/worktrees/<project id>/<room id>, on the branch
+   * toryo/<room id>, with the project at the same place inside it as in its repository.
+   */
+  #newWorktree(project, roomId) {
+    const main = this.#mainWorkspace(project);
+    const root = join(this.store.home, "worktrees", project.id, roomId);
+    return {
+      id: roomId,
+      kind: "worktree",
+      root,
+      subdir: main.subdir,
+      cwd: main.subdir ? join(root, main.subdir) : root,
+      branch: `toryo/${roomId}`,
+      source: { root: main.root, subdir: main.subdir },
+      state: "creating",
+      createdAt: nowIso(),
+    };
+  }
+
+  /**
+   * Whether a build works in its own worktree (true) or the project's folder (false), as asked (`folder`: "own" or
+   * "shared"), else by default: a new room gets its own worktree where it can have one (`folderDefault`), and a room
+   * that exists stays where it is (the owner's choice: existing rooms stay where they are). Refused where it can't
+   * (see #worktreeProblem), a room with its own worktree going back to shared, and a room moving to a worktree while
+   * anything of its is still going (a turn, checks, a Codex app turn it keeps), which would go on in the other folder.
+   */
+  #ownFolder(project, members, folder, room) {
+    if (folder != null && folder !== "own" && folder !== "shared") throw new UserError("Choose where it works: “own” (its own worktree) or “shared” (this folder).");
+    if (room?.workspace?.kind === "worktree") {
+      if (folder === "shared") throw new UserError("This room works in its own worktree, and stays there.");
+      return true;
+    }
+    const why = this.#worktreeProblem(project, members);
+    if (folder === "own" && why) throw new UserError(why);
+    const own = folder === "own" || (folder == null && !room && this.folderDefault === "own" && !why);
+    if (own && room && (this.#runningIn(room).length || room.appTurn))
+      throw new UserError("This room has work going on in its folder. Wait for it to end, then start the build in its own worktree.", 409);
+    return own;
+  }
+
+  /**
+   * Why a project's room, with this crew, can't have a worktree of its own (null: it can). The Codex app works in the
+   * project's own folder only; a folder outside Git has no worktrees; and a worktree mustn't be inside the project's
+   * folder (Toryo's data folder there), where it would be part of what it was copied from and fall under the main
+   * folder's protection.
+   */
+  #worktreeProblem(project, members = []) {
+    if (members.includes("codexapp")) return "The Codex app works in the project's own folder only: choose “This folder (shared)” for a crew with the Codex app.";
+    const folder = this.#folderOf(project);
+    if (!folder.git) return `${project.path} isn't in a Git repository, so a room can't have a worktree of its own there. It can build in this folder (shared).`;
+    const base = realNearest(join(this.store.home, "worktrees", project.id));
+    if (insideFolder(base, folder.root))
+      return `Toryo's worktrees for this project would be in ${base}, inside the project's own folder (${folder.root}). Its builds work in this folder (shared); for worktrees, keep Toryo's data folder (TORYO_HOME) outside the project.`;
+    return null;
+  }
+
+  /** A worktree's folder is the one shown before starting (when one was), or nothing starts. */
+  #sameWorktreePath(ws, shown) {
+    if (shown != null && shown !== ws.cwd) throw new UserError(`The folder shown (${shown}) isn't the one this build would get (${ws.cwd}). Open the form again.`, 409);
+  }
+
+  /** A room id asked for (the one the new-room form showed the worktree's path with): used if it's well formed and free. */
+  #freeRoomId(id) {
+    id = String(id);
+    if (!/^r[0-9a-z]{6,24}$/.test(id)) throw new UserError("That isn't a room id Toryo makes.");
+    if (this.rooms.has(id) || this.draining.has(id) || existsSync(this.store.roomDir(id))) throw new UserError("A room with that id exists already. Open the form again.", 409);
+    return id;
+  }
+
+  /**
+   * Where a new room's own worktree would be, for the new-room form to show before it's made: the id the room will
+   * have (send it back as `roomId`), the folder and the branch; or why it can't have one.
+   */
+  previewWorkspace(projectId) {
+    const project = this.project(projectId);
+    if (!project) throw new UserError("Unknown project.", 404);
+    const main = this.#mainWorkspace(project);
+    const why = this.#worktreeProblem(project);
+    const id = shortId("r");
+    const ws = this.#newWorktree(project, id);
+    return {
+      projectId: project.id,
+      roomId: id,
+      shared: { path: project.path, root: main.root },
+      own: why ? null : { path: ws.cwd, root: ws.root, branch: ws.branch },
+      why,
+      defaultFolder: this.folderDefault === "own" && !why ? "own" : "shared",
+    };
+  }
+
+  /**
+   * Where a room's next build would work, for the Build form: its own worktree if it has one (it stays there);
+   * otherwise the project's folder, or its own worktree (its folder and branch), and which is the default.
+   */
+  roomWorkspace(roomId) {
+    const room = this.#room(roomId);
+    const project = this.project(room.projectId);
+    if (!project) throw new UserError("Unknown project.", 404);
+    const view = this.#workspaceView(room);
+    if (view.kind === "worktree") return { fixed: true, current: view, own: { path: view.path, root: view.root, branch: view.branch }, shared: null, defaultFolder: "own" };
+    const why = this.#worktreeProblem(project, room.crew.members);
+    const ws = this.#newWorktree(project, room.id);
+    return {
+      fixed: false,
+      current: view,
+      shared: { path: project.path, root: view.root },
+      own: why ? null : { path: ws.cwd, root: ws.root, branch: ws.branch },
+      why,
+      // A room that exists stays where it is unless you choose its own worktree.
+      defaultFolder: "shared",
+    };
+  }
+
+  /** Where a room works, for the page, `toryo status` and MCP; with the other open rooms in the same folder. */
+  #workspaceView(room) {
+    const ws = room.workspace;
+    const project = this.project(room.projectId);
+    const folder = this.#roomFolder(room);
+    const others = folder
+      ? [...this.rooms.values()].filter((r) => r !== room && !r.archived && this.#roomFolder(r) && this.#sameFolder(this.#roomFolder(r), folder)).map((r) => ({ id: r.id, title: r.title }))
+      : [];
+    if (ws?.kind === "worktree")
+      return {
+        kind: "worktree",
+        path: ws.cwd,
+        root: ws.root,
+        branch: ws.branch,
+        main: project?.path ?? null,
+        state: ws.state,
+        error: ws.error ?? null,
+        base: ws.base ?? null,
+        // Whether the main folder is read-only for the room's agents' writing turns on this machine.
+        mainReadOnly: Boolean(this.readOnly?.ok),
+        others,
+      };
+    return { kind: "shared", path: project?.path ?? null, root: folder?.root ?? null, others };
+  }
+
+  /** For the agents' briefing: the room's own worktree, with the main folder they must leave alone; null for the project's folder. */
+  #briefWorkspace(room, project) {
+    const ws = room.workspace;
+    return ws?.kind === "worktree" ? { cwd: ws.cwd, branch: ws.branch, main: project.path, base: ws.base } : null;
+  }
+
+  /** Start making the room's worktree, if it has one to make, in the background (see #provision). */
+  #makeWorktree(room) {
+    this.#provision(room).catch((error) => console.error("[toryo] making a worktree failed:", error));
+  }
+
+  /**
+   * Make the room's worktree (see src/worktrees.mjs), in the background: from a snapshot of the project's folder,
+   * taken now and pinned for the room's lifetime (its starting point, B). An earlier attempt's leftovers are undone
+   * first. Its work waits until it's ready (#accessBlock); if it can't be made, the room says why and asks to retry.
+   */
+  async #provision(room) {
+    const ws = room.workspace;
+    const project = this.project(room.projectId);
+    if (!project || ws?.kind !== "worktree" || ws.state === "ready" || this.provisioning.has(room.id)) return;
+    this.provisioning.add(room.id);
+    try {
+      ws.state = "creating";
+      ws.error = undefined;
+      this.#save(room);
+      const why = this.#worktreeProblem(project, room.crew.members);
+      if (why) return this.#provisionFailed(room, why);
+      if (ws.attempted) {
+        const undone = await undoWorktree({ source: ws.source.root, path: ws.root, branch: ws.branch, start: ws.start, workspaceId: ws.id, token: ws.token });
+        if (!undone.ok) return this.#provisionFailed(room, undone.reason);
+      }
+      // Before anything is made, so a retry knows to undo it, and where the branch started.
+      if (!ws.base) {
+        const base = await this.snapshots.capture(project, `start of room ${room.id}`, null);
+        if (!base.ok) return this.#provisionFailed(room, `Toryo couldn't take a snapshot of ${project.path} to start from: ${base.reason}`);
+        if (!(await this.snapshots.pin(project, `room-${room.id}-base`, base.commit))) return this.#provisionFailed(room, "Toryo couldn't keep the snapshot it starts from");
+        Object.assign(ws, { base: base.commit, baseTree: base.tree, baseAt: nowIso() });
+      }
+      // This attempt's token, kept before anything is made: the worktree is locked with it (see undoWorktree).
+      const head = this.#headOf(ws.source.root);
+      Object.assign(ws, { attempted: true, start: head, token: shortId("t") });
+      this.#save(room);
+      const r = await createWorktree({ snapshots: this.snapshots, project, source: ws.source.root, path: ws.root, branch: ws.branch, start: head, base: { commit: ws.base, tree: ws.baseTree }, subdir: ws.subdir, workspaceId: ws.id, token: ws.token, hooks: this.worktreeHooks });
+      if (!r.ok) return this.#provisionFailed(room, r.reason);
+      Object.assign(ws, { state: "ready", readyAt: nowIso(), attempted: undefined });
+      this.#system(
+        room,
+        `This room's worktree is ready: ${ws.cwd}. It has the project's files as they were (snapshot ${ws.base.slice(0, 12)}), uncommitted changes included, staged in its own index, so \`git diff\` there shows only what changes from now on. ${
+          this.readOnly?.ok
+            ? "The main folder is read-only for its agents' writing turns."
+            : `This machine can't make the main folder read-only for its agents (${this.readOnly?.why ?? "no read-only mounts here"}): they're told not to touch it, and Claude's edit tools are turned off there, but a shell command could still write in it.`
+        } Bringing its changes back to the main folder comes in a later update of Toryo.`,
+      );
+      this.#save(room);
+    } catch (error) {
+      this.#provisionFailed(room, `Toryo's worktree step failed: ${error?.message ?? error}`);
+    } finally {
+      this.provisioning.delete(room.id);
+      this.#schedule();
+    }
+  }
+
+  /** The commit a folder's HEAD is on, or null (an unborn repository). */
+  #headOf(folder) {
+    try {
+      return execFileSync("git", ["-C", folder, "rev-parse", "--verify", "-q", "HEAD^{commit}"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  #provisionFailed(room, reason) {
+    const ws = room.workspace;
+    ws.state = "failed";
+    ws.error = reason;
+    this.#system(room, `Toryo couldn't make this room's worktree: ${reason}. Nothing runs in the room until it's made.`, { level: "warn" });
+    this.#askWorkspace(room);
+    this.#save(room);
+  }
+
+  /** Ask (once) to try making the room's worktree again. */
+  #askWorkspace(room) {
+    if (this.#allWaiting(room).some((w) => w.kind === "workspace")) return;
+    this.#wait(room, {
+      kind: "workspace",
+      from: null,
+      question: `Toryo couldn't make this room's worktree: ${room.workspace.error}. Try again? (Its work waits until the worktree is made. To build in the project's folder instead, start the build in another room with “This folder (shared)”.)`,
+      recommendation: "Retry",
+    });
+  }
+
+  /**
+   * What protects the main folder during a worktree room's turns: Claude's edit tools turned off there (`deny`, the
+   * folder by every name it has), and, where this machine can, the main folder mounted read-only for the agent and
+   * everything it runs (`paths`). In a writing turn, the Git folders the room's own index, objects and branch are in
+   * stay writable (`writable`), and Codex's sandbox is given them too. `"readOnlyMount": false` in the agent's config
+   * leaves the mount out.
+   */
+  async #protectMain(room, project, cfg) {
+    const ws = room.workspace;
+    const main = ws.source.root;
+    const deny = [...new Set([main, project.path, this.#realOr(project.path)])];
+    const writable = writableGitPaths(await gitPaths(ws.root), ws.branch);
+    return { deny, paths: cfg.readOnlyMount === false ? [] : this.#readOnlyPaths(main), writable };
+  }
+
+  #realOr(path) {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  }
+
+  /**
+   * A Codex app thread works in the folder it was opened in (`where`, as the app records it, as a path here), whatever
+   * Toryo asks: a room's message goes to it only when that's the room's folder (the same Git working tree, or one
+   * folder inside the other). Why not, or null. A folder this machine doesn't have can't be checked, so it's refused.
+   */
+  #appFolderProblem(room, where, cwd) {
+    if (!existsSync(where)) return `This room's Codex app thread works in ${where}, which isn't a folder on this machine, so Toryo can't check it's this room's folder (${cwd}). Toryo sent it nothing. Choose a thread opened in this room's folder (the room's settings), then retry.`;
+    const theirs = this.#folderOf({ path: where });
+    const ours = this.#roomFolder(room);
+    if (ours && room.workspace?.kind !== "worktree" && this.#sameFolder(theirs, ours)) return null;
+    return `This room's Codex app thread works in ${where}, not in this room's folder (${cwd}). Toryo sent it nothing. Choose a thread opened in this folder (the room's settings), then retry.`;
   }
 
   /** A snapshot of the room's workspace for a turn. One that can't be taken is said in the room, once per reason. */
@@ -4048,11 +4413,12 @@ export class Engine extends EventEmitter {
     }
     if (then.mode === "build") {
       if (!String(then.task ?? "").trim() && !String(then.planPath ?? "").trim()) throw new UserError("Give a task or a plan file.");
-      if (!then.wait) this.#checkFolder(this.project(room.projectId), room);
+      const own = this.#ownFolder(this.project(room.projectId), room.crew.members, then.folder, room);
+      if (!then.wait && !own) this.#checkFolder(this.project(room.projectId), room);
       // A build that starts by reviewing work already handed over needs the handoff now, before anything changes.
       const builder = then.builder && room.crew.members.includes(then.builder) ? then.builder : room.crew.builder;
       const handoff = then.reviewFirst ? this.#handoffFor(this.project(room.projectId), builder, then.handoff, room.sessions.codexapp) : undefined;
-      return () => this.startBuild(room.id, { task: then.task, planPath: then.planPath, builder: then.builder, reviewer: then.reviewer, reviewFirst: then.reviewFirst, handoff, slice: then.slice, wait: Boolean(then.wait) });
+      return () => this.startBuild(room.id, { task: then.task, planPath: then.planPath, builder: then.builder, reviewer: then.reviewer, reviewFirst: then.reviewFirst, handoff, slice: then.slice, wait: Boolean(then.wait), folder: own ? "own" : "shared" });
     }
     throw new UserError("The first step is a message (chat), a planning topic (plan) or a build task (build).");
   }
@@ -4086,6 +4452,25 @@ export class Engine extends EventEmitter {
 }
 
 const outside = (rel) => rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+
+/** Whether `path` is `folder` or inside it. */
+const insideFolder = (path, folder) => !outside(relative(folder, path));
+
+/** A path as it really is: its nearest folder that exists, with links resolved, and the rest of it after that. */
+function realNearest(path) {
+  let head = resolve(path);
+  const rest = [];
+  for (;;) {
+    try {
+      return join(realpathSync(head), ...rest);
+    } catch {
+      const up = resolve(head, "..");
+      if (up === head) return resolve(path);
+      rest.unshift(head.slice(up.length).replace(/^[/\\]+/, ""));
+      head = up;
+    }
+  }
+}
 
 /** The order requests start in across rooms: the one queued first, then by room and place in its queue, so ties are stable. */
 const queueOrder = (req, room) => `${req.queuedAt ?? ""}|${room.id}|${String(room.queue.indexOf(req)).padStart(4, "0")}`;

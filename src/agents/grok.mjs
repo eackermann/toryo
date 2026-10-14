@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { run, uuid, which } from "../util.mjs";
-import { runAgentProcess, tryJson } from "./proc.mjs";
+import { lockFor, runAgentProcess, tryJson } from "./proc.mjs";
 
 /**
  * Grok Build CLI (`grok`), headless with -p and --output-format json.
@@ -23,7 +23,7 @@ export const grok = {
     return { installed: v.code === 0, path: bin, version: v.stdout.trim().split("\n")[0] };
   },
 
-  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, canLaunch }) {
+  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, protect, canLaunch }) {
     const command = cfg.command ?? [which(cfg.bin ?? this.defaultBin) ?? "grok"];
     const session = sessionId ?? uuid();
     // Grok takes the prompt as an argument; keep it well under the OS argument limit.
@@ -42,7 +42,8 @@ export const grok = {
       rawLogPath: join(turnDir, "output.jsonl"),
       signal,
       timeoutMs,
-      readOnly: access !== "write" ? readOnlyPaths : null,
+      // In a room's own worktree, the project's main folder is read-only too (`protect`, where possible).
+      readOnly: lockFor(access, readOnlyPaths, protect),
       onLine: (line) => {
         if (!lines.length) onStarted?.({ sessionId: session });
         lines.push(line);

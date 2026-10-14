@@ -224,7 +224,7 @@ test("a Codex app turn followed again after a restart keeps its times: handed ov
         }),
     };
     const make = async () => {
-      const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
+      const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
       await e.init({ detect: false });
       return e;
     };
@@ -282,7 +282,7 @@ test("a Codex app turn the app took up while Toryo was stopped: working since th
         }),
     };
     const make = async () => {
-      const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
+      const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
       await e.init({ detect: false });
       return e;
     };

@@ -477,7 +477,9 @@ function renderTop() {
   renderSession();
   wakeSparklers();
   $("#roomTitle").textContent = r.title;
-  $("#roomWhere").textContent = p ? `${p.name} · ${p.path}` : "";
+  $("#roomWhere").innerHTML = p ? whereHtml(r, p) : "";
+  // A room's own worktree stays said on a narrow screen (shortly: the label and Copy path).
+  $("#roomWhere").classList.toggle("own", S.state?.rooms.find((x) => x.id === r.id)?.workspace?.kind === "worktree");
   for (const b of $$("#modes button")) b.setAttribute("aria-pressed", String(b.dataset.mode === r.mode));
   $("#rhState").innerHTML = stateSentence(r);
   const resumable = ["paused", "stopped", "pausing", "stopping"].includes(r.status);
@@ -489,6 +491,30 @@ function renderTop() {
   $("#stopBtn").disabled = ["stopped", "done", "idle"].includes(r.status);
   $("#tabbar [data-view=room]").innerHTML = `${ic(r.mode === "plan" ? "plan" : r.mode === "build" ? "build" : "chat")}<span>${esc(r.title)}</span>`;
   document.title = `${r.status === "waiting" ? "● " : ""}${r.title} · Toryo`;
+}
+
+/**
+ * Where a room works, for its header: the project's folder, shared (with the other rooms that use it), or its own
+ * worktree, with its branch, its state while it's made, the main folder its changes are for, and a Copy button.
+ */
+function whereHtml(r, p) {
+  const ws = S.state?.rooms.find((x) => x.id === r.id)?.workspace;
+  if (ws?.kind !== "worktree") return `${esc(p.name)} · <span title="This room works in the project's own folder">${esc(p.path)}</span>${ws?.others?.length ? ` · ${sharedText(ws.others)}` : ""}`;
+  const state = ws.state === "ready" ? "" : ws.state === "failed" ? " · <b>couldn't be made</b>" : " · being made…";
+  return `${esc(p.name)} · <span class="wsk">${ic("build")}Own worktree</span> <span class="mono wsp">${esc(ws.path)}</span> ${copyPathBtn(ws.path)}<span class="wsp"> · branch <span class="mono">${esc(ws.branch)}</span></span>${state}`;
+}
+
+/** A small Copy button for a folder's path (narrow screens can't select a long one easily). */
+const copyPathBtn = (path) => `<button type="button" class="linkbtn" data-copy-path="${esc(path)}" title="Copy this folder's path">Copy path</button>`;
+
+/** Where a build will work, chosen before it starts: its own worktree, or the project's folder (shared), each with its exact folder. */
+function folderChoice(prefix, preview, { appCrew = false } = {}) {
+  const own = preview?.own && !appCrew;
+  const pick = own && preview.defaultFolder === "own" ? "own" : "shared";
+  const why = appCrew ? "The Codex app works in the project's own folder only." : preview?.why ?? "";
+  return `<div class="field" id="${prefix}Where"><span class="lbl">Where it works</span>
+    <label class="opt"><input type="radio" name="${prefix}Folder" value="own" ${pick === "own" ? "checked" : ""} ${own ? "" : "disabled"}> <span><b>Its own worktree</b>${own ? `: <span class="mono">${esc(preview.own.path)}</span> (branch <span class="mono">${esc(preview.own.branch)}</span>). A separate copy of the project's folder as it is now, uncommitted changes included, so this build doesn't share files with anyone. Bringing its changes back to the main folder comes in a later update.` : why ? `: ${esc(why)}` : ""}</span></label>
+    <label class="opt"><input type="radio" name="${prefix}Folder" value="shared" ${pick === "shared" ? "checked" : ""}> <span><b>This folder (shared)</b>: <span class="mono">${esc(preview?.shared?.path ?? "")}</span>. One build at a time works here.</span></label></div>`;
 }
 
 /**
@@ -1360,9 +1386,12 @@ function renderCrew() {
     html += `<div><button type="button" class="btn" data-action="swap">${r.swapPending ? "Cancel the swap after this round" : "Swap builder and reviewer"}</button></div>`;
 
   const addable = Object.entries(S.state.agents ?? {}).filter(([id]) => !r.crew.members.includes(id));
+  // The Codex app works in the project's own folder only: it can't join a room with its own worktree.
+  const ownWorktree = r.workspace?.kind === "worktree";
+  const canAdd = (id, a) => a.installed && !(id === "codexapp" && ownWorktree);
   if (addable.length)
     html += `<div class="card addagent"><p class="eyebrow">More agents</p>${addable
-      .map(([id, a]) => `<div class="row"><span>${name(id)}${a.installed ? (a.tested === false ? ' <span class="hint">(adapter untested)</span>' : "") : ` <span class="hint">· ${esc(a.hint ?? "not installed")}</span>`}</span>${a.installed ? `<button type="button" class="btn small" data-add-agent="${id}">Add</button>` : ""}</div>`)
+      .map(([id, a]) => `<div class="row"><span>${name(id)}${a.installed ? (a.tested === false ? ' <span class="hint">(adapter untested)</span>' : "") : ` <span class="hint">· ${esc(a.hint ?? "not installed")}</span>`}${a.installed && !canAdd(id, a) ? ' <span class="hint">· works in the project\'s own folder only, not in this room\'s worktree</span>' : ""}</span>${canAdd(id, a) ? `<button type="button" class="btn small" data-add-agent="${id}">Add</button>` : ""}</div>`)
       .join("")}</div>`;
 
   const s = r.settings;
@@ -1799,6 +1828,7 @@ function newRoomSheet(mode = "chat") {
       <div class="pair"><div class="field"><label for="nrBuilder">Builder</label><select id="nrBuilder">${agentOptions(installed, "codex")}</select></div>
       <div class="field"><label for="nrReviewer">Reviewer</label><select id="nrReviewer">${agentOptions(installed, "claude")}</select></div></div>
       ${handoffFields("nr")}
+      <div id="nrWhereBox"></div>
     </div>
     <div class="field"><label for="nrTitle">Room name (optional)</label><input type="text" id="nrTitle" placeholder="Named after the first message if left empty"></div>
     <div class="ns-busy" role="alert" hidden></div>
@@ -1810,7 +1840,42 @@ function newRoomSheet(mode = "chat") {
     return $$("input[name=nrCrew]:checked").some((i) => i.value === "codexapp") || (m === "build" && [$("#nrBuilder").value, $("#nrReviewer").value].includes("codexapp"));
   };
   const syncThread = () => ($("#nrShared").innerHTML = sharedThreadNote($("#nrThread").value));
-  const syncApp = () => ($("#nrAppBox").hidden = !usesApp());
+  // Where a build works, with the exact folder: asked of the desk for the chosen project (the room's id comes with it).
+  // Only the answer for the project chosen now, in this form, counts: a slower answer for one chosen before, or for a
+  // form closed since (a new one has the same fields), is dropped. A build starts only once its folders have been
+  // shown (see the submit below).
+  const form = $("#newRoomForm");
+  const inForm = (sel) => form.querySelector(sel);
+  let preview = null;
+  let asked = 0;
+  const drawWhere = () => {
+    if (!form.isConnected) return;
+    const was = inForm("input[name=nrFolder]:checked")?.value;
+    const id = inForm("#nrProject").value;
+    inForm("#nrWhereBox").innerHTML =
+      preview && preview.projectId === id
+        ? folderChoice("nr", preview, { appCrew: usesApp() })
+        : `<div class="field"><span class="lbl">Where it works</span><span class="hint">${id === "__add" ? "Shown once the project is added: press Start." : "Finding the folders…"}</span></div>`;
+    const keep = was && inForm(`input[name=nrFolder][value=${was}]:not([disabled])`);
+    if (keep) keep.checked = true;
+  };
+  const loadWhere = async () => {
+    const id = inForm("#nrProject").value;
+    const mine = ++asked;
+    preview = null;
+    drawWhere();
+    if (!id || id === "__add") return null;
+    const got = await api("GET", `/api/projects/${encodeURIComponent(id)}/workspace`).catch(() => null);
+    if (!form.isConnected || mine !== asked || inForm("#nrProject").value !== id) return null;
+    preview = got;
+    drawWhere();
+    return preview;
+  };
+  loadWhere();
+  const syncApp = () => {
+    $("#nrAppBox").hidden = !usesApp();
+    drawWhere();
+  };
   const fillThreads = async () => {
     const threads = await appThreads();
     $("#nrThread").innerHTML = threadOptions(threads, defaultThread($("#nrProject").value), threads.length ? "Choose a thread" : "No app threads found");
@@ -1834,6 +1899,7 @@ function newRoomSheet(mode = "chat") {
   });
   $("#nrProject").addEventListener("change", () => {
     sync();
+    loadWhere();
     if (S.state.agents?.codexapp?.installed) fillThreads();
   });
   wireHandoff("nr");
@@ -1859,8 +1925,20 @@ function newRoomSheet(mode = "chat") {
     e.preventDefault();
     try {
       let projectId = $("#nrProject").value;
-      if (projectId === "__add") projectId = (await api("POST", "/api/projects", { path: $("#nrPath").value.trim() })).id;
       const mode = $(".modecard[aria-pressed=true]").dataset.mode;
+      if (projectId === "__add") {
+        const added = await api("POST", "/api/projects", { path: $("#nrPath").value.trim() });
+        projectId = added.id;
+        // A build shows where it would work first: the new project is chosen in the form, and Start is pressed again.
+        if (mode === "build") {
+          const sel = $("#nrProject");
+          if (![...sel.options].some((o) => o.value === added.id)) sel.insertBefore(new Option(`${added.name} · ${added.path}`, added.id), sel.querySelector("option[value=__add]"));
+          sel.value = added.id;
+          $("#nrAdd").hidden = true;
+          await loadWhere();
+          return toast("Project added", "Check where the build works, then press Start again.");
+        }
+      }
       const crew = $$("input[name=nrCrew]:checked").map((i) => i.value);
       const body = { projectId, mode, members: crew, title: $("#nrTitle").value };
       if (mode === "chat") Object.assign(body, { text: $("#nrText").value, to: "everyone", discuss: $("#nrDiscuss").checked ? 2 : 0 });
@@ -1869,6 +1947,13 @@ function newRoomSheet(mode = "chat") {
         Object.assign(body, { planPath: $("#nrPlan").value, task: $("#nrTask").value, builder: $("#nrBuilder").value, reviewer: $("#nrReviewer").value, ...handoffBody("nr") });
         // The builder and reviewer are always part of the crew.
         body.members = [...new Set([...crew, body.builder, body.reviewer])];
+        // Only with its folders shown for this project; the desk refuses a folder other than the one shown.
+        if (preview?.projectId !== projectId) {
+          await loadWhere();
+          return toast("Where it works", "Check the folder it works in, then press Start again.");
+        }
+        const folder = inForm("input[name=nrFolder]:checked")?.value ?? "shared";
+        Object.assign(body, { folder }, folder === "own" ? { roomId: preview.roomId, workspacePath: preview.own.path } : {});
         if (body.reviewFirst && !body.task.trim()) body.task = "After the review, carry on with the remaining work.";
       }
       if (body.members.includes("codexapp")) {
@@ -1927,13 +2012,30 @@ function startBuildSheet(planPath) {
     <div class="pair"><div class="field"><label for="bBuilder">Builder</label><select id="bBuilder">${agentOptions(r.crew.members, r.crew.builder)}</select></div>
     <div class="field"><label for="bReviewer">Reviewer</label><select id="bReviewer">${agentOptions(r.crew.members, r.crew.reviewer)}</select></div></div>
     ${handoffFields("b")}
+    <div id="bWhereBox"></div>
     <div class="ns-busy" role="alert" hidden></div>
     <div style="display:flex;gap:8px"><button class="btn primary" type="submit">Start building</button><button class="btn" type="button" data-close>Cancel</button></div></form>`);
   wireHandoff("b");
-  $("#buildForm").addEventListener("submit", async (e) => {
+  // Where it works: a room that has its own worktree stays there; one in the project's folder can move to its own.
+  // This form's answer, for this form only: a sheet closed before it came doesn't write into the next one.
+  const buildForm = $("#buildForm");
+  let where = null;
+  api("GET", `/api/rooms/${r.id}/workspace`)
+    .then((w) => {
+      if (!buildForm.isConnected) return;
+      where = w;
+      buildForm.querySelector("#bWhereBox").innerHTML = w.fixed
+        ? `<p class="hint" style="margin:0">It works in this room's own worktree: <span class="mono">${esc(w.own.path)}</span>.</p>`
+        : `${folderChoice("b", w, { appCrew: r.crew.members.includes("codexapp") })}${w.own ? `<p class="hint" style="margin:0">Moving to its own worktree starts the agents' sessions afresh there; the room's messages and plan go with it.</p>` : ""}`;
+    })
+    .catch(() => {});
+  buildForm.addEventListener("submit", async (e) => {
     e.preventDefault();
+    const folder = buildForm.querySelector("input[name=bFolder]:checked")?.value;
+    // Its own worktree only where its folder was shown (the desk refuses another).
+    const workspacePath = folder === "own" && !where?.fixed ? where?.own?.path : undefined;
     const go = async (wait) => {
-      await api("POST", `/api/rooms/${r.id}/control`, { action: "start-build", planPath: $("#bPlan").value, task: $("#bTask").value, builder: $("#bBuilder").value, reviewer: $("#bReviewer").value, ...handoffBody("b"), wait });
+      await api("POST", `/api/rooms/${r.id}/control`, { action: "start-build", planPath: $("#bPlan").value, task: $("#bTask").value, builder: $("#bBuilder").value, reviewer: $("#bReviewer").value, ...handoffBody("b"), wait, folder, workspacePath });
       closeSheet();
     };
     try {
@@ -2158,7 +2260,8 @@ async function fileSheet(path, line) {
   const r = room();
   const projectId = r?.projectId ?? S.state.config.projects[0]?.id;
   try {
-    const f = await api("GET", `/api/projects/${projectId}/file?path=${encodeURIComponent(path)}`);
+    // In a room: the file in the folder it works in (its own worktree, or the project's).
+    const f = await api("GET", r ? `/api/rooms/${r.id}/file?path=${encodeURIComponent(path)}` : `/api/projects/${projectId}/file?path=${encodeURIComponent(path)}`);
     const isMd = /\.(md|mdx|markdown)$/i.test(f.path);
     const body = isMd
       ? `<div class="viewer md">${renderMarkdown(f.content)}</div>`
@@ -2227,7 +2330,7 @@ function roomSheet() {
       <p class="hint" style="margin:0">For new work in this room, such as the next sprint: this session ends and its history stays, folded. Nothing is deleted.</p>
       <div><button class="btn" type="button" data-new-session>Start a new session…</button></div></div>
     <div style="display:flex;gap:8px;align-items:center"><button class="btn primary" type="submit">Save</button><button class="btn" type="button" data-close>Cancel</button><span class="sep" style="flex:1"></span><button class="btn danger" type="button" id="deleteRoom">Delete room</button></div>
-    <p class="hint" style="margin:0">Deleting removes the room from Toryo. Its transcript stays on disk in ~/.toryo/rooms/${esc(r.id)}, and nothing in your repository changes.${r.status === "running" ? " The turn that's running now is stopped first." : ""}</p></form>`);
+    <p class="hint" style="margin:0">Deleting removes the room from Toryo. Its transcript stays on disk in ~/.toryo/rooms/${esc(r.id)}, and nothing in your repository changes.${r.workspace?.kind === "worktree" ? ` Its own worktree stays too, with its changes: <span class="mono">${esc(r.workspace.cwd)}</span> (branch <span class="mono">${esc(r.workspace.branch)}</span>). Removing worktrees from Toryo comes in a later update.` : ""}${r.status === "running" ? " The turn that's running now is stopped first." : ""}</p></form>`);
   $("#roomForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -3087,7 +3190,7 @@ function homeWorking(h) {
     return `<a class="workcard" href="#/r/${esc(w.room)}" data-turn="${esc(w.turn)}">
       ${homeTile(w.room, w.title)}
       <div class="wc-main">
-        <div class="wc-title"><strong>${esc(w.title)}</strong><span class="muted">${esc(w.project ?? "")}${w.folder ? ` · <span class="mono">${esc(w.folder)}</span>` : ""}</span></div>
+        <div class="wc-title"><strong>${esc(w.title)}</strong><span class="muted">${esc(w.project ?? "")}${w.folder ? ` · ${w.workspace?.kind === "worktree" ? "own worktree " : ""}<span class="mono">${esc(w.folder)}</span>` : ""}</span></div>
         <div class="wc-line">${chip}<span><b>${esc(w.agent === "toryo" ? "Toryo" : name(w.agent))}</b>${w.role && w.role !== "other" ? `, ${esc(w.role)}` : ""} · ${esc(workWhat(w))}</span>${w.questions ? `<span class="act-k" data-k="you">Needs you too</span>` : ""}</div>
         ${workPhases(w) ? `<div class="wc-phase">${workPhases(w)}</div>` : ""}
         <div class="wc-act mono" data-activity>${esc(w.activity ?? "")}</div>
@@ -3107,7 +3210,7 @@ function homeOthers(h) {
   const rows = h.rooms.map((r) => {
     const sum = S.state.rooms.find((x) => x.id === r.id);
     const state = sum ? railState(sum).text : r.status;
-    return `<a class="roomrow" href="#/r/${esc(r.id)}">${homeTile(r.id, r.title)}<span class="rr-text"><strong>${esc(r.title)}</strong><span>${esc(state)}${r.project ? ` · ${esc(r.project)}` : ""}${r.shared?.length ? ` · ${sharedText(r.shared)}` : ""}</span></span><span class="rr-meta">${r.updatedAt ? `<span data-ago="${esc(r.updatedAt)}">${ago(r.updatedAt)}</span>` : ""}</span></a>`;
+    return `<a class="roomrow" href="#/r/${esc(r.id)}">${homeTile(r.id, r.title)}<span class="rr-text"><strong>${esc(r.title)}</strong><span>${esc(state)}${r.project ? ` · ${esc(r.project)}` : ""}${r.workspace?.kind === "worktree" ? ` · own worktree${r.workspace.state === "failed" ? " (couldn't be made)" : r.workspace.state === "creating" ? " (being made)" : ""}` : ""}${r.shared?.length ? ` · ${sharedText(r.shared)}` : ""}</span></span><span class="rr-meta">${r.updatedAt ? `<span data-ago="${esc(r.updatedAt)}">${ago(r.updatedAt)}</span>` : ""}</span></a>`;
   });
   return `<section class="panel" aria-labelledby="h-other">
     <header><h2 id="h-other">Other rooms</h2></header>
@@ -3285,6 +3388,13 @@ document.addEventListener("click", async (e) => {
   const hit = (sel) => t.closest(sel);
   try {
     if (hit("[data-close]") || t.id === "sheet") return closeSheet();
+    if (hit("[data-copy-path]")) {
+      const btn = hit("[data-copy-path]");
+      return navigator.clipboard.writeText(btn.dataset.copyPath).then(
+        () => (btn.textContent = "Copied"),
+        () => fail(new Error("The browser refused clipboard access.")),
+      );
+    }
     if (hit(".roomlink[data-room]")) {
       // A step in the browser's history, so Back returns to where you were (Home, or another room).
       const id = hit(".roomlink[data-room]").dataset.room;

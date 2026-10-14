@@ -4,11 +4,27 @@ import { dirname } from "node:path";
 import { readOnlyCommand } from "./readonly.mjs";
 
 /**
+ * What a turn can't write to (`readOnly` for runAgentProcess): a read-only turn, its folder (`readOnlyPaths`); in a
+ * room's own worktree (`protect`), also the project's main folder, of which a writing turn keeps the room's own Git
+ * folders writable. Null: nothing.
+ */
+export function lockFor(access, readOnlyPaths, protect) {
+  const main = protect?.paths ?? [];
+  if (access !== "write") {
+    const paths = [...new Set([...(readOnlyPaths ?? []), ...main])];
+    return paths.length ? paths : null;
+  }
+  return main.length ? { paths: main, writable: protect.writable ?? [] } : null;
+}
+
+/**
  * Spawn an agent CLI in its own process group, feed the prompt on stdin, and
  * stream stdout line by line. Aborting the signal stops the whole group
  * (SIGINT, then SIGTERM, then SIGKILL), so tools the agent started stop too.
  * `readOnly` lists folders the agent and everything it runs can't write to
- * (see readonly.mjs); `readOnly` in the result says whether that held.
+ * (see readonly.mjs), or is { paths, writable }: those folders, except the
+ * ones in `writable` inside them; `readOnly` in the result says whether that
+ * held.
  */
 export function runAgentProcess({
   command,
@@ -32,8 +48,9 @@ export function runAgentProcess({
     let cmd = program;
     let fullArgs = [...prefix, ...args];
     let locked = null;
-    if (readOnly?.length) {
-      const wrapped = readOnlyCommand(readOnly, cmd, fullArgs);
+    const lock = Array.isArray(readOnly) ? { paths: readOnly, writable: [] } : readOnly;
+    if (lock?.paths?.length) {
+      const wrapped = readOnlyCommand(lock.paths, cmd, fullArgs, lock.writable ?? []);
       locked = wrapped ? "enforced" : "unenforced";
       if (wrapped) ({ cmd, args: fullArgs } = wrapped);
     }

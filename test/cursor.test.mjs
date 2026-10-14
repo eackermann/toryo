@@ -108,7 +108,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
       seen.push({ sessionId, access, prompt });
       return access === "write" ? { text: "Built.\nTORYO: OWNER Done?", sessionId: "chat-w" } : { text: "Reviewed.\nTORYO: REPLY", sessionId: "chat-r", askMode: true };
     } };
-    const engine = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, cursor: fake } });
+    const engine = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, cursor: fake } });
     await engine.init({ detect: false });
     const room = engine.createRoom({ projectId: "repo", mode: "chat", members: ["cursor"], text: "Look at it." });
     await waitFor(() => turns(engine, room.id).some((x) => x.state === "done"), { label: "read turn" });

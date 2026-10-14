@@ -298,7 +298,7 @@ test("after a restart, Toryo follows the Codex app's turn again instead of sendi
         return behaviour(args);
       },
     });
-    const make = (behaviour) => new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app(behaviour) } });
+    const make = (behaviour) => new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app(behaviour) } });
     const first = make(({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({ text: "", aborted: true }))));
     await first.init({ detect: false });
     const room = first.createRoom({ projectId: "repo", mode: "build", members: ["codexapp", "claude"], builder: "codexapp", reviewer: "claude", task: "x", appThread: "thread-1" });
@@ -558,7 +558,7 @@ test("the Codex app's turn can't be cancelled: a stop waits for it, a second sto
           abandon.addEventListener("abort", () => resolve({ text: "", aborted: true }));
         }),
     };
-    const engine = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
+    const engine = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
     await engine.init({ detect: false });
     const room = engine.createRoom({ projectId: "repo", mode: "build", members: ["codexapp", "claude"], builder: "codexapp", reviewer: "claude", task: "x", appThread: "thread-1" });
     await waitFor(() => finish, { label: "app turn" });

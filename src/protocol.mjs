@@ -109,18 +109,31 @@ export function rulesUpdate(project, { inInstructions = false } = {}) {
   ].join("\n\n");
 }
 
-export function preamble({ agentLabel, others, project }) {
+/**
+ * Toryo's introduction for an agent in a room. `workspace`: the room's own worktree ({ cwd, branch, main, base }),
+ * where all its work happens, with the project's main folder named only as off-limits; null for the project's folder.
+ */
+export function preamble({ agentLabel, others, project, workspace = null }) {
   const crew = others.length ? others.join(", ") : "no other agents";
   return [
     `You are ${agentLabel}, working inside Toryo: a relay that passes messages between AI coding agents and their owner. In this room: the owner and ${crew}.`,
     "Messages from the owner and the other agents arrive in your prompt under “Since your last turn”. Your final message is forwarded to them verbatim, so write it for them: concrete and self-contained, with file paths and line numbers where they help.",
-    `Repository: ${project.path}. Follow its own conventions (CLAUDE.md, AGENTS.md and similar).`,
+    workspace ? worktreeBrief(workspace) : `Repository: ${project.path}. Follow its own conventions (CLAUDE.md, AGENTS.md and similar).`,
     `Decisions: when the owner decides something, or the crew agrees on something durable, record it in the repository. ${project.decisions || DEFAULT_DECISIONS} Never record something as decided that the owner has not decided.`,
     "End every turn with exactly one status line, chosen from the ones your prompt allows: `TORYO: <STATUS> <optional detail>`.",
     project.rules ? `House rules from the owner:\n${project.rules}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+/** Where a worktree room's agents work, and the main folder they leave alone. */
+function worktreeBrief({ cwd, branch, main }) {
+  return [
+    `Repository: ${cwd}. This is this room's own worktree of the project (a Git worktree on the branch ${branch}): do all your work here, and read the files here. Follow its own conventions (CLAUDE.md, AGENTS.md and similar).`,
+    `The project's main folder, ${main}, is off-limits: don't edit, create or delete anything there, and don't run commands that change it. This room's changes reach it only when the owner brings them back.`,
+    "This worktree started from the main folder as it was, uncommitted changes included, and those are staged in its own index: plain `git diff` shows only the changes made here since, while `git diff --cached` or `git diff HEAD` also show the ones it started with. What this room changed is Toryo's comparison of the worktree with the snapshot it started from, whatever is staged or committed.",
+  ].join("\n");
 }
 
 /** The "Since your last turn" block: everything this agent hasn't seen yet. */

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { run, uuid, which } from "../util.mjs";
-import { runAgentProcess, tryJson } from "./proc.mjs";
+import { lockFor, runAgentProcess, tryJson } from "./proc.mjs";
 import { claudeWindowType, normalizeWindow } from "../usage.mjs";
 
 /**
@@ -10,6 +10,9 @@ import { claudeWindowType, normalizeWindow } from "../usage.mjs";
  * which covers shell commands and every other tool. Where that isn't available
  * only Claude Code's own rules apply: Edit/Write/NotebookEdit are denied inside
  * the repository (verified 13 Oct 2026), but shell commands could still write.
+ * Writing turns in a room's own worktree get the same for the project's main
+ * folder (`protect`): its edit tools denied there, and the main folder mounted
+ * read-only except the Git folders the room's own index and branch are in.
  */
 export const claude = {
   id: "claude",
@@ -44,7 +47,7 @@ export const claude = {
     return { installed: v.code === 0, path: bin, version: v.stdout.trim().split("\n")[0] };
   },
 
-  async run({ cfg = {}, cwd, prompt, sessionId, access, systemPrompt, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, canLaunch }) {
+  async run({ cfg = {}, cwd, prompt, sessionId, access, systemPrompt, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, protect, canLaunch }) {
     const command = cfg.command ?? [which(cfg.bin ?? this.defaultBin) ?? "claude"];
     const fresh = !sessionId;
     const session = sessionId ?? uuid();
@@ -55,11 +58,10 @@ export const claude = {
     args.push("--permission-mode", cfg.permissionMode ?? "auto");
     if (systemPrompt) args.push("--append-system-prompt", systemPrompt);
     args.push(...(cfg.extraArgs ?? []));
-    // Variadic option: keep it last so nothing after it is swallowed.
-    if (access !== "write") {
-      const root = cwd.startsWith("/") ? `/${cwd}` : cwd;
-      args.push("--disallowedTools", `Edit(${root}/**)`, `Write(${root}/**)`, `NotebookEdit(${root}/**)`);
-    }
+    // Variadic option: keep it last so nothing after it is swallowed. A read-only turn can't edit its folder; no turn
+    // in a room's own worktree can edit the project's main folder (`protect.deny`).
+    const denied = [...(access !== "write" ? [cwd] : []), ...(protect?.deny ?? [])];
+    if (denied.length) args.push("--disallowedTools", ...denied.flatMap((d) => editRules(d)));
 
     let text = "";
     let lastAssistant = "";
@@ -84,7 +86,7 @@ export const claude = {
       rawLogPath: join(turnDir, "output.jsonl"),
       signal,
       timeoutMs,
-      readOnly: access !== "write" ? readOnlyPaths : null,
+      readOnly: lockFor(access, readOnlyPaths, protect),
       onLine: (line) => {
         const ev = tryJson(line);
         if (!ev) return;
@@ -200,4 +202,10 @@ export function describeTool(block) {
   if (name === "WebSearch" || name === "WebFetch")
     return { kind: "tool", text: `${name} ${input.query ?? input.url ?? ""}` };
   return { kind: "tool", text: name };
+}
+
+/** Claude Code's rules turning its edit tools off in a folder (an absolute path is written with a leading `//`). */
+export function editRules(folder) {
+  const root = folder.startsWith("/") ? `/${folder}` : folder;
+  return [`Edit(${root}/**)`, `Write(${root}/**)`, `NotebookEdit(${root}/**)`];
 }

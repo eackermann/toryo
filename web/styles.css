@@ -177,6 +177,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .roomtitle { font: inherit; letter-spacing: inherit; border: 0; background: none; padding: 0; color: var(--ink); cursor: pointer; text-align: left; overflow-wrap: anywhere; }
 .roomtitle:hover { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 4px; }
 .rh-name .muted { font-size: 13px; overflow-wrap: anywhere; }
+.wsk { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--ink-2); }
+.wsk svg { width: 13px; height: 13px; }
 .rh-state { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-size: 13.5px; color: var(--ink-2); min-width: 0; }
 .rh-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .act-k { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px 1px 6px; border-radius: 999px; font-weight: 600; font-size: 12.5px; white-space: nowrap; background: var(--sunk); color: var(--ink-2); }
@@ -194,6 +196,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .sys { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 10px; font-size: 13.5px; color: var(--ink-2); }
 .sys time { font: 12px/1.6 var(--f-mono); color: var(--muted); }
 .sys.warn span { color: var(--warn-ink); }
+/* A folder's path (a worktree's is long) can break anywhere on a narrow screen. */
+.sys > span { overflow-wrap: anywhere; }
 .slicemark { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 12px; align-items: center; padding: 14px 0 4px; }
 .slicemark .no { grid-row: span 2; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; background: var(--sunk); color: var(--ink-2); font: 600 15px/1 var(--f-display); }
 .slicemark strong { font: 600 16px/1.3 var(--f-display); overflow-wrap: anywhere; }
@@ -647,6 +651,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   /* The room header gets compact: no tile or folder (Room settings shows it), icons for the mode and actions. */
   .roomhead { padding: 10px 16px; gap: 8px 10px; }
   .roomhead > .tile, .rh-name .muted { display: none; }
+  .rh-name .muted.own { display: block; font-size: 12.5px; }
+  .rh-name .muted.own .wsp { display: none; }
   .rh-name h1 { font-size: 18px; }
   .rh-actions .btn .lbl, #modes .lbl { display: none; }
   .rh-actions .btn { padding: 7px 10px; }

@@ -18,6 +18,11 @@ import { which } from "../util.mjs";
  *
  * The cd matters: a process that was already inside the folder would
  * otherwise keep writing through the old, writable mount.
+ *
+ * Folders inside a read-only one can be kept writable (`writable`): mounted
+ * again onto themselves, writable. A room's own worktree uses this for the
+ * main folder: read-only, except the Git folders the room's index, objects
+ * and branch live in.
  */
 const SCRIPT = `uid=$1 gid=$2 inner=$3; shift 3
 here=$(pwd -P)
@@ -26,18 +31,26 @@ while [ "$1" != "--" ]; do
   shift
 done
 shift
+while [ "$1" != "--" ]; do
+  { mount --bind -- "$1" "$1" && mount -o remount,bind,rw -- "$1"; } || { echo "Toryo couldn't keep $1 writable." >&2; exit 97; }
+  shift
+done
+shift
 cd -- "$here" || exit 97
 exec "$inner" --user --map-user="$uid" --map-group="$gid" -- "$@"`;
 
-/** The command that runs `cmd args` with `paths` read-only, or null where that isn't possible. */
-export function readOnlyCommand(paths, cmd, args) {
+/**
+ * The command that runs `cmd args` with `paths` read-only (except the folders in `writable`, inside them), or null
+ * where that isn't possible.
+ */
+export function readOnlyCommand(paths, cmd, args, writable = []) {
   const unshare = support().unshare;
   if (!unshare || !paths?.length) return null;
   const uid = process.getuid();
   const gid = process.getgid();
   return {
     cmd: unshare,
-    args: ["--user", "--map-root-user", "--mount", "--", "/bin/sh", "-c", SCRIPT, "toryo-readonly", String(uid), String(gid), unshare, ...paths, "--", cmd, ...args],
+    args: ["--user", "--map-root-user", "--mount", "--", "/bin/sh", "-c", SCRIPT, "toryo-readonly", String(uid), String(gid), unshare, ...paths, "--", ...writable, "--", cmd, ...args],
   };
 }
 

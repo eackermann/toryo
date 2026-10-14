@@ -69,6 +69,11 @@ From any terminal (or an agent) while Toryo runs
   toryo start build "text" --review-first [--builder codexapp] [--reviewer claude] [--handoff-file f.md] [--slice name]
   toryo start build "text" --wait   another room is building in this folder: start when it's done or stopped
                                 (one builder per folder; --wait also works with session new and answer --accept)
+  toryo start build "text" --own | --shared
+                                where the build works: its own worktree (a separate copy of the project's folder,
+                                uncommitted changes included; the default for a new room without the Codex app, in
+                                a Git project) or the project's folder, shared. Also with session new, where the
+                                room stays where it is unless you say --own
                                 the builder already finished a round: the reviewer goes first
                                 with the Codex app in the crew, --thread <id> picks its thread for this room
   toryo mcp                   MCP server for Claude Code / Codex (phone access through their apps)
@@ -83,6 +88,11 @@ if (command === "help" || flag("help", false)) {
 
 const client = new ToryoClient();
 const roomArg = () => (typeof flag("room", null) === "string" ? flag("room", null) : null);
+// Where a build works: --own (its own worktree) or --shared (the project's folder); neither: Toryo's default.
+const folderFlag = () => {
+  if (args.includes("--own") && args.includes("--shared")) throw new Error("Choose --own or --shared, not both.");
+  return args.includes("--own") ? "own" : args.includes("--shared") ? "shared" : undefined;
+};
 try {
   switch (command) {
     case "quit": {
@@ -175,7 +185,7 @@ try {
       const ref = modes.includes(rest[0]) ? roomArg() : (rest.shift() ?? roomArg());
       const mode = modes.includes(rest[0]) ? rest.shift() : undefined;
       const str = (n) => (typeof flag(n, null) === "string" ? flag(n, null) : undefined);
-      console.log(await client.newSession(ref, { keepMemory: Boolean(flag("keep-memory", false)), mode, text: rest.join(" "), planPath: str("plan"), builder: str("builder"), reviewer: str("reviewer"), wait: Boolean(flag("wait", false)) }));
+      console.log(await client.newSession(ref, { keepMemory: Boolean(flag("keep-memory", false)), mode, text: rest.join(" "), planPath: str("plan"), builder: str("builder"), reviewer: str("reviewer"), wait: Boolean(flag("wait", false)), folder: folderFlag() }));
       process.exit(0);
     }
     case "start": {
@@ -195,6 +205,7 @@ try {
           slice: flag("slice", undefined),
           appThread: flag("thread", undefined),
           wait: Boolean(flag("wait", false)),
+          folder: folderFlag(),
         }),
       );
       process.exit(0);

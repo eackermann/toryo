@@ -63,14 +63,16 @@ export const codex = {
     return resume ? ["-c", 'sandbox_mode="workspace-write"', ...net] : ["-s", "workspace-write", ...net];
   },
 
-  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, canLaunch }) {
+  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, protect, canLaunch }) {
     const command = cfg.command ?? [which(cfg.bin ?? this.defaultBin) ?? "codex"];
     const last = join(turnDir, "last-message.txt");
     const common = ["--json", "--skip-git-repo-check", "-o", last];
     if (cfg.model) common.push("-m", cfg.model);
     if (cfg.effort) common.push("-c", `model_reasoning_effort="${cfg.effort}"`);
     const resume = Boolean(sessionId);
-    const accessArgs = this.accessArgs({ access, permissions: cfg.permissions, resume, writableRoots: cfg.writableRoots ?? [] });
+    // Its sandbox writes only in the room's folder: in a room's own worktree, also the Git folders that worktree's
+    // index and branch are in (`protect.writable`), never the project's main folder.
+    const accessArgs = this.accessArgs({ access, permissions: cfg.permissions, resume, writableRoots: [...(cfg.writableRoots ?? []), ...(protect?.writable ?? [])] });
     const args = resume
       ? ["exec", "resume", ...common, ...accessArgs, ...(cfg.extraArgs ?? []), sessionId, "-"]
       : ["exec", ...common, "-C", cwd, ...accessArgs, ...(cfg.extraArgs ?? []), "-"];

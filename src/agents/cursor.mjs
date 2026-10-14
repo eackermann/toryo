@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { run, which } from "../util.mjs";
-import { runAgentProcess, tryJson } from "./proc.mjs";
+import { lockFor, runAgentProcess, tryJson } from "./proc.mjs";
 import { readOnlyCommand } from "./readonly.mjs";
 import { describeTool } from "./claude.mjs";
 
@@ -41,7 +41,7 @@ export const cursor = {
     return { installed: v.code === 0, path: bin, version: v.stdout.trim().split("\n")[0] };
   },
 
-  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, mountable = canMount, canLaunch }) {
+  async run({ cfg = {}, cwd, prompt, sessionId, access, turnDir, onActivity, onStarted, signal, timeoutMs, readOnlyPaths, protect, mountable = canMount, canLaunch }) {
     const bin = which(cfg.bin ?? this.defaultBin) ?? which("cursor-agent") ?? "agent";
     const command = cfg.command ?? [bin];
     let chat = sessionId;
@@ -68,7 +68,8 @@ export const cursor = {
       rawLogPath: join(turnDir, "output.jsonl"),
       signal,
       timeoutMs,
-      readOnly: access !== "write" ? readOnlyPaths : null,
+      // In a room's own worktree, the project's main folder is read-only too (`protect`, where possible).
+      readOnly: lockFor(access, readOnlyPaths, protect),
       onLine: (line) => {
         const ev = tryJson(line);
         if (!ev) return;

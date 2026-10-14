@@ -228,7 +228,7 @@ test("a control Toryo couldn't save: a new restriction applies anyway and holds 
 /** An engine whose agents run in-process and record the order they start in (snapshots off, so starting is synchronous). */
 async function orderedEngine(t, order) {
   const fake = (id) => ({ ...ADAPTERS[id], detect: async () => ({ installed: true }), run: async ({ prompt }) => (order.push(prompt.match(/ROOM-(\w)/)?.[1] ?? "?"), { text: "ok\nTORYO: REPLY", sessionId: `${id}-s` }) });
-  const engine = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: fake("codex"), claude: fake("claude") } });
+  const engine = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: fake("codex"), claude: fake("claude") } });
   await engine.init({ detect: false });
   return engine;
 }
@@ -259,7 +259,7 @@ test("a release while a held agent's turn is ending starts its next turn exactly
     const order = [];
     let release = null;
     const fake = { ...ADAPTERS.codex, detect: async () => ({ installed: true }), run: () => new Promise((resolve) => (order.push("run"), (release = () => resolve({ text: "ok\nTORYO: REPLY", sessionId: "s" })))) };
-    const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: fake } });
+    const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: fake } });
     await e.init({ detect: false });
     const room = e.createRoom({ projectId: "repo", mode: "chat", members: ["codex"], settings: { snapshots: false }, text: "First." });
     await waitFor(() => order.length === 1, { label: "first turn" });
@@ -345,7 +345,7 @@ test("across rooms, requests start oldest first one at a time: A1, B1, A2", asyn
     const order = [];
     // The note addressed to this agent says which request this is (others in the room are only for its information).
     const fake = (id) => ({ ...ADAPTERS[id], detect: async () => ({ installed: true }), run: async ({ prompt }) => (order.push(prompt.match(/The owner \((?:to you|to everyone)[^)]*\)[^\n]*\nROOM-(\w+)/)?.[1]), { text: "ok\nTORYO: REPLY", sessionId: `${id}-s` }) });
-    const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: fake("codex"), claude: fake("claude") } });
+    const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: fake("codex"), claude: fake("claude") } });
     await e.init({ detect: false });
     const a = e.createRoom({ projectId: "repo", mode: "chat", members: ["codex", "claude"], settings: { snapshots: false } });
     const b = e.createRoom({ projectId: "repo", mode: "chat", members: ["codex"], settings: { snapshots: false } });
@@ -374,7 +374,7 @@ test("when a shared Codex app thread frees up, the older request from another ro
       currentLimits: () => null,
       run: ({ prompt }) => new Promise((resolve) => (order.push([...prompt.matchAll(/ROOM-(\w+)/g)].at(-1)?.[1]), pending.push(() => resolve({ text: "ok\nTORYO: REPLY", sessionId: "t1" })))),
     };
-    const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
+    const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
     await e.init({ detect: false });
     const a = e.createRoom({ projectId: "repo", mode: "chat", members: ["codexapp"], appThread: "t1", settings: { snapshots: false } });
     const b = e.createRoom({ projectId: "repo", mode: "chat", members: ["codexapp"], appThread: "t1", settings: { snapshots: false } });
@@ -466,7 +466,7 @@ test("a notes turn queues as new work: another room's older request on the share
       currentLimits: () => null,
       run: ({ prompt }) => new Promise((resolve) => (order.push(label(prompt)), pending.push((text) => resolve({ text, sessionId: "t1" })))),
     };
-    const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
+    const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
     await e.init({ detect: false });
     const a = e.createRoom({ projectId: "repo", mode: "chat", members: ["codexapp", "claude"], appThread: "t1", settings: { snapshots: false } });
     // The same app thread, but a folder of its own: one builder per folder.

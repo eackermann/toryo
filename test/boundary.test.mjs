@@ -30,7 +30,7 @@ function slowSnapshots(home, { delayMs = 300, fail = () => false } = {}) {
 
 async function engineWith(t, adapters, snapshots) {
   t.engine.shutdown();
-  const e = new Engine({ store: new Store(t.home), snapshots: snapshots ?? new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, ...adapters } });
+  const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: snapshots ?? new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, ...adapters } });
   await e.init({ detect: false });
   return e;
 }
@@ -485,7 +485,7 @@ function imageAt(store, when, { before = false } = {}) {
 /** Start a desk from a crash image and check that A's message is watched for, never sent again, and B waits for it. */
 async function checkImage(image, a, b) {
   const { app, calls } = fakeApp();
-  const e = new Engine({ store: new Store(image), snapshots: new Snapshots(image), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
+  const e = new Engine({ folderDefault: "shared", store: new Store(image), snapshots: new Snapshots(image), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
   await e.init({ detect: false });
   try {
     await waitFor(() => calls.length >= 1, { label: "something started after the restart" });
@@ -544,7 +544,7 @@ test("a stop during recovery, right after an app turn is marked interrupted, kee
     // The next desk recovers, and stops right after recording that A's turn was interrupted.
     const store = new Store(t.home);
     const crash = imageAt(store, (ev) => ev.state === "interrupted");
-    const second = new Engine({ store, snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: fakeApp().app } });
+    const second = new Engine({ folderDefault: "shared", store, snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: fakeApp().app } });
     await second.init({ detect: false });
     second.shutdown();
     assert.ok(crash.taken());
@@ -583,6 +583,7 @@ test("a stop just after a turn's end is recorded: the next step happens once, fo
 
       const follows = [];
       const again = new Engine({
+        folderDefault: "shared",
         store: new Store(crash.image),
         snapshots: new Snapshots(crash.image),
         notifier: { send() {} },
@@ -627,12 +628,12 @@ test("a stop during recovery, after the interrupted turn is offered again but be
     // The second desk queues it again, saves, and stops before marking the old turn interrupted.
     const store = new Store(t.home);
     const crash = imageAt(store, (ev) => ev.state === "interrupted", { before: true });
-    e = new Engine({ store, snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: codex(() => {}) } });
+    e = new Engine({ folderDefault: "shared", store, snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: codex(() => {}) } });
     await e.init({ detect: false });
     e.shutdown();
     assert.ok(crash.taken());
     // The third desk starts from that moment: the turn is offered once, and runs once on Resume.
-    const third = new Engine({ store: new Store(crash.image), snapshots: new Snapshots(crash.image), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: codex((resolve) => resolve({ text: "Done.\nTORYO: REPLY", sessionId: "s" })) } });
+    const third = new Engine({ folderDefault: "shared", store: new Store(crash.image), snapshots: new Snapshots(crash.image), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: codex((resolve) => resolve({ text: "Done.\nTORYO: REPLY", sessionId: "s" })) } });
     await third.init({ detect: false });
     try {
       const r = third.rooms.get(room.id);
@@ -676,7 +677,7 @@ async function buildRoom(t, reply) {
 
 /** Start a desk from a crash image (Codex never runs again), wait for `until`, and hand back what it did. */
 async function restartFrom(image, codex, until, label) {
-  const again = new Engine({ store: new Store(image), snapshots: new Snapshots(image), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: { ...codex, run: () => new Promise(() => {}) } } });
+  const again = new Engine({ folderDefault: "shared", store: new Store(image), snapshots: new Snapshots(image), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: { ...codex, run: () => new Promise(() => {}) } } });
   await again.init({ detect: false });
   await waitFor(() => until(again), { label });
   await sleep(150);
@@ -737,7 +738,7 @@ test("a stop while a restarted desk is acting on that outcome: still one review,
       // question to the timeline, or (for the review, which is only saved with the room) just after its notice.
       const store = new Store(first.image);
       const second = imageOn(store, "appendEvent", (ev) => (name === "question" ? ev.type === "question" : ev.type === "system" && ev.reconciled));
-      const mid = new Engine({ store, snapshots: new Snapshots(first.image), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: { ...codex, run: () => new Promise(() => {}) } } });
+      const mid = new Engine({ folderDefault: "shared", store, snapshots: new Snapshots(first.image), notifier: { send() {} }, adapters: { ...ADAPTERS, codex: { ...codex, run: () => new Promise(() => {}) } } });
       await mid.init({ detect: false });
       mid.shutdown();
       assert.ok(second.taken());

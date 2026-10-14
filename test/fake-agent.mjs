@@ -19,9 +19,11 @@
  * the session starts; `workMs` waits after it has started (a turn at work). Usage is reported before a turn
  * fails too (`fail` with `rateLimit`), as a real turn can report it and then fail. For Codex, `codexUsage`
  * ({ primary, secondary }, as Codex logs them) is written to the session log under CODEX_HOME, where Toryo
- * reads Codex's usage.
+ * reads Codex's usage. `sh` (a command or a list) runs shell commands in the working folder, each one's outcome
+ * noted in the reply. The log records each call's working folder (`cwd`).
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
@@ -82,7 +84,7 @@ for (let i = 0; i < script.rules.length; i++) {
 }
 writeFileSync(`${countsFile}.${process.pid}`, JSON.stringify(counts));
 renameSync(`${countsFile}.${process.pid}`, countsFile);
-if (script.log) appendFileSync(script.log, JSON.stringify({ kind, args, prompt, session, rule: rule?.match ?? null, at: Date.now() }) + "\n");
+if (script.log) appendFileSync(script.log, JSON.stringify({ kind, args, prompt, session, rule: rule?.match ?? null, cwd: process.cwd(), at: Date.now() }) + "\n");
 
 if (rule?.failEarly) {
   process.stderr.write("fake launch failure\n");
@@ -97,6 +99,11 @@ if (rule?.write) {
   } catch (error) {
     replyNote = `(write refused: ${error.code})\n`;
   }
+}
+// `sh`: shell commands run in the working folder, as an agent's would; each one's outcome goes in the reply.
+for (const command of [rule?.sh ?? []].flat()) {
+  const r = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8" });
+  replyNote += `(sh ${r.status === 0 ? "ok" : `failed ${r.status}`}: ${command})\n`;
 }
 const reply = replyNote + (rule?.reply ?? "(fake) no rule matched\nTORYO: REPLY");
 if (rule?.hang) {

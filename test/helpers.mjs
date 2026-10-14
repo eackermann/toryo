@@ -43,8 +43,9 @@ export async function setup(rules, { gates = [], engine: engineOptions = {} } = 
     projects: [{ id: "repo", name: "repo", path: repo, rules: "", decisions: "", gates, agents: {} }],
   });
   const notes = [];
+  // New builds work in the project's folder unless a test asks for worktrees (`engine: { folderDefault: "own" }`).
   const make = async (options = {}) => {
-    const engine = new Engine({ store, snapshots: new Snapshots(home), notifier: { send: (t, b) => notes.push({ t, b }) }, ...engineOptions, ...options });
+    const engine = new Engine({ store, snapshots: new Snapshots(home), notifier: { send: (t, b) => notes.push({ t, b }) }, folderDefault: "shared", ...engineOptions, ...options });
     await engine.init({ detect: false });
     return engine;
   };

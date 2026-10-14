@@ -14,7 +14,7 @@ const T = { a: "0aaaaaaa-0000-0000-0000-00000000000a", b: "0bbbbbbb-0000-0000-00
  * A stand-in Codex app: one session log per thread, and a codex.exe whose `queue` logs the thread
  * and makes the "app" finish the turn at once, except in thread `s`, where the turn never ends.
  */
-function fakeApp(base) {
+async function fakeApp(base) {
   const home = join(base, "codex-home");
   const day = join(home, "sessions", "2026", "10", "13");
   mkdirSync(day, { recursive: true });
@@ -38,14 +38,20 @@ fs.appendFileSync(${JSON.stringify(day)} + "/" + file, lines.map((l) => JSON.str
 `,
   );
   chmodSync(exe, 0o755);
+  // The app's list of threads: each one opened in the test's project folder (Toryo sends only to a thread there).
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(join(home, "state_5.sqlite"));
+  db.exec("create table threads (id text, name text, preview text, cwd text, updated_at_ms integer, archived integer, source text)");
+  for (const id of Object.values(T)) db.prepare("insert into threads values (?, ?, '', ?, 0, 0, 'vscode')").run(id, id, join(base, "repo"));
+  db.close();
   return { cfg: { exe, codexHome: home, openThread: "never", pollMs: 50 }, queued: () => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : []) };
 }
 
 test("each room keeps its own Codex app thread; a new default only affects new rooms", async () => {
   const t = await setup([]);
   try {
-    const app = fakeApp(t.base);
-    const engine = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: { ...ADAPTERS.codexapp, detect: async () => ({ installed: true }) } } });
+    const app = await fakeApp(t.base);
+    const engine = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: { ...ADAPTERS.codexapp, detect: async () => ({ installed: true }) } } });
     await engine.init({ detect: false });
     engine.updateConfig({ agents: { codexapp: { ...app.cfg, thread: T.a } } });
     const replies = (id) => turns(engine, id).filter((x) => x.state === "done").length;
@@ -93,8 +99,8 @@ test("each room keeps its own Codex app thread; a new default only affects new r
 
 test("a new session keeps a room's Codex app thread: the app isn't started fresh, and it's told once", async () => {
   const t = await setup([]);
-  const app = fakeApp(t.base);
-  const engine = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: { ...ADAPTERS.codexapp, detect: async () => ({ installed: true }) } } });
+  const app = await fakeApp(t.base);
+  const engine = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: { ...ADAPTERS.codexapp, detect: async () => ({ installed: true }) } } });
   try {
     await engine.init({ detect: false });
     engine.updateConfig({ agents: { codexapp: { ...app.cfg, thread: T.a } } });
@@ -135,7 +141,7 @@ test("a stop while a Codex app turn is being prepared sends nothing to the app",
     const snapshots = new Snapshots(t.home);
     const take = snapshots.take.bind(snapshots);
     snapshots.take = async (...a) => (await new Promise((r) => setTimeout(r, 400)), take(...a));
-    const engine = new Engine({ store: new Store(t.home), snapshots, notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
+    const engine = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots, notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
     await engine.init({ detect: false });
     const room = engine.createRoom({ projectId: "repo", mode: "build", members: ["codexapp", "claude"], builder: "codexapp", reviewer: "claude", task: "x", appThread: T.a });
     await waitFor(() => turns(engine, room.id).length === 1, { label: "turn being prepared" });
@@ -169,7 +175,7 @@ test("a stopped Codex app turn is still followed after a restart, and holds back
         }),
     };
     const make = async () => {
-      const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
+      const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
       await e.init({ detect: false });
       return e;
     };

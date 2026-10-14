@@ -142,7 +142,7 @@ test("a question asked in chat makes the room wait for you, even while another a
 
 /** An engine whose Codex app is `app`, sharing the test's data folder. */
 async function appEngine(t, app, { snapshots } = {}) {
-  const engine = new Engine({ store: new Store(t.home), snapshots: snapshots ?? new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: { ...ADAPTERS.codexapp, detect: async () => ({ installed: true }), currentLimits: () => null, ...app } } });
+  const engine = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: snapshots ?? new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: { ...ADAPTERS.codexapp, detect: async () => ({ installed: true }), currentLimits: () => null, ...app } } });
   await engine.init({ detect: false });
   return engine;
 }

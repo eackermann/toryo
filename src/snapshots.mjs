@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { run } from "./util.mjs";
 
@@ -237,6 +237,65 @@ export class Snapshots {
     return r.stdout.length > maxBytes ? r.stdout.slice(0, maxBytes) + "\n… (diff truncated)" : r.stdout;
   }
 
+  /**
+   * Write a snapshot's files into `dest`, an empty folder: each file's bytes as they were (no filters or conversions),
+   * its executable bit, symbolic links as links. Nothing is written outside `dest` or through a link, and nothing
+   * already there is replaced. { ok: true, entries: [{ mode, oid, path }] } or { ok: false, reason }.
+   */
+  async materialize(project, commit, dest) {
+    const info = await this.ensure(project);
+    if (!info) return { ok: false, reason: "the project's folder isn't in a Git repository" };
+    const env = { ...quiet(), GIT_DIR: info.dir };
+    const listed = await gitBuffer(["ls-tree", "-r", "-z", "--full-tree", commit], { env });
+    if (!listed.ok) return { ok: false, reason: `Toryo couldn't read the snapshot: ${listed.reason}` };
+    const entries = [];
+    const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    for (const raw of splitBuffer(listed.out)) {
+      const tab = raw.indexOf(9);
+      const [mode, type, oid] = raw.subarray(0, tab).toString("latin1").split(" ");
+      let path;
+      try {
+        path = utf8.decode(raw.subarray(tab + 1));
+      } catch {
+        return { ok: false, reason: "a file's name in the snapshot isn't UTF-8" };
+      }
+      if (type !== "blob" || !["100644", "100755", "120000"].includes(mode)) return { ok: false, reason: `${path} isn't a file or a link (${type} ${mode}), which Toryo can't write` };
+      const parts = path.split("/");
+      if (parts.some((x) => !x || x === "." || x === ".." || x.toLowerCase() === ".git")) return { ok: false, reason: `the snapshot names a path Toryo won't write: ${JSON.stringify(path)}` };
+      entries.push({ mode, oid, path });
+    }
+    const made = new Set([""]);
+    const folderFor = (path) => {
+      const parts = path.split("/").slice(0, -1);
+      for (let i = 1; i <= parts.length; i++) {
+        const rel = parts.slice(0, i).join("/");
+        if (made.has(rel)) continue;
+        const full = join(dest, rel);
+        try {
+          mkdirSync(full);
+        } catch (error) {
+          if (error.code !== "EEXIST") throw error;
+        }
+        // Something already there that isn't a folder (a link, say) is never written through.
+        if (!lstatSync(full).isDirectory()) throw new Error(`${rel} is in the way`);
+        made.add(rel);
+      }
+    };
+    const r = await catBlobs(env, entries, (entry, chunks) => {
+      folderFor(entry.path);
+      const full = join(dest, entry.path);
+      if (entry.mode === "120000") return symlinkSync(Buffer.concat(chunks), full);
+      // "wx": a new file only, never one already there, nor through a link.
+      const fd = openSync(full, "wx", entry.mode === "100755" ? 0o777 : 0o666);
+      try {
+        for (const c of chunks) writeSync(fd, c);
+      } finally {
+        closeSync(fd);
+      }
+    });
+    return r.ok ? { ok: true, entries } : r;
+  }
+
   /** The command an agent can run to inspect snapshots itself. */
   hint(project) {
     return `git --git-dir=${this.gitDir(project)}`;
@@ -352,8 +411,98 @@ async function hashInput(env, text) {
   return r.code === 0 ? { ok: true, oid: r.out.trim() } : { ok: false, reason: firstLine(r.err) };
 }
 
+/** Git's output as bytes: { ok, out } or { ok: false, reason }. */
+function gitBuffer(args, opts) {
+  return new Promise((resolve) => {
+    execFile("git", args, { ...opts, encoding: "buffer", maxBuffer: 256 * 1024 * 1024, timeout: 300_000 }, (error, stdout, stderr) =>
+      resolve(error ? { ok: false, reason: firstLine(String(stderr ?? "") || error.message) } : { ok: true, out: stdout }),
+    );
+  });
+}
+
+/** NUL-separated records, as bytes. */
+function splitBuffer(buf) {
+  const out = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i++)
+    if (buf[i] === 0) {
+      if (i > start) out.push(buf.subarray(start, i));
+      start = i + 1;
+    }
+  if (start < buf.length) out.push(buf.subarray(start));
+  return out;
+}
+
+/**
+ * Each entry's blob, one after the other (`git cat-file --batch`), handed to `write(entry, chunks)` as it arrives,
+ * so a large snapshot is never held in memory at once. { ok } or { ok: false, reason }.
+ */
+function catBlobs(env, entries, write) {
+  return new Promise((resolve) => {
+    if (!entries.length) return resolve({ ok: true });
+    const child = spawn("git", ["cat-file", "--batch"], { env });
+    let i = 0;
+    let header = Buffer.alloc(0);
+    let left = -1; // bytes of the current blob still to come (-1: reading a header; -2: its closing newline)
+    let chunks = [];
+    let failed = null;
+    let err = "";
+    const fail = (reason) => {
+      if (failed) return;
+      failed = reason;
+      child.kill();
+    };
+    child.stdout.on("data", (data) => {
+      let at = 0;
+      while (at < data.length && !failed) {
+        if (left === -1) {
+          const nl = data.indexOf(10, at);
+          if (nl < 0) {
+            header = Buffer.concat([header, data.subarray(at)]);
+            return;
+          }
+          const line = Buffer.concat([header, data.subarray(at, nl)]).toString("latin1");
+          header = Buffer.alloc(0);
+          at = nl + 1;
+          const [oid, type, size] = line.split(" ");
+          if (oid !== entries[i]?.oid || type !== "blob") return fail(`Toryo couldn't read ${entries[i]?.path ?? "a file"} from the snapshot (${line})`);
+          left = Number(size);
+          chunks = [];
+        }
+        if (left >= 0) {
+          const take = Math.min(left, data.length - at);
+          if (take) chunks.push(data.subarray(at, at + take));
+          at += take;
+          left -= take;
+          if (left > 0) return;
+          try {
+            write(entries[i], chunks);
+          } catch (error) {
+            return fail(`Toryo couldn't write ${entries[i].path}: ${error.code ?? error.message}`);
+          }
+          i++;
+          left = -2;
+        }
+        if (left === -2 && at < data.length) {
+          at++; // the newline after the blob
+          left = -1;
+        }
+      }
+    });
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => fail(e.message));
+    child.on("close", (code) => {
+      if (failed) return resolve({ ok: false, reason: failed });
+      if (i !== entries.length) return resolve({ ok: false, reason: `Toryo couldn't read the snapshot: ${firstLine(err) || `git stopped (${code})`}` });
+      resolve({ ok: true });
+    });
+    child.stdin.on("error", () => {});
+    child.stdin.end(entries.map((e) => e.oid).join("\n") + "\n");
+  });
+}
+
 /** Run git with this on its standard input. */
-function feed(args, opts, input, keepOut = false) {
+export function feed(args, opts, input, keepOut = false) {
   return new Promise((resolve) => {
     const child = spawn("git", args, opts);
     let out = "";
@@ -406,7 +555,7 @@ const safe = (s) => String(s).replace(/[^A-Za-z0-9._-]+/g, "-");
 
 const firstLine = (s) => String(s ?? "").trim().split("\n")[0] || "no reason given";
 
-function quiet() {
+export function quiet() {
   return { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
 }
 

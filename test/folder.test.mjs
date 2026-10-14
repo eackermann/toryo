@@ -17,7 +17,7 @@ const quiet = { snapshots: false, gates: false };
 /** A desk with some agents in memory, on the test's folders and settings. */
 async function engineWith(t, adapters, snapshots = new Snapshots(t.home)) {
   t.engine.shutdown();
-  const e = new Engine({ store: new Store(t.home), snapshots, notifier: { send() {} }, adapters: { ...ADAPTERS, ...adapters } });
+  const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots, notifier: { send() {} }, adapters: { ...ADAPTERS, ...adapters } });
   await e.init({ detect: false });
   return e;
 }
@@ -54,7 +54,9 @@ const building = (t, what) => t.calls().some((c) => c.kind === "codex" && c.prom
 const busy = (fn, title) =>
   assert.throws(fn, (err) => {
     assert.deepEqual([err.status, err.code, err.room?.title], [409, "folder-busy", title]);
-    assert.match(err.message, new RegExp(`^“${title}” is building in this folder \\(.+\\), so this build can't start now\\. You can have it wait: it starts when “${title}” is done or stopped\\. A copy of the folder for each room \\(a worktree\\) comes in a later update\\.$`));
+    assert.match(err.message, new RegExp(`^“${title}” is building in this folder \\(.+\\), so this build can't start now\\. You can have it wait: it starts when “${title}” is done or stopped\\.( Or give it its own worktree, a separate copy of the folder, where it can start now\\.)?$`));
+    // Its own worktree is offered where the folder can have one (in Git).
+    assert.equal(/its own worktree/.test(err.message), !/toryo-other-/.test(err.message));
     return true;
   });
 
@@ -321,7 +323,7 @@ test("at a restart, a room whose Codex app turn is outstanding keeps its folder 
     const saved = e.store.loadRoom(older.id);
     saved.folderClaim = { root: realpathSync(t.repo), git: true, at: "2026-01-01T00:00:00.000Z" };
     e.store.saveRoom(saved);
-    e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
+    e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: app } });
     await e.init({ detect: false });
     await waitFor(() => calls.some((c) => c.how === "follow"), { label: "following the app's turn again" });
     await sleep(200);

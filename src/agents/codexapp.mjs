@@ -115,8 +115,11 @@ export function lastAppMessage(cfg = {}) {
 }
 
 /** Query a copy of the app's thread database, so Toryo never holds a lock on the app's own file. */
-async function queryThreads(home, sql, params = []) {
-  if (!home || !existsSync(join(home, "state_5.sqlite"))) return [];
+async function queryThreads(home, sql, params = [], { strict = false } = {}) {
+  if (!home || !existsSync(join(home, "state_5.sqlite"))) {
+    if (strict) throw new Error("the Codex app's list of threads isn't there");
+    return [];
+  }
   const dir = mkdtempSync(join(tmpdir(), "toryo-codexapp-"));
   try {
     for (const f of readdirSync(home).filter((n) => n.startsWith("state_5.sqlite"))) copyFileSync(join(home, f), join(dir, f));
@@ -125,7 +128,8 @@ async function queryThreads(home, sql, params = []) {
     const rows = db.prepare(sql).all(...params);
     db.close();
     return rows.map((r) => ({ ...r }));
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -138,6 +142,38 @@ export async function listAppThreads(cfg = {}) {
     locate(cfg).home,
     "select id, name, substr(preview, 1, 140) as preview, cwd, updated_at_ms as updated from threads where archived = 0 and source = 'vscode' order by updated_at_ms desc limit 25",
   );
+}
+
+/**
+ * A folder as the app records it, as a path here: { path } or { reason }. A WSL path from Windows
+ * (\\\\wsl.localhost\\<distro>\\…, \\\\wsl$\\<distro>\\…) is a path here only in this WSL distribution (`distro`); a Windows drive
+ * (C:\\…) is /mnt/c/…; a path that's already one stays.
+ */
+export function localFolder(folder, { distro = process.env.WSL_DISTRO_NAME } = {}) {
+  const f = String(folder ?? "").trim();
+  if (!f) return { reason: "the Codex app doesn't record a folder for this thread" };
+  if (f.startsWith("/")) return { path: f };
+  const wsl = f.replace(/^\\\\\?\\UNC\\/i, "\\\\").match(/^\\\\(?:wsl\.localhost|wsl\$)\\([^\\]+)(\\.*)?$/i);
+  if (wsl) {
+    if (!distro) return { reason: `the thread's folder (${f}) is in a WSL distribution, and Toryo can't tell which one it runs in` };
+    if (wsl[1].toLowerCase() !== distro.toLowerCase()) return { reason: `the thread's folder (${f}) is in another WSL distribution (${wsl[1]}; Toryo runs in ${distro})` };
+    return { path: (wsl[2] ?? "\\").replace(/\\/g, "/") };
+  }
+  const drive = f.match(/^([a-z]):[\\/](.*)$/i);
+  if (drive) return { path: `/mnt/${drive[1].toLowerCase()}/${drive[2].replace(/\\/g, "/")}`.replace(/\/$/, "") };
+  return { reason: `the thread's folder (${f}) isn't a path Toryo can find here` };
+}
+
+/** The folder a thread works in (it was opened in), as a path here: { path } or { reason } it can't be told. */
+async function threadFolderIn(home, thread) {
+  let rows;
+  try {
+    rows = await queryThreads(home, "select cwd from threads where id = ?", [thread], { strict: true });
+  } catch (error) {
+    return { reason: `Toryo couldn't read the Codex app's list of threads (${String(error?.message ?? error).split("\n")[0]})` };
+  }
+  if (!rows.length) return { reason: "the Codex app doesn't list this thread" };
+  return localFolder(rows[0].cwd);
 }
 
 /** The name the app shows for a thread (or the start of its first message). */
@@ -187,13 +223,22 @@ export const codexapp = {
     return { installed: true, path: exe, version: name ? `default thread “${name}”` : `default thread ${cfg.thread.slice(0, 8)}…`, threadName: name };
   },
 
-  async run({ cfg = {}, prompt, sessionId, turnDir, onActivity, onStarted, onSubmitting, onSubmitted, canOpen, canLaunch, signal, abandon, timeoutMs, attach }) {
+  async run({ cfg = {}, prompt, sessionId, turnDir, onActivity, onStarted, onSubmitting, onSubmitted, canOpen, canLaunch, signal, abandon, timeoutMs, attach, folderProblem }) {
     const { exe, home } = locate(cfg);
     // The room's own thread first; the default only for a room that has none.
     const thread = sessionId ?? cfg.thread;
     if (!exe || !home || !thread) return { text: "", error: "The Codex app isn't set up: choose a thread for this room." };
     const rollout = rolloutFor(home, thread);
     if (!rollout) return { text: "", error: `Can't find the Codex app thread ${thread}.` };
+    // The thread works in the folder it was opened in, whatever Toryo asks: it gets a message only once that folder
+    // is known to be the room's (`folderProblem(path)` says why not, or null). Not known is never taken for the same.
+    if (!attach && folderProblem) {
+      const where = await threadFolderIn(home, thread);
+      const problem = where.reason
+        ? `Toryo can't tell which folder this room's Codex app thread works in: ${where.reason}. Toryo sent it nothing. Choose a thread opened in this room's folder (the room's settings), then retry.`
+        : folderProblem(where.path);
+      if (problem) return { text: "", error: problem };
+    }
 
     const marker = attach?.marker ?? `[Toryo ${turnDir.split("/").pop()}]`;
     let message = `${marker}\n${prompt}`;

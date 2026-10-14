@@ -138,6 +138,8 @@ async function route(engine, method, parts, url, body) {
     if (!id && method === "POST") return engine.addProject(body);
     if (id && !b && method === "PATCH") return engine.updateProject(id, body);
     if (id && b === "file" && method === "GET") return engine.readProjectFile(id, url.searchParams.get("path") ?? "");
+    // Where a new room would work: the project's folder, or its own worktree (with the id the room would have).
+    if (id && b === "workspace" && method === "GET") return engine.previewWorkspace(id);
   }
   if (a === "rooms") {
     if (!id && method === "POST") return engine.createRoom(body);
@@ -160,6 +162,10 @@ async function route(engine, method, parts, url, body) {
       return engine.control(id, body.action, body);
     }
     if (b === "plan" && method === "GET") return engine.planView(id);
+    // Where the room's next build would work (its own worktree, or the project's folder), with the exact folders.
+    if (b === "workspace" && method === "GET") return engine.roomWorkspace(id);
+    // A file in the folder the room works in (its own worktree, or the project's).
+    if (b === "file" && method === "GET") return engine.readRoomFile(id, url.searchParams.get("path") ?? "");
     if (b === "turns" && c && d === "diff" && method === "GET") return engine.turnDiff(id, c, url.searchParams.get("path") || undefined);
     if (b === "turns" && c && d === "prompt" && method === "GET") return { __text: engine.turnPrompt(id, c) };
   }

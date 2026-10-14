@@ -119,6 +119,9 @@ export class ToryoClient {
       // One builder per folder: the room it waits for, or the rooms waiting for it.
       if (r.folder?.waitsFor) lines.push(`    waits for its folder: “${r.folder.waitsFor.title}” is building in it`);
       if (r.folder?.waiting?.length) lines.push(`    building in ${r.folder.path}; waiting for this folder: ${r.folder.waiting.map((w) => `“${w.title}”`).join(", ")}`);
+      // Where it works: its own worktree, or the project's folder (shared) when other rooms work there too.
+      const ws = workspaceLine(r.workspace);
+      if (ws) lines.push(`    ${ws}`);
       for (const q of r.questions ?? (r.waiting ? [r.waiting] : [])) lines.push(`    waiting for you: ${asked(q)}`);
     }
     lines.push(`Agents: ${Object.entries(agents ?? {}).map(([id, a]) => `${name(id)} ${a.installed ? "✓" : "✗"}`).join("  ")}`);
@@ -136,6 +139,9 @@ export class ToryoClient {
       lines.push(`${summary.session.n > 1 ? `Session ${summary.session.n}. ` : ""}${sessionWords(summary.session)}`);
       for (const e of summary.session.earlier ?? []) lines.push(`Earlier, ${earlierWords(e)}`);
     }
+    // Where it works: its own worktree, or the project's folder (shared).
+    const ws = workspaceLine(summary.workspace, { always: true });
+    if (ws) lines.push(`${ws[0].toUpperCase()}${ws.slice(1)}.`);
     if (r.mode === "build" && r.build)
       lines.push(`Builder ${name(r.crew.builder)}, reviewer ${name(r.crew.reviewer)}. Plan: ${r.build.planPath || "none"}. Current: ${r.build.slice || "-"}, round ${r.build.round}. Approved: ${r.build.approved.join(", ") || "none yet"}.`);
     if (r.mode === "plan" && r.plan) lines.push(`Planning “${r.plan.topic}”, phase: ${r.plan.phase}. Plan file: ${r.plan.planPath}.`);
@@ -287,11 +293,11 @@ export class ToryoClient {
    * Start a new session in a room (`toryo session new`, `toryo_session_new`), ending the one it's in now: refused
    * while anything runs there, as on the page. `mode` and `text`: a first step, as `start` takes them.
    */
-  async newSession(ref, { keepMemory = false, mode, text, planPath, builder, reviewer, wait = false } = {}) {
+  async newSession(ref, { keepMemory = false, mode, text, planPath, builder, reviewer, wait = false, folder } = {}) {
     const r = await this.resolveRoom(ref);
     const n = r.session?.n ?? 1;
     if (mode && !["chat", "plan", "build"].includes(mode)) throw new Error("The first step is chat, plan or build.");
-    const then = !mode ? undefined : mode === "chat" ? { mode, text, to: "everyone" } : mode === "plan" ? { mode, topic: text } : { mode, task: text, planPath, builder, reviewer, wait };
+    const then = !mode ? undefined : mode === "chat" ? { mode, text, to: "everyone" } : mode === "plan" ? { mode, topic: text } : { mode, task: text, planPath, builder, reviewer, wait, folder };
     await this.call("POST", `/api/rooms/${r.id}/control`, { action: "new-session", ends: n, keepMemory, then }).catch(waitHint);
     const first = { chat: "your message went to the crew", plan: "a planning round started", build: "the build started" }[mode];
     return `Session ${n + 1} started in “${r.title}”; session ${n} is kept in its history. ${keepMemory ? "The agents keep their memory." : "Each agent starts fresh on its next turn (the Codex app keeps its thread)."} ${first ? `Then ${first}.` : "Nothing runs until you send something."}`;
@@ -303,7 +309,7 @@ export class ToryoClient {
     return `${action[0].toUpperCase()}${action.slice(1)} “${r.title}”.`;
   }
 
-  async start({ mode, text, project, planPath, title, builder, reviewer, reviewFirst, handoff, slice, appThread, wait = false }) {
+  async start({ mode, text, project, planPath, title, builder, reviewer, reviewFirst, handoff, slice, appThread, wait = false, folder }) {
     const { config } = await this.state();
     const p = project ? config.projects.find((x) => x.id === project || x.name === project) : config.projects[0];
     if (!p) throw new Error("No such project.");
@@ -311,10 +317,25 @@ export class ToryoClient {
     if (mode === "chat") Object.assign(body, { text, to: "everyone" });
     if (mode === "plan") Object.assign(body, { topic: text });
     if (mode === "build") {
-      Object.assign(body, { task: text, planPath, builder, reviewer, reviewFirst, handoff, slice, wait });
+      Object.assign(body, { task: text, planPath, builder, reviewer, reviewFirst, handoff, slice, wait, folder });
       if (builder || reviewer) body.members = [...new Set([builder ?? "codex", reviewer ?? "claude"])];
     }
     const r = await this.call("POST", "/api/rooms", body).catch(waitHint);
-    return `Started “${r.title}” (${mode}, id ${r.id}) in ${p.name}.${r.folder?.waitsFor ? ` It waits for its folder: “${r.folder.waitsFor.title}” is building in it.` : ""}`;
+    return `Started “${r.title}” (${mode}, id ${r.id}) in ${p.name}.${r.workspace?.kind === "worktree" ? ` It works in its own worktree: ${r.workspace.path} (branch ${r.workspace.branch}).` : ""}${r.folder?.waitsFor ? ` It waits for its folder: “${r.folder.waitsFor.title}” is building in it.` : ""}`;
   }
+}
+
+/**
+ * Where a room works, in words: its own worktree (its folder, branch and state, and the main folder its changes are
+ * for), or the project's folder, shared, with the other rooms there. Null for a shared folder no other room uses,
+ * unless `always`.
+ */
+function workspaceLine(ws, { always = false } = {}) {
+  if (!ws) return null;
+  const others = ws.others?.length ? `; also used by ${ws.others.map((o) => `“${o.title}”`).join(", ")}` : "";
+  if (ws.kind === "worktree") {
+    const state = ws.state === "ready" ? "" : ws.state === "failed" ? ` (couldn't be made: ${ws.error})` : " (being made)";
+    return `own worktree: ${ws.path}, branch ${ws.branch}${state}; main folder ${ws.main}${others}`;
+  }
+  return always || others ? `shared folder: ${ws.path}${others}` : null;
 }

@@ -15,7 +15,7 @@ const reasons = (e, id) => sum(e, id).blocked.flatMap((b) => b.reasons);
 
 async function engineWith(t, adapters) {
   t.engine.shutdown();
-  const e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, ...adapters } });
+  const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, ...adapters } });
   await e.init({ detect: false });
   return e;
 }
@@ -244,7 +244,7 @@ test("the note to the build is sent once, also when Toryo acts on the author's t
     const saved = e.store.loadRoom(plan.id);
     saved.pendingOutcome = { turnId: author.id };
     e.store.saveRoom(saved);
-    e = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
+    e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
     await e.init({ detect: false });
     assert.ok(e.roomView(plan.id).events.some((x) => x.reconciled === author.id), "acted on again");
     assert.equal(notes(), 1, "still one note");
@@ -411,7 +411,7 @@ test("the build gets every changed path, and a note even when which files change
   const t = await setup([{ agent: "claude", match: "Your role: reviewer", reply: "Good.\nTORYO: APPROVED" }]);
   const { codex, calls } = slowCodex();
   t.engine.shutdown();
-  let e = new Engine({ store: new Store(t.home), snapshots: new Failing(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
+  let e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Failing(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
   await e.init({ detect: false });
   try {
     const build = e.createRoom({ projectId: "repo", mode: "build", members: ["codex", "claude"], task: "Build", title: "Build", settings: { gates: false, autoContinue: false } });
@@ -455,7 +455,7 @@ test("the build gets every changed path, and a note even when which files change
     const saved = e.store.loadRoom(chat.id);
     saved.pendingOutcome = { turnId: lastWrite.id };
     e.store.saveRoom(saved);
-    e = new Engine({ store: new Store(t.home), snapshots: new Failing(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
+    e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Failing(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
     await e.init({ detect: false });
     assert.equal(e.roomView(build.id).events.filter((x) => x.writesFrom === lastWrite.id).length, 1);
   } finally {
@@ -539,7 +539,7 @@ test("a writer whose changes aren't known says so whatever became of its turn (f
   const t = await setup([]);
   const { codex, calls } = slowCodex();
   t.engine.shutdown();
-  let e = new Engine({ store: new Store(t.home), snapshots: new Unreliable(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
+  let e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Unreliable(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
   await e.init({ detect: false });
   try {
     const build = e.createRoom({ projectId: "repo", mode: "build", members: ["codex", "claude"], task: "Build", title: "Build", settings: { gates: false } });
@@ -578,7 +578,7 @@ test("a writer whose changes aren't known says so whatever became of its turn (f
     const saved = e.store.loadRoom(chat.id);
     saved.pendingOutcome = { turnId: failed.id };
     e.store.saveRoom(saved);
-    e = new Engine({ store: new Store(t.home), snapshots: new Unreliable(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
+    e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: new Unreliable(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
     await e.init({ detect: false });
     assert.equal(e.roomView(build.id).events.filter((x) => x.writesFrom === failed.id).length, 1);
     // (Acting on that failed turn again tries it again: stopped here.)
@@ -638,7 +638,7 @@ test("a review's verdict given later approves nothing when comparing with the re
     const { codex, calls } = slowCodex();
     const snaps = new Broken(t.home);
     t.engine.shutdown();
-    const e = new Engine({ store: new Store(t.home), snapshots: snaps, notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
+    const e = new Engine({ folderDefault: "shared", store: new Store(t.home), snapshots: snaps, notifier: { send() {} }, adapters: { ...ADAPTERS, codex } });
     await e.init({ detect: false });
     try {
       const build = e.createRoom({ projectId: "repo", mode: "build", members: ["codex", "claude"], task: "Build", title: "Build", settings: { gates: false, autoContinue: false } });

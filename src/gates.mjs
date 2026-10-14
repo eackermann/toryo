@@ -5,16 +5,17 @@ import { tail } from "./util.mjs";
  * Checks Toryo runs itself before sending work to review, so the reviewer
  * never spends a round on something a typecheck would have caught. Stopping
  * (the signal) ends the running command and starts no further ones; results
- * then carry `cancelled: true`.
+ * then carry `cancelled: true`. They run in `cwd`: the room's folder (its own
+ * worktree, or the project's).
  */
-export async function runGates(project, { signal, onActivity, killGraceMs = 5_000 } = {}) {
+export async function runGates(project, { cwd = project.path, signal, onActivity, killGraceMs = 5_000 } = {}) {
   const results = [];
   for (const gate of project.gates ?? []) {
     if (!gate?.command?.trim()) continue;
     if (signal?.aborted) return Object.assign(results, { cancelled: true });
     onActivity?.({ kind: "command", text: `gate: ${gate.command}` });
     const started = Date.now();
-    const r = await runShell(gate.command, project.path, (gate.timeoutMin ?? 20) * 60_000, signal, killGraceMs);
+    const r = await runShell(gate.command, cwd, (gate.timeoutMin ?? 20) * 60_000, signal, killGraceMs);
     if (r.cancelled) return Object.assign(results, { cancelled: true });
     results.push({
       name: gate.name || gate.command,
