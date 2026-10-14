@@ -500,8 +500,19 @@ function renderTop() {
 function whereHtml(r, p) {
   const ws = S.state?.rooms.find((x) => x.id === r.id)?.workspace;
   if (ws?.kind !== "worktree") return `${esc(p.name)} · <span title="This room works in the project's own folder">${esc(p.path)}</span>${ws?.others?.length ? ` · ${sharedText(ws.others)}` : ""}`;
-  const state = ws.state === "ready" ? "" : ws.state === "failed" ? " · <b>couldn't be made</b>" : " · being made…";
+  const retry = ["failed", "stopped", "interrupted"].includes(ws.setup) ? ` <button type="button" class="linkbtn" data-retry-setup>Retry setup</button>` : "";
+  const setup = ({ pending: " · setup to run", running: " · setup running", failed: " · <b>setup failed</b>", stopped: " · <b>setup stopped</b>", interrupted: " · <b>setup interrupted</b>" }[ws.setup] ?? "") + retry;
+  const state = ws.state === "ready" ? setup : ws.state === "failed" ? " · <b>couldn't be made</b>" : " · being made…";
   return `${esc(p.name)} · <span class="wsk">${ic("build")}Own worktree</span> <span class="mono wsp">${esc(ws.path)}</span> ${copyPathBtn(ws.path)}<span class="wsp"> · branch <span class="mono">${esc(ws.branch)}</span></span>${state}`;
+}
+
+/** What a project's new worktrees also get, from its settings: the files copied in, and the setup that runs first. */
+function worktreeExtras(projectId) {
+  const w = S.state?.config?.projects?.find((p) => p.id === projectId)?.worktree;
+  const out = [];
+  if (w?.copy?.length) out.push(` Files Git ignores matching <span class="mono">${esc(w.copy.join(", "))}</span> are copied in.`);
+  if (w?.setup) out.push(` <span class="mono">${esc(w.setup)}</span> runs there before the first turn.`);
+  return out.join("");
 }
 
 /** A small Copy button for a folder's path (narrow screens can't select a long one easily). */
@@ -513,7 +524,7 @@ function folderChoice(prefix, preview, { appCrew = false } = {}) {
   const pick = own && preview.defaultFolder === "own" ? "own" : "shared";
   const why = appCrew ? "The Codex app works in the project's own folder only." : preview?.why ?? "";
   return `<div class="field" id="${prefix}Where"><span class="lbl">Where it works</span>
-    <label class="opt"><input type="radio" name="${prefix}Folder" value="own" ${pick === "own" ? "checked" : ""} ${own ? "" : "disabled"}> <span><b>Its own worktree</b>${own ? `: <span class="mono">${esc(preview.own.path)}</span> (branch <span class="mono">${esc(preview.own.branch)}</span>). A separate copy of the project's folder as it is now, uncommitted changes included, so this build doesn't share files with anyone. Bringing its changes back to the main folder comes in a later update.` : why ? `: ${esc(why)}` : ""}</span></label>
+    <label class="opt"><input type="radio" name="${prefix}Folder" value="own" ${pick === "own" ? "checked" : ""} ${own ? "" : "disabled"}> <span><b>Its own worktree</b>${own ? `: <span class="mono">${esc(preview.own.path)}</span> (branch <span class="mono">${esc(preview.own.branch)}</span>). A separate copy of the project's folder as it is now, uncommitted changes included, so this build doesn't share files with anyone.${worktreeExtras(preview.projectId)} Bringing its changes back to the main folder comes in a later update.` : why ? `: ${esc(why)}` : ""}</span></label>
     <label class="opt"><input type="radio" name="${prefix}Folder" value="shared" ${pick === "shared" ? "checked" : ""}> <span><b>This folder (shared)</b>: <span class="mono">${esc(preview?.shared?.path ?? "")}</span>. One build at a time works here.</span></label></div>`;
 }
 
@@ -558,7 +569,10 @@ function stateSentence(r) {
   if (r.status === "pausing") parts.push(`<span class="act-k">${ic("pause")}Pausing</span><span>The turn running now finishes; nothing new starts.</span>`);
   if (r.status === "stopping") parts.push(`<span class="act-k">${ic("stop")}Stopping</span>`);
   const live = [...S.live.values()];
-  if (live.length) {
+  // The worktree's setup, running before anything else in the room.
+  const setupRun = live.find((l) => l.agent === "toryo" && l.kind === "setup");
+  if (setupRun) parts.push(`<span class="act-k" data-k="build">${ic("checks")}Setup</span><span>The worktree's setup is running · <span class="timer" data-since="${esc(setupRun.startedAt)}">${since(setupRun.startedAt)}</span></span>`);
+  else if (live.length) {
     const kind = activityOf(live[0].kind);
     const verb = { build: "building", review: "reviewing", plan: "planning", chat: "replying" }[kind];
     const who = live.map((l) => name(l.agent)).join(" and ");
@@ -1298,6 +1312,7 @@ function questionEl(ev) {
 }
 
 function gateEl(ev) {
+  if (ev.setup) return setupEl(ev);
   const ok = ev.results.every((x) => x.ok);
   return el(`<div class="gate" data-id="${ev.id}"><div class="rowline"><span class="ttl"><span class="tile" aria-hidden="true">${ic("checks")}</span>${ok ? "Checks passed" : "Checks failed"}</span>${ev.results
     .map((x) => `<span class="chk" data-ok="${x.ok}">${ic(x.ok ? "check" : "x")}${esc(x.name)} <span class="muted">${x.seconds}s</span></span>`)
@@ -1305,6 +1320,17 @@ function gateEl(ev) {
     .filter((x) => !x.ok)
     .map((x) => `<details><summary class="hint">${esc(x.name)}: what it printed</summary><pre>${esc(x.output)}</pre></details>`)
     .join("")}</div>`);
+}
+
+/**
+ * A run of the worktree's setup, shown like the checks: passed, failed or stopped, the command, the files it changed
+ * (names), and what it printed (open when it failed).
+ */
+function setupEl(ev) {
+  const x = ev.results[0];
+  const title = x.ok ? "Setup finished" : x.interrupted ? "Setup interrupted (Toryo stopped while it ran)" : x.cancelled ? "Setup stopped" : x.timedOut ? "Setup ran out of time" : `Setup failed${x.code != null ? ` (exit ${x.code})` : ""}`;
+  const files = ev.files?.length ? `<div class="hint">It changed ${ev.files.length === 1 ? "one of the room's files" : `${ev.files.length} of the room's files`}: <span class="mono">${esc(ev.files.slice(0, 12).join(", "))}${ev.files.length > 12 ? "…" : ""}</span></div>` : "";
+  return el(`<div class="gate" data-id="${ev.id}" data-setup><div class="rowline"><span class="ttl"><span class="tile" aria-hidden="true">${ic("checks")}</span>${esc(title)}</span><span class="chk" data-ok="${x.ok}">${ic(x.ok ? "check" : "x")}<span class="mono">${esc(x.command)}</span> <span class="muted">attempt ${esc(ev.attempt ?? 1)} · ${x.seconds}s</span></span></div>${files}<details${x.ok ? "" : " open"}><summary class="hint">What it printed</summary><pre>${esc(x.output || (x.interrupted ? "(not kept: Toryo stopped while it ran)" : "(nothing)"))}</pre></details></div>`);
 }
 
 function onActivity({ turnId, agent, item }) {
@@ -2185,7 +2211,14 @@ function settingsSheet() {
         <label for="pAppThread">Default Codex app thread for new rooms in this project</label><select id="pAppThread"><option value="">Use the general default</option>${proj.agents?.codexapp?.thread ? `<option value="${esc(proj.agents.codexapp.thread)}" selected>${esc(proj.agents.codexapp.thread)}</option>` : ""}</select>
         <span class="lbl">Checks Toryo runs before each review</span>
         <div class="gates" id="gates">${(proj.gates ?? []).map((g) => gateRow(g)).join("")}</div>
-        <div><button type="button" class="btn small" id="addGate">Add a check</button></div></div>`
+        <div><button type="button" class="btn small" id="addGate">Add a check</button></div>
+        <span class="lbl">A room's own worktree</span>
+        <label for="pCopy">Files copied into each new worktree, one pattern per line from the project's folder (<span class="mono">.env*</span>, say). Only files Git ignores are copied, never the project's own files, folders or links; only their names are ever shown.</label>
+        <textarea id="pCopy" rows="3" placeholder=".env*">${esc((proj.worktree?.copy ?? []).join("\n"))}</textarea>
+        <label for="pSetup">Setup command, run in a new worktree before its first turn (installing dependencies, say)</label>
+        <input type="text" id="pSetup" value="${esc(proj.worktree?.setup ?? "")}" placeholder="npm ci">
+        <div><button type="button" class="btn small" id="previewCopy">Show what a new worktree gets</button></div>
+        <div class="hint" id="copyPreview" aria-live="polite"></div></div>`
           : ""
       }
       <div style="display:flex;gap:8px"><button class="btn primary" type="submit">Save</button><button class="btn" type="button" data-close>Cancel</button></div>
@@ -2205,6 +2238,19 @@ function settingsSheet() {
     toast("Test sent", "Saved settings are used: save first if you just changed them.");
   });
   $("#addGate")?.addEventListener("click", () => $("#gates").appendChild(el(gateRow({ name: "", command: "" }))));
+  // What a new worktree would get with the patterns as written (not saved yet): the files they match now, names only.
+  $("#previewCopy")?.addEventListener("click", async () => {
+    const q = $("#pCopy").value.split("\n").map((l) => l.trim()).filter(Boolean).map((p) => `copy=${encodeURIComponent(p)}`).join("&");
+    try {
+      const w = await api("GET", `/api/projects/${proj.id}/worktree-files?${q || "copy="}`);
+      const setup = $("#pSetup").value.trim();
+      $("#copyPreview").innerHTML = w.why || w.error
+        ? esc(w.why || `A new worktree couldn't be made with these: ${w.error}.`)
+        : `${w.files.length ? `Copied into <span class="mono">${esc(w.destination)}</span>: <span class="mono">${esc(w.files.join(", "))}</span>.` : "No files would be copied."}${w.refused.length ? ` Not copied: ${esc(w.refused.slice(0, 10).map((r) => `${r.path} (${r.why})`).join("; "))}${w.refused.length > 10 ? ` and ${w.refused.length - 10} more` : ""}.` : ""} ${setup ? `Then <span class="mono">${esc(setup)}</span> runs there before the first turn.` : "No setup runs."}`;
+    } catch (error) {
+      $("#copyPreview").textContent = error.message;
+    }
+  });
   $("#gates")?.addEventListener("click", (e) => e.target.closest("[data-remove-gate]")?.closest(".row").remove());
   $("#redetect").addEventListener("click", async () => {
     await api("POST", "/api/agents/refresh");
@@ -2235,6 +2281,7 @@ function settingsSheet() {
           decisions: $("#pDecisions").value,
           agents: { ...proj.agents, codexapp: { ...proj.agents?.codexapp, thread: appThread ?? undefined } },
           gates: $$("#gates .row").map(gateFromRow).filter((g) => g.command),
+          worktree: { ...proj.worktree, copy: $("#pCopy").value.split("\n").map((l) => l.trim()).filter(Boolean), setup: $("#pSetup").value.trim() },
         });
         S.state.config.projects = S.state.config.projects.map((p) => (p.id === saved.id ? saved : p));
       }
@@ -2384,10 +2431,10 @@ function roomSheet() {
 function sessionBusy(r) {
   const doing = { build: "building", review: "reviewing", plan: "planning", checks: "running", chat: "replying" };
   const sum = S.state?.rooms.find((x) => x.id === r.id);
-  const out = (sum?.working ?? []).map((w) => (w.agent === "toryo" ? "The checks are running" : `${name(w.agent)} is ${doing[workKind(w.kind)]}`));
+  const out = (sum?.working ?? []).map((w) => (w.agent === "toryo" ? (w.kind === "setup" ? "The worktree's setup is running" : "The checks are running") : `${name(w.agent)} is ${doing[workKind(w.kind)]}`));
   const queue = r.queue ?? [];
   if (queue.length) {
-    const what = queue.map((q) => (q.agent === "toryo" ? "the checks" : `${name(q.agent)}'s ${{ build: "building turn", review: "review", plan: "planning turn", checks: "checks", chat: "reply" }[workKind(q.kind)]}`));
+    const what = queue.map((q) => (q.agent === "toryo" ? (q.kind === "setup" ? "the worktree's setup" : "the checks") : `${name(q.agent)}'s ${{ build: "building turn", review: "review", plan: "planning turn", checks: "checks", chat: "reply" }[workKind(q.kind)]}`));
     out.push(`${what.join(", ").replace(/^./, (c) => c.toUpperCase())} ${what.length > 1 ? "are" : "is"} queued`);
   }
   if (r.appTurn && !(sum?.working ?? []).some((w) => w.agent === "codexapp")) out.push("The Codex app still has this room's turn");
@@ -3165,7 +3212,7 @@ function sharedText(shared) {
 
 /** What a turn is doing, in a few words: "building Slice 2, round 3", "a planning round on Export"… */
 function workWhat(w) {
-  if (w.agent === "toryo") return "running the project's checks";
+  if (w.agent === "toryo") return w.kind === "setup" ? "running the worktree's setup" : "running the project's checks";
   const kind = workKind(w.kind);
   const verb = { build: "building", review: "reviewing", plan: "planning", chat: KIND[w.kind]?.toLowerCase() ?? "replying" }[kind] ?? "working";
   if (w.mode === "build" && w.slice) return `${verb} ${w.slice}${w.round > 1 ? `, round ${w.round}` : ""}`;
@@ -3185,7 +3232,7 @@ function workPhases(w) {
 function homeWorking(h) {
   const cards = h.working.map((w) => {
     const kind = w.agent === "toryo" ? "checks" : workKind(w.kind);
-    const chip = `<span class="act-k" data-k="${kind === "chat" ? "checks" : kind}">${ic(kind === "checks" ? "checks" : kind === "chat" ? "chat" : kind)}${{ build: "Building", review: "Reviewing", plan: "Planning", checks: "Checks", chat: "Replying" }[kind]}</span>`;
+    const chip = `<span class="act-k" data-k="${kind === "chat" ? "checks" : kind}">${ic(kind === "checks" ? "checks" : kind === "chat" ? "chat" : kind)}${w.kind === "setup" ? "Setup" : { build: "Building", review: "Reviewing", plan: "Planning", checks: "Checks", chat: "Replying" }[kind]}</span>`;
     const since0 = w.workingAt ?? w.startedAt;
     return `<a class="workcard" href="#/r/${esc(w.room)}" data-turn="${esc(w.turn)}">
       ${homeTile(w.room, w.title)}
@@ -3388,6 +3435,10 @@ document.addEventListener("click", async (e) => {
   const hit = (sel) => t.closest(sel);
   try {
     if (hit("[data-close]") || t.id === "sheet") return closeSheet();
+    if (hit("[data-retry-setup]")) {
+      const id = room()?.id;
+      return id && api("POST", `/api/rooms/${id}/control`, { action: "retry-setup" }).then(() => toast("Setup runs again", "Nothing else runs in the room until it has finished."), fail);
+    }
     if (hit("[data-copy-path]")) {
       const btn = hit("[data-copy-path]");
       return navigator.clipboard.writeText(btn.dataset.copyPath).then(

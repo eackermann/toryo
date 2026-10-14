@@ -140,6 +140,8 @@ async function route(engine, method, parts, url, body) {
     if (id && b === "file" && method === "GET") return engine.readProjectFile(id, url.searchParams.get("path") ?? "");
     // Where a new room would work: the project's folder, or its own worktree (with the id the room would have).
     if (id && b === "workspace" && method === "GET") return engine.previewWorkspace(id);
+    // What a new worktree of the project gets: the files its copy patterns match now (names only), and its setup.
+    if (id && b === "worktree-files" && method === "GET") return engine.worktreeFiles(id, url.searchParams.has("copy") ? { copy: url.searchParams.getAll("copy").filter(Boolean) } : {});
   }
   if (a === "rooms") {
     if (!id && method === "POST") return engine.createRoom(body);
@@ -162,6 +164,8 @@ async function route(engine, method, parts, url, body) {
       return engine.control(id, body.action, body);
     }
     if (b === "plan" && method === "GET") return engine.planView(id);
+    // The room's worktree setup: its command, state, attempts and what each printed. Retry: control "retry-setup".
+    if (b === "setup" && method === "GET") return engine.setupView(id);
     // Where the room's next build would work (its own worktree, or the project's folder), with the exact folders.
     if (b === "workspace" && method === "GET") return engine.roomWorkspace(id);
     // A file in the folder the room works in (its own worktree, or the project's).

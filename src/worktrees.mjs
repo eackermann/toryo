@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { feed, quiet } from "./snapshots.mjs";
 import { run } from "./util.mjs";
@@ -130,6 +130,212 @@ export async function undoWorktree({ source, path, branch, start, workspaceId, t
     if (del.code !== 0) return { ok: false, reason: `Git couldn't remove the branch ${branch}: ${firstLine(del.stderr)}` };
   }
   return { ok: true };
+}
+
+// ---------------------------------------------------------------- files copied into a new worktree
+
+/** At most this many files are copied into a worktree (patterns are for a few private files, not folders of them). */
+const MAX_COPIES = 500;
+/** A scan looks at no more than this many files and folders; past it, it says so rather than copy a part. */
+const MAX_VISITS = 50_000;
+/** Nor deeper than this many folders: deeper, it says so too. */
+const MAX_DEPTH = 40;
+
+/**
+ * Why a copy pattern can't be used, or null. Patterns are relative to the project's folder (`.env*`,
+ * `config/*.local.json`, `**` for any folders in between); never absolute, never `..`, never into `.git`.
+ */
+export function copyPatternProblem(pattern) {
+  const p = String(pattern ?? "").trim();
+  if (!p) return "a pattern is empty";
+  if (p.startsWith("/") || /^[a-z]:[\\/]/i.test(p) || p.startsWith("~")) return `“${p}” isn't relative to the project's folder`;
+  if (p.includes("\\")) return `“${p}” has a backslash: use / between folders`;
+  const parts = p.split("/").filter(Boolean);
+  if (parts.some((x) => x === "..")) return `“${p}” steps out of the project's folder (..)`;
+  if (parts.some((x) => x === ".")) return `“${p}” has a ./ in it: write the path from the project's folder`;
+  if (parts.some((x) => x.toLowerCase() === ".git")) return `“${p}” is inside .git`;
+  return null;
+}
+
+const globRe = (seg) => new RegExp(`^${seg.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")}$`);
+
+/**
+ * The files the project's copy patterns match in its folder (`folder`, the project's own), to copy into a new
+ * worktree. Only regular files that Git ignores and doesn't track count, never one of the project's own files (those
+ * come with the snapshot); nothing reached through a link, and no folders. `top` is the folder's Git top (`subdir`: the
+ * folder inside it). Each pattern's matches are sorted as it's scanned, so the project's own files never crowd out a
+ * later pattern. { ok: true, files: [{ path, size, dev, ino }], refused: [{ path, why }] }, paths relative to the
+ * folder; or { ok: false, reason, refused } when it can't say for all of them (too many, or Git couldn't tell): a part
+ * is never taken for the whole.
+ */
+export async function findCopies(folder, patterns, { top = folder, subdir = "", maxVisits = MAX_VISITS } = {}) {
+  const found = new Map();
+  const refused = [];
+  const refusedPaths = new Set();
+  const refuse = (path, why) => {
+    if (refusedPaths.has(path)) return;
+    refusedPaths.add(path);
+    refused.push({ path, why });
+  };
+  const inTop = (p) => (subdir ? `${subdir}/${p}` : p);
+  let visits = 0;
+  for (const pattern of patterns ?? []) {
+    const bad = copyPatternProblem(pattern);
+    if (bad) {
+      refuse(String(pattern), bad);
+      continue;
+    }
+    const segs = String(pattern).trim().split("/").filter(Boolean);
+    const candidates = new Map();
+    let tooMany = false;
+    let tooDeep = false;
+    const walk = (rel, i, depth = 0) => {
+      if (tooMany || ++visits > maxVisits) return (tooMany = true);
+      if (depth > MAX_DEPTH) return (tooDeep = true);
+      const here = rel ? join(folder, rel) : folder;
+      if (i === segs.length) {
+        let st;
+        try {
+          st = lstatSync(here, { bigint: true });
+        } catch {
+          return;
+        }
+        if (st.isSymbolicLink()) return refuse(rel, "it's a link, which Toryo doesn't copy");
+        if (st.isDirectory()) return refuse(rel, "it's a folder; only files are copied");
+        if (!st.isFile()) return refuse(rel, "it isn't a regular file");
+        candidates.set(rel, { path: rel, size: Number(st.size), dev: String(st.dev), ino: String(st.ino) });
+        return;
+      }
+      const seg = segs[i];
+      if (seg === "**") {
+        walk(rel, i + 1, depth);
+        for (const d of entries(here)) if (d.isDirectory() && d.name !== ".git") walk(rel ? `${rel}/${d.name}` : d.name, i, depth + 1);
+        return;
+      }
+      const last = i === segs.length - 1;
+      const names = /[*?]/.test(seg) ? entries(here).map((d) => d.name).filter((n) => globRe(seg).test(n) && n !== ".git") : [seg];
+      for (const name of names) {
+        const next = rel ? `${rel}/${name}` : name;
+        if (last) {
+          walk(next, i + 1, depth);
+          continue;
+        }
+        let st;
+        try {
+          st = lstatSync(join(folder, next));
+        } catch {
+          continue;
+        }
+        // Never through a link to somewhere else.
+        if (st.isSymbolicLink()) refuse(`${String(pattern).trim()}`, `it goes through a link (${next})`);
+        else if (st.isDirectory()) walk(next, i + 1, depth + 1);
+      }
+    };
+    walk("", 0);
+    if (tooMany) return { ok: false, reason: `the copy pattern “${String(pattern).trim()}” reaches more than ${maxVisits.toLocaleString("en")} files and folders, so Toryo stopped looking; make it narrower`, files: [], refused };
+    if (tooDeep) return { ok: false, reason: `the copy pattern “${String(pattern).trim()}” reaches folders more than ${MAX_DEPTH} deep, so Toryo stopped looking; make it narrower`, files: [], refused };
+    // The project's own files (tracked, or untracked and not ignored) come with the snapshot: never copied over them.
+    const paths = [...candidates.keys()].filter((p) => !found.has(p));
+    const own = await ownFiles(top, paths.map(inTop));
+    if (!own.ok) return { ok: false, reason: `Toryo couldn't tell which of the matching files are the project's own: ${own.reason}`, files: [], refused };
+    for (const p of paths) {
+      if (own.files.has(inTop(p))) refuse(p, "it's one of the project's own files (not ignored), which the worktree already has");
+      else found.set(p, candidates.get(p));
+    }
+    if (found.size > MAX_COPIES) return { ok: false, reason: `the copy patterns match more than ${MAX_COPIES} files Git ignores; make them narrower`, files: [], refused };
+  }
+  return { ok: true, files: [...found.values()].sort((a, b) => (a.path < b.path ? -1 : 1)), refused };
+}
+
+/** Which of these paths (from the Git top) are the project's own files: tracked, or untracked and not ignored. */
+async function ownFiles(top, paths) {
+  const files = new Set();
+  for (let i = 0; i < paths.length; i += 500) {
+    const r = await run("git", ["-C", top, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...paths.slice(i, i + 500)], { env: { ...quiet(), GIT_LITERAL_PATHSPECS: "1" }, timeout: 60_000 });
+    if (r.code !== 0) return { ok: false, reason: firstLine(r.stderr) };
+    for (const p of r.stdout.split("\0")) if (p) files.add(p);
+  }
+  return { ok: true, files };
+}
+
+const entries = (dir) => {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Copy these files (from findCopies) from the project's folder (`from`) to the same places in a worktree (`to`, the
+ * project's place in it). Each is checked again as it's read: every folder on its way still a real folder, the file
+ * opened without following a link and still the very file that was found (the same device and inode), its permissions
+ * as they are now (a private 0600 file stays private), every byte of it written (`write`: tests write in short pieces).
+ * On the worktree's side, a folder in the way that's a link, or a file already there, stops it. Anything changed stops the copy, naming it: { ok, copied } or { ok: false, reason }.
+ */
+export function copyInto(from, to, files, { write = writeSync } = {}) {
+  const copied = [];
+  const stop = (reason) => ({ ok: false, reason, copied });
+  for (const f of files) {
+    const parts = f.path.split("/");
+    let src = from;
+    for (const part of parts.slice(0, -1)) {
+      src = join(src, part);
+      let st;
+      try {
+        st = lstatSync(src);
+      } catch {
+        return stop(`couldn't copy ${f.path}: ${relative(from, src)} is gone`);
+      }
+      if (st.isSymbolicLink() || !st.isDirectory()) return stop(`couldn't copy ${f.path}: it changed since Toryo looked (${relative(from, src)} isn't a folder any more)`);
+    }
+    let input;
+    try {
+      input = openSync(join(from, f.path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    } catch (error) {
+      return stop(`couldn't copy ${f.path}: ${error.code === "ELOOP" ? "it changed since Toryo looked (it's a link now)" : (error.code ?? error.message)}`);
+    }
+    try {
+      const st = fstatSync(input, { bigint: true });
+      if (!st.isFile() || (f.dev != null && (String(st.dev) !== f.dev || String(st.ino) !== f.ino))) return stop(`couldn't copy ${f.path}: it changed since Toryo looked (it's another file now)`);
+      const mode = Number(st.mode & 0o777n);
+      let dir = to;
+      for (const part of parts.slice(0, -1)) {
+        dir = join(dir, part);
+        let d = null;
+        try {
+          d = lstatSync(dir);
+        } catch {
+          mkdirSync(dir);
+          continue;
+        }
+        if (!d.isDirectory() || d.isSymbolicLink()) return stop(`couldn't copy ${f.path}: ${relative(to, dir)} in the worktree isn't a folder (a link or a file)`);
+      }
+      let output;
+      try {
+        output = openSync(join(to, f.path), fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, mode);
+      } catch (error) {
+        return stop(`couldn't copy ${f.path}: ${error.code === "EEXIST" ? "there's already a file there in the worktree" : (error.code ?? error.message)}`);
+      }
+      try {
+        const buf = Buffer.alloc(1 << 16);
+        // Every byte read is written, however few a write takes at a time; a write that takes none stops the copy.
+        for (let n; (n = readSync(input, buf, 0, buf.length, null)) > 0; )
+          for (let done = 0; done < n; ) {
+            const wrote = write(output, buf, done, n - done);
+            if (!(wrote > 0)) return stop(`couldn't copy ${f.path}: writing it in the worktree made no progress`);
+            done += wrote;
+          }
+        fchmodSync(output, mode);
+      } finally {
+        closeSync(output);
+      }
+    } finally {
+      closeSync(input);
+    }
+    copied.push(f.path);
+  }
+  return { ok: true, copied };
 }
 
 /** A worktree's Git folders: its own (`gitDir`: its index, HEAD) and the project's shared one (`common`). Null outside Git. */

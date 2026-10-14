@@ -130,7 +130,7 @@ export class Snapshots {
     const env = { ...quiet(), GIT_DIR: dir, GIT_INDEX_FILE: index };
     const opts = { cwd: root, env, timeout: 300_000 };
 
-    const seen = await listing(root);
+    const seen = await listing(root, ws.exclude);
     if (!seen.ok) return seen;
     if (seen.nested.length) return nestedRefusal(seen.nested);
     const known = readRecord(record);
@@ -168,7 +168,7 @@ export class Snapshots {
     await this.hooks.captured?.(root, attempt);
     // The files as they are now: the same list, each unchanged; otherwise, take it again. (A repository that appeared
     // inside the folder meanwhile is refused.)
-    const now = await listing(root);
+    const now = await listing(root, ws.exclude);
     if (!now.ok) return now;
     if (now.nested.length) return nestedRefusal(now.nested);
     if (now.signature !== seen.signature) return { ok: false, changed: true, reason: "files changed while Toryo took the snapshot" };
@@ -306,7 +306,9 @@ export class Snapshots {
 export function workspaceOf(project, workspace) {
   if (!workspace || workspace.id === "main") return { id: "main", path: project.path };
   // A workspace named without its folder stays itself (and fails): it's never taken for the project's own folder.
-  return { id: String(workspace.id), path: workspace.path || null };
+  // `exclude`: files a snapshot of it never holds (private files copied into a room's worktree, paths from its top),
+  // whatever Git's ignore rules or index there say.
+  return { id: String(workspace.id), path: workspace.path || null, exclude: new Set(workspace.exclude ?? []) };
 }
 
 /**
@@ -315,14 +317,14 @@ export function workspaceOf(project, workspace) {
  * by Git as `dir/`); and a signature of it all (size, mode, modification time, inode). Read only: the project's
  * index isn't refreshed (optional locks off).
  */
-async function listing(root) {
+async function listing(root, exclude = null) {
   const tracked = await names(root, ["ls-files", "-z", "--cached"]);
   if (!tracked.ok) return tracked;
   const untracked = await names(root, ["ls-files", "-z", "-o", "--exclude-standard"]);
   if (!untracked.ok) return untracked;
   const loose = untracked.names;
   const nested = loose.filter((p) => p.endsWith("/"));
-  const paths = [...new Set([...tracked.names, ...loose.filter((p) => !p.endsWith("/"))])].sort();
+  const paths = [...new Set([...tracked.names, ...loose.filter((p) => !p.endsWith("/"))])].filter((p) => !exclude?.has(p)).sort();
   const stats = new Map();
   const parts = [];
   for (const p of paths) {

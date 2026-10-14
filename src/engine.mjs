@@ -6,8 +6,8 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ADAPTERS, detectAgents } from "./agents/index.mjs";
 import { lastAppMessage } from "./agents/codexapp.mjs";
 import { readOnlyPaths, readOnlySupport } from "./agents/readonly.mjs";
-import { runGates } from "./gates.mjs";
-import { createWorktree, gitPaths, undoWorktree, writableGitPaths } from "./worktrees.mjs";
+import { runGates, runShell } from "./gates.mjs";
+import { copyInto, copyPatternProblem, createWorktree, findCopies, gitPaths, undoWorktree, writableGitPaths } from "./worktrees.mjs";
 import { parseSlices, shortDuration, sliceMatches, sliceTimes } from "./plan.mjs";
 import { acceptRecommendation, catchUp, parseQuestions, parseStatus, preamble, prompts, rulesKey, rulesUpdate, splitRecommendation, stripStatus } from "./protocol.mjs";
 import { UsageBook, groupOf, normalizeGroups, windowLabel } from "./usage.mjs";
@@ -15,7 +15,7 @@ import { defaultDesk, holdAgents, holdKey, holdLabel, readDesk } from "./desk.mj
 import { evaluate as evaluateGuard, excepted, expire as expireGuard, guardWindow as parseGuardWindow, holdKeyOf, holdsFor, offerText, policyFor, setPolicy, when } from "./guard.mjs";
 import { noteIntent } from "../web/intent.js";
 import { Sessions, workKind } from "../web/phases.js";
-import { firstLine, nowIso, shortId, slugify, truncate } from "./util.mjs";
+import { firstLine, nowIso, shortId, slugify, tail, truncate } from "./util.mjs";
 
 export const DEFAULT_SETTINGS = {
   maxRounds: 4,
@@ -808,6 +808,8 @@ export class Engine extends EventEmitter {
         this.#expireGuards();
         // Folders whose builds are over are let go before anything is started in them.
         this.#settleClaims(touched);
+        // A worktree's setup still to run is queued, and one to retry is asked about (after a Stop, say).
+        for (const room of this.rooms.values()) if (this.#keepSetup(room)) touched.add(room);
         for (const room of this.rooms.values()) {
           if (room.archived) continue;
           // A turn the Codex app has accepted is followed even in a paused or stopped room: it runs in the app anyway.
@@ -827,6 +829,7 @@ export class Engine extends EventEmitter {
           best.room.queue.splice(best.room.queue.indexOf(best.req), 1);
           if (this.#needsFolder(best.room, best.req)) this.#takeFolder(best.room);
           if (best.req.kind === "gates") this.#startChecks(best.room, best.req);
+          else if (best.req.kind === "setup") this.#startSetup(best.room, best.req);
           else this.#startTurn(best.room, best.req);
           touched.add(best.room);
         }
@@ -938,6 +941,16 @@ export class Engine extends EventEmitter {
     room.flow ??= shortId("f");
     // Rooms from before workspaces work in their project's own folder.
     if (!room.workspace && this.project(room.projectId)) room.workspace = this.#mainWorkspace(this.project(room.projectId));
+    // Toryo stopped while the worktree's setup ran: it isn't run again by itself (it may have done things outside the
+    // folder); the room asks (see #keepSetup).
+    if (room.workspace?.setup?.state === "running") {
+      const s = room.workspace.setup;
+      Object.assign(s, { state: "interrupted", endedAt: nowIso() });
+      const a = s.attempts?.find((x) => x.n === s.attempt);
+      if (a) Object.assign(a, { outcome: "interrupted", endedAt: s.endedAt });
+      const seconds = Math.round((Date.parse(s.endedAt) - Date.parse(s.startedAt ?? s.endedAt)) / 1000);
+      this.#append(room, { type: "gate", setup: true, attempt: s.attempt, startedAt: s.startedAt, results: [{ name: "Setup", command: a?.command ?? s.command, ok: false, interrupted: true, seconds, output: "" }] });
+    }
     // Toryo stopped while it was making the room's worktree: what it made so far isn't used. Retry undoes it and
     // makes it again; nothing runs there until then.
     if (room.workspace?.kind === "worktree" && room.workspace.state === "creating") {
@@ -1053,7 +1066,8 @@ export class Engine extends EventEmitter {
   updateProject(id, patch) {
     const project = this.project(id);
     if (!project) throw new UserError("Unknown project.", 404);
-    for (const key of ["name", "rules", "decisions", "gates", "agents"]) if (key in patch) project[key] = patch[key];
+    if ("worktree" in patch) patch = { ...patch, worktree: worktreeSettings(patch.worktree) };
+    for (const key of ["name", "rules", "decisions", "gates", "agents", "worktree"]) if (key in patch) project[key] = patch[key];
     this.store.saveConfig(this.config);
     this.emit("state");
     return project;
@@ -1867,6 +1881,24 @@ export class Engine extends EventEmitter {
       this.#closeQuestion(room, "Start building", w);
       return this.startBuild(roomId, { planPath: w.planPath || room.plan?.planPath, wait });
     }
+    // The worktree's setup failed, was stopped or interrupted (Toryo's own question). Only Retry runs it again; any
+    // other answer is kept, and the setup is left as it is until you retry it.
+    if (w.kind === "setup") {
+      if (accept) {
+        this.#takeWaiting(room, w);
+        this.#closeQuestion(room, "Retry", w);
+        this.#retrySetup(room);
+        return this.summary(room);
+      }
+      const body = String(text ?? "").trim();
+      if (!body) throw new UserError("Write an answer first.");
+      this.#takeWaiting(room, w);
+      this.#closeQuestion(room, body, w);
+      room.workspace.setup.declined = true;
+      this.#system(room, "The setup isn't run again. Nothing runs in the room until you retry it: Retry setup in the room's header, toryo setup --retry, or MCP toryo_setup.");
+      this.#save(room);
+      return this.summary(room);
+    }
     // The room's worktree couldn't be made: any answer is to try again (Toryo's own question; no agent hears it).
     if (w.kind === "workspace") {
       this.#takeWaiting(room, w);
@@ -2042,6 +2074,19 @@ export class Engine extends EventEmitter {
         // Stop pressed again with the app's turn kept but not being followed (Toryo lost track of it): let it go.
         if (again && room.appTurn && !running.some((r) => r.agent === "codexapp")) this.#releaseAppTurn(room);
         break;
+      }
+      case "retry-setup": {
+        const s = room.workspace?.setup;
+        if (!s) throw new UserError("This room has no setup to run.");
+        if (s.state === "done") throw new UserError("This room's setup has finished; there's nothing to retry.", 409);
+        if (s.state === "pending" || s.state === "running") throw new UserError("This room's setup is already running or about to.", 409);
+        const w = this.#allWaiting(room).find((x) => x.kind === "setup");
+        if (w) {
+          this.#takeWaiting(room, w);
+          this.#closeQuestion(room, "Retry", w);
+        }
+        this.#retrySetup(room);
+        return this.summary(room);
       }
       case "app-release": {
         const run = this.#runningIn(room).find((r) => r.agent === "codexapp");
@@ -2527,6 +2572,7 @@ export class Engine extends EventEmitter {
     const ws = room.workspace;
     if (ws?.kind === "worktree" && (ws.state !== "ready" || !existsSync(cwd)))
       throw new Error(ws.state !== "ready" ? "This room's worktree isn't ready; Toryo won't run the turn in the project's main folder instead." : `This room's worktree (${cwd}) isn't there; Toryo won't run the turn in the project's main folder instead.`);
+    if (ws?.setup && ws.setup.state !== "done") throw new Error("This room's setup hasn't finished; no turn runs in its worktree before it has.");
     // The Codex app works in the project's own folder only (a room saved with it in a worktree gets nothing).
     if (ws?.kind === "worktree" && req.agent === "codexapp") throw new Error("The Codex app works in the project's own folder only, and this room works in its own worktree. Toryo sent it nothing; take the Codex app out of this room's crew.");
     const pre = preamble({ agentLabel: this.label(req.agent), others, project, workspace: this.#briefWorkspace(room, project) });
@@ -3804,6 +3850,8 @@ export class Engine extends EventEmitter {
     // Nothing runs in a room's worktree before it's made.
     const ws = room.workspace;
     if (ws?.kind === "worktree" && ws.state !== "ready") return ws.state === "failed" ? "its worktree couldn't be made" : "Toryo is making its worktree";
+    // Nothing but the setup itself runs before the worktree's setup has finished.
+    if (ws?.setup && ws.setup.state !== "done" && req.kind !== "setup") return ws.setup.state === "pending" || ws.setup.state === "running" ? "its setup runs first" : "its setup hasn't finished: retry it";
     const folder = this.#roomFolder(room);
     if (!folder) return null;
     if (this.#youUse(folder)) return "you're using this folder";
@@ -3842,7 +3890,7 @@ export class Engine extends EventEmitter {
    * to the Codex app (it follows its own permissions, whatever Toryo asked).
    */
   #writes(req) {
-    return req.access === "write" || req.kind === "gates" || req.agent === "codexapp";
+    return req.access === "write" || req.kind === "gates" || req.kind === "setup" || req.agent === "codexapp";
   }
 
   /** The folder a room works in, as one identity (see #folderOf): its own worktree, or its project's folder. */
@@ -4091,7 +4139,9 @@ export class Engine extends EventEmitter {
   #workspaceOf(room) {
     const ws = room.workspace;
     if (!ws || ws.id === "main") return null;
-    return { id: ws.id, path: ws.kind === "worktree" ? ws.cwd : ws.path };
+    // The private files copied in are never in its snapshots (so never in a diff, a note or a returned change).
+    const exclude = (ws.private ?? []).map((p) => (ws.subdir ? `${ws.subdir}/${p}` : p));
+    return { id: ws.id, path: ws.kind === "worktree" ? ws.cwd : ws.path, exclude };
   }
 
   /** The folder a room's agents, checks and file readers work in: its own worktree (at the project's place in it), or the project's. */
@@ -4200,10 +4250,11 @@ export class Engine extends EventEmitter {
     const project = this.project(room.projectId);
     if (!project) throw new UserError("Unknown project.", 404);
     const view = this.#workspaceView(room);
-    if (view.kind === "worktree") return { fixed: true, current: view, own: { path: view.path, root: view.root, branch: view.branch }, shared: null, defaultFolder: "own" };
+    if (view.kind === "worktree") return { projectId: project.id, fixed: true, current: view, own: { path: view.path, root: view.root, branch: view.branch }, shared: null, defaultFolder: "own" };
     const why = this.#worktreeProblem(project, room.crew.members);
     const ws = this.#newWorktree(project, room.id);
     return {
+      projectId: project.id,
       fixed: false,
       current: view,
       shared: { path: project.path, root: view.root },
@@ -4234,6 +4285,9 @@ export class Engine extends EventEmitter {
         base: ws.base ?? null,
         // Whether the main folder is read-only for the room's agents' writing turns on this machine.
         mainReadOnly: Boolean(this.readOnly?.ok),
+        // Its setup's state (null: none), and the private files copied in (names).
+        setup: ws.setup?.state ?? null,
+        copied: ws.copy?.copied ?? [],
         others,
       };
     return { kind: "shared", path: project?.path ?? null, root: folder?.root ?? null, others };
@@ -4283,14 +4337,36 @@ export class Engine extends EventEmitter {
       this.#save(room);
       const r = await createWorktree({ snapshots: this.snapshots, project, source: ws.source.root, path: ws.root, branch: ws.branch, start: head, base: { commit: ws.base, tree: ws.baseTree }, subdir: ws.subdir, workspaceId: ws.id, token: ws.token, hooks: this.worktreeHooks });
       if (!r.ok) return this.#provisionFailed(room, r.reason);
+      // The project's private files (a `.env`, say) copied in, after the starting files are staged: names only are
+      // said, and snapshots of the worktree never hold them (`ws.private`).
+      const settings = project.worktree ?? {};
+      const main = this.#mainWorkspace(project);
+      const found = await findCopies(project.path, settings.copy ?? [], { top: main.root, subdir: main.subdir });
+      if (!found.ok) return this.#provisionFailed(room, `Toryo couldn't copy the project's private files into it: ${found.reason}`);
+      const { refused } = found;
+      const copied = copyInto(project.path, ws.cwd, found.files);
+      ws.private = copied.copied;
+      if (!copied.ok) return this.#provisionFailed(room, copied.reason);
+      ws.copy = { patterns: [...(settings.copy ?? [])], copied: copied.copied, refused };
       Object.assign(ws, { state: "ready", readyAt: nowIso(), attempted: undefined });
+      if (copied.copied.length || refused.length)
+        this.#system(
+          room,
+          `${copied.copied.length ? `Copied into the worktree (only their names are shown): ${copied.copied.join(", ")}.` : "No files were copied into the worktree."}${refused.length ? ` Not copied: ${refused.slice(0, 10).map((r) => `${r.path} (${r.why})`).join("; ")}${refused.length > 10 ? `; and ${refused.length - 10} more` : ""}.` : ""}`,
+          { level: refused.length ? "warn" : "info" },
+        );
+      // The project's setup command runs there before the room's first turn (see #startSetup).
+      if (settings.setup?.trim()) {
+        ws.setup = { command: settings.setup.trim(), timeoutMin: settings.setupTimeoutMin ?? 30, state: "pending", attempt: 0 };
+        this.#queueSetup(room);
+      }
       this.#system(
         room,
         `This room's worktree is ready: ${ws.cwd}. It has the project's files as they were (snapshot ${ws.base.slice(0, 12)}), uncommitted changes included, staged in its own index, so \`git diff\` there shows only what changes from now on. ${
           this.readOnly?.ok
             ? "The main folder is read-only for its agents' writing turns."
             : `This machine can't make the main folder read-only for its agents (${this.readOnly?.why ?? "no read-only mounts here"}): they're told not to touch it, and Claude's edit tools are turned off there, but a shell command could still write in it.`
-        } Bringing its changes back to the main folder comes in a later update of Toryo.`,
+        } Bringing its changes back to the main folder comes in a later update of Toryo.${ws.setup ? ` Its setup runs first: \`${ws.setup.command}\`.` : ""}`,
       );
       this.#save(room);
     } catch (error) {
@@ -4328,6 +4404,196 @@ export class Engine extends EventEmitter {
       question: `Toryo couldn't make this room's worktree: ${room.workspace.error}. Try again? (Its work waits until the worktree is made. To build in the project's folder instead, start the build in another room with “This folder (shared)”.)`,
       recommendation: "Retry",
     });
+  }
+
+  // ---------------------------------------------------------------- a worktree's setup
+
+  /**
+   * The setup step, queued first in the room: it runs before anything else there (see #accessBlock), like the checks
+   * (Pause everything holds it; a hold on agents doesn't; the room's Pause and Stop do). Not tied to the room's runs.
+   */
+  #queueSetup(room) {
+    if (room.queue.some((q) => q.kind === "setup")) return;
+    room.queue.unshift({ agent: "toryo", kind: "setup", id: shortId("q"), queuedAt: this.#stamp() });
+  }
+
+  /**
+   * Keeps the setup going between whatever happens to the room: setup still to run is queued (a Stop empties the
+   * queue), and one that failed, was stopped or was interrupted is asked about again (a Stop clears questions), once
+   * the room isn't stopped. Whether it changed the room.
+   */
+  #keepSetup(room) {
+    const s = room.workspace?.setup;
+    if (!s || room.archived || room.stopped || room.workspace.state !== "ready") return false;
+    if (s.state === "pending" && !room.queue.some((q) => q.kind === "setup") && !this.#runningIn(room).some((r) => r.req.kind === "setup")) {
+      this.#queueSetup(room);
+      return true;
+    }
+    if (["failed", "stopped", "interrupted"].includes(s.state) && !s.declined && !this.#allWaiting(room).some((w) => w.kind === "setup")) {
+      this.#askSetup(room);
+      return true;
+    }
+    return false;
+  }
+
+  /** Ask to run the setup again, saying what happened to it. */
+  #askSetup(room) {
+    const s = room.workspace.setup;
+    const what =
+      s.state === "interrupted"
+        ? `Toryo stopped while the worktree's setup was running (attempt ${s.attempt}). It doesn't run it again by itself, since it may have done things outside the folder.`
+        : s.state === "stopped"
+          ? `The worktree's setup was stopped before it finished (attempt ${s.attempt}).`
+          : `The worktree's setup failed (attempt ${s.attempt}${s.timedOut ? ", out of time" : s.code != null ? `, exit ${s.code}` : ""}${s.error ? `: ${s.error}` : ""}). What it printed is above.`;
+    this.#wait(room, { kind: "setup", from: null, question: `${what} Nothing runs in the room until it has. Run it again?`, recommendation: "Retry" });
+  }
+
+  /** Run the setup again, with the project's setup command as it is now (none any more: there's nothing to run). */
+  #retrySetup(room) {
+    const s = room.workspace?.setup;
+    const project = this.project(room.projectId);
+    if (!s || !project) return;
+    const command = project.worktree?.setup?.trim();
+    if (!command) {
+      Object.assign(s, { state: "done", endedAt: nowIso(), declined: undefined });
+      this.#system(room, "The project has no setup command any more, so the worktree's setup is done.");
+    } else {
+      Object.assign(s, { command, timeoutMin: project.worktree?.setupTimeoutMin ?? 30, state: "pending", error: undefined, declined: undefined });
+      this.#queueSetup(room);
+    }
+    this.#save(room);
+    this.#schedule();
+  }
+
+  #startSetup(room, req) {
+    const s = room.workspace.setup;
+    const run = { roomId: room.id, agent: "toryo", req, controller: new AbortController(), abandon: new AbortController(), activity: [], startedAt: nowIso(), turnId: shortId("s"), phase: "setup" };
+    run.workingAt = run.startedAt;
+    // The attempt, with the command it runs, kept as running (and its step out of the queue) on disk before the command
+    // starts: a crash from then on finds it interrupted, and it's never run again by itself. Not saved: not started.
+    const attempt = { n: (s.attempt ?? 0) + 1, command: s.command, timeoutMin: s.timeoutMin ?? 30, startedAt: run.startedAt, outcome: "running" };
+    const before = { ...s };
+    Object.assign(s, { state: "running", attempt: attempt.n, startedAt: run.startedAt, endedAt: undefined, code: undefined, timedOut: undefined, error: undefined, attempts: [...(s.attempts ?? []), attempt] });
+    try {
+      this.store.saveRoom(room);
+    } catch (error) {
+      Object.assign(s, before, { attempts: before.attempts ?? [], state: "failed", error: `Toryo couldn't save its record before starting it (${firstLine(error?.message ?? error)}), so it didn't start` });
+      if (!room.stopped) this.#askSetup(room);
+      return null;
+    }
+    this.running.set(run.turnId, run);
+    this.#system(room, `Running the worktree's setup (attempt ${s.attempt}): \`${s.command}\`.`);
+    this.#afterSetup(room, run).catch((error) => {
+      console.error("[toryo] setup crashed:", error);
+      this.running.delete(run.turnId);
+      if (!this.shuttingDown) {
+        Object.assign(s, { state: "failed", endedAt: nowIso(), error: firstLine(error?.message ?? error) });
+        const a = s.attempts?.find((x) => x.n === s.attempt);
+        if (a) Object.assign(a, { outcome: "failed", endedAt: s.endedAt, error: s.error });
+        if (!room.stopped && !room.archived) this.#askSetup(room);
+      }
+      this.#save(room);
+      this.#pump(room);
+    });
+    return run;
+  }
+
+  /**
+   * The setup runs in the room's worktree, its process group stopped by Stop, before and after snapshots saying which
+   * of the room's files it changed (they're part of what the room changed from its starting point). Shown like the
+   * checks, what it printed included.
+   */
+  async #afterSetup(room, run) {
+    const ws = room.workspace;
+    const s = ws.setup;
+    const project = this.project(room.projectId);
+    let r;
+    let before = null;
+    let after = null;
+    try {
+      if (!existsSync(ws.cwd)) throw new Error(`this room's worktree (${ws.cwd}) isn't there`);
+      before = room.settings.snapshots !== false ? await this.#snapshot(room, project, `before setup ${run.turnId}`) : null;
+      this.emit("activity", { roomId: room.id, turnId: run.turnId, agent: "toryo", item: { kind: "command", text: `setup: ${s.command}`, at: nowIso() } });
+      this.worktreeHooks.launchingSetup?.(room); // tests: what's on disk the moment it starts
+      r = await runShell(s.command, ws.cwd, (s.timeoutMin ?? 30) * 60_000, run.controller.signal);
+      after = before ? await this.#snapshot(room, project, `after setup ${run.turnId}`) : null;
+    } finally {
+      this.running.delete(run.turnId);
+    }
+    if (this.shuttingDown) return; // still running in the record: the next start finds it interrupted
+    const files = before && after ? await this.snapshots.changes(project, before.commit, after.commit) : null;
+    const ok = r.code === 0 && !r.timedOut && !r.cancelled;
+    Object.assign(s, { state: r.cancelled ? "stopped" : ok ? "done" : "failed", endedAt: nowIso(), code: r.cancelled ? null : r.code, timedOut: r.timedOut || undefined });
+    const a = s.attempts?.find((x) => x.n === s.attempt);
+    if (a) Object.assign(a, { outcome: s.state, endedAt: s.endedAt, code: s.code, timedOut: s.timedOut });
+    const seconds = Math.round((Date.parse(s.endedAt) - Date.parse(run.startedAt)) / 1000);
+    this.#append(room, {
+      type: "gate",
+      setup: true,
+      attempt: s.attempt,
+      runId: run.turnId,
+      startedAt: run.startedAt,
+      results: [{ name: "Setup", command: s.command, ok, code: s.code, timedOut: s.timedOut, cancelled: r.cancelled || undefined, seconds, output: tail(r.output, 6_000) }],
+      files: files?.map((f) => f.path),
+    });
+    if (ok) this.#system(room, `The worktree's setup finished${files?.length ? `, changing ${files.length} of the room's files: ${files.slice(0, 8).map((f) => f.path).join(", ")}${files.length > 8 ? "…" : ""}` : ""}.`);
+    else if (!room.stopped && !room.archived) this.#askSetup(room);
+    this.#save(room);
+    this.#pump(room);
+  }
+
+  /**
+   * A room's setup, for the page, the command line and MCP: the command, its state and attempt, and what each attempt
+   * printed (from the room's setup records).
+   */
+  setupView(roomId) {
+    const room = this.#room(roomId);
+    const s = room.workspace?.setup ?? null;
+    // Each attempt as it was kept when it started (its own command), with how it ended and what it printed.
+    const runs = new Map(this.events.get(room.id).filter((e) => e.type === "gate" && e.setup).map((e) => [e.attempt, e]));
+    const attempts = (s?.attempts ?? []).map((a) => {
+      const e = runs.get(a.n);
+      const x = e?.results[0];
+      return {
+        attempt: a.n,
+        command: a.command,
+        at: a.startedAt,
+        endedAt: a.endedAt ?? null,
+        outcome: a.outcome,
+        ok: a.outcome === "done",
+        code: a.code ?? null,
+        timedOut: Boolean(a.timedOut),
+        seconds: x?.seconds ?? null,
+        output: x?.output ?? "",
+        files: e?.files ?? null,
+      };
+    });
+    return { room: room.id, setup: s && { command: s.command, state: s.state, attempt: s.attempt, startedAt: s.startedAt ?? null, endedAt: s.endedAt ?? null, declined: Boolean(s.declined) }, copied: room.workspace?.copy?.copied ?? [], notCopied: room.workspace?.copy?.refused ?? [], attempts };
+  }
+
+  /**
+   * What a project's new worktrees get, before any is made: the files its copy patterns match now (names only), those
+   * that wouldn't be copied and why, where they'd go, and its setup command.
+   */
+  async worktreeFiles(projectId, { copy } = {}) {
+    const project = this.project(projectId);
+    if (!project) throw new UserError("Unknown project.", 404);
+    // Patterns given (being written in Settings, not saved yet) are checked like saved ones.
+    const settings = copy ? { ...project.worktree, ...worktreeSettings({ ...project.worktree, copy }) } : (project.worktree ?? {});
+    const main = this.#mainWorkspace(project);
+    const found = await findCopies(project.path, settings.copy ?? [], { top: main.root, subdir: main.subdir });
+    return {
+      project: project.id,
+      copy: settings.copy ?? [],
+      setup: settings.setup ?? "",
+      setupTimeoutMin: settings.setupTimeoutMin ?? 30,
+      files: found.files.map((f) => f.path),
+      refused: found.refused,
+      // The scan couldn't say for every file (too many, say): a new worktree wouldn't be made with these patterns.
+      error: found.ok ? null : found.reason,
+      destination: join(this.store.home, "worktrees", project.id, "<room>", main.subdir),
+      why: this.#worktreeProblem(project),
+    };
   }
 
   /**
@@ -4386,9 +4652,9 @@ export class Engine extends EventEmitter {
   #busyWith(room) {
     const doing = { build: "building", review: "reviewing", plan: "planning", checks: "running", chat: "replying" };
     const running = this.#runningIn(room);
-    const out = running.map((r) => (r.agent === "toryo" ? "The checks are running" : `${this.label(r.agent)} is ${doing[workKind(r.req.kind)]}`));
+    const out = running.map((r) => (r.agent === "toryo" ? (r.req.kind === "setup" ? "The worktree's setup is running" : "The checks are running") : `${this.label(r.agent)} is ${doing[workKind(r.req.kind)]}`));
     if (room.queue.length) {
-      const what = room.queue.map((q) => (q.agent === "toryo" ? "the checks" : `${this.label(q.agent)}'s ${{ build: "building turn", review: "review", plan: "planning turn", checks: "checks", chat: "reply" }[workKind(q.kind)]}`));
+      const what = room.queue.map((q) => (q.agent === "toryo" ? (q.kind === "setup" ? "the worktree's setup" : "the checks") : `${this.label(q.agent)}'s ${{ build: "building turn", review: "review", plan: "planning turn", checks: "checks", chat: "reply" }[workKind(q.kind)]}`));
       out.push(`${what.join(", ").replace(/^./, (c) => c.toUpperCase())} ${what.length > 1 ? "are" : "is"} queued`);
     }
     if (room.appTurn && !running.some((r) => r.agent === "codexapp")) out.push("The Codex app still has this room's turn");
@@ -4520,6 +4786,19 @@ function guardWindow(name) {
   } catch (error) {
     throw new UserError(error.message);
   }
+}
+
+/** A project's settings for new worktrees, checked: { copy: [patterns], setup, setupTimeoutMin }. */
+function worktreeSettings(v) {
+  if (v == null) return { copy: [], setup: "" };
+  const copy = (Array.isArray(v.copy) ? v.copy : String(v.copy ?? "").split("\n")).map((x) => String(x).trim()).filter(Boolean);
+  for (const p of copy) {
+    const bad = copyPatternProblem(p);
+    if (bad) throw new UserError(`Files to copy: ${bad}.`);
+  }
+  const out = { copy: [...new Set(copy)], setup: String(v.setup ?? "").trim() };
+  if (v.setupTimeoutMin != null && v.setupTimeoutMin !== "") out.setupTimeoutMin = clamp(Number(v.setupTimeoutMin), 1, 24 * 60);
+  return out;
 }
 
 function sanitizeSettings(s) {

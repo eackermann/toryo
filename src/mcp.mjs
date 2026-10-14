@@ -94,6 +94,30 @@ const TOOLS = [
     },
   },
   {
+    name: "toryo_setup",
+    description:
+      "A room's own worktree: the files copied into it (names only) and its setup (the project's setup command, run there before the room's first turn): where it stands, and what each attempt printed. retry: run a setup that failed, was stopped or was interrupted again.",
+    inputSchema: {
+      type: "object",
+      properties: { room: { type: "string", description: "Room id or part of its title; defaults to the most recent room" }, retry: { type: "boolean" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "toryo_project",
+    description:
+      "A project's settings for its rooms' own worktrees: the files copied into a new one (patterns from the project's folder, such as .env*; only files Git ignores, never the project's own) and the setup command run there before the first turn. Shows them with the files the patterns match now (names only); copy and setup change them ([] and \"\" for none).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project id or name; defaults to the first project" },
+        copy: { type: "array", items: { type: "string" } },
+        setup: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "toryo_control",
     description: "Pause, resume or stop one room. (Pause everything, across rooms, is toryo_desk.)",
     inputSchema: {
@@ -212,6 +236,12 @@ export function runMcpServer(client = new ToryoClient()) {
           }
           case "toryo_control":
             text = await client.control(a.room, a.action);
+            break;
+          case "toryo_setup":
+            text = await client.setupText(a.room, { retry: Boolean(a.retry) });
+            break;
+          case "toryo_project":
+            text = await client.projectText(a.project, { copy: a.copy, setup: a.setup });
             break;
           case "toryo_session_new":
             text = await client.newSession(a.room, a);

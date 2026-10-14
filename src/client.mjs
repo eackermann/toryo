@@ -303,6 +303,54 @@ export class ToryoClient {
     return `Session ${n + 1} started in “${r.title}”; session ${n} is kept in its history. ${keepMemory ? "The agents keep their memory." : "Each agent starts fresh on its next turn (the Codex app keeps its thread)."} ${first ? `Then ${first}.` : "Nothing runs until you send something."}`;
   }
 
+  /**
+   * A room's worktree setup in words (`toryo setup`, `toryo_setup`): the files copied in (names), the setup command
+   * and where it stands, and each attempt with the end of what it printed. `retry`: run it again first.
+   */
+  async setupText(ref, { retry = false } = {}) {
+    const r = await this.resolveRoom(ref);
+    if (retry) await this.call("POST", `/api/rooms/${r.id}/control`, { action: "retry-setup" });
+    const v = await this.call("GET", `/api/rooms/${r.id}/setup`);
+    const lines = [`“${r.title}” (id ${r.id})${retry ? ": its setup runs again." : ""}`];
+    if (v.copied.length || v.notCopied.length)
+      lines.push(`Copied into its worktree: ${v.copied.join(", ") || "nothing"}.${v.notCopied.length ? ` Not copied: ${v.notCopied.map((x) => `${x.path} (${x.why})`).join("; ")}.` : ""}`);
+    if (!v.setup) {
+      lines.push("No setup runs in this room.");
+      return lines.join("\n");
+    }
+    const state = { pending: "about to run", running: "running", done: "finished", failed: "failed", stopped: "stopped before it finished", interrupted: "interrupted when Toryo stopped" }[v.setup.state] ?? v.setup.state;
+    lines.push(`Setup: ${v.setup.command} (${state}${v.setup.attempt ? `, attempt ${v.setup.attempt}` : ""}).`);
+    if (["failed", "stopped", "interrupted"].includes(v.setup.state)) lines.push("Nothing runs in the room until it has: toryo setup --retry (or answer the room's question).");
+    if (v.setup.declined) lines.push("You chose not to run it again for now.");
+    for (const a of v.attempts) {
+      const how = { done: "finished", stopped: "stopped", interrupted: "interrupted when Toryo stopped", running: "running", failed: a.timedOut ? "ran out of time" : `failed${a.code != null ? ` (exit ${a.code})` : ""}` }[a.outcome] ?? a.outcome;
+      lines.push(`  Attempt ${a.attempt}, ${a.command}: ${how}${a.seconds != null ? ` in ${a.seconds}s` : ""}${a.files?.length ? `; it changed ${a.files.join(", ")}` : ""}.`);
+      const out = String(a.output ?? "").trim().split("\n").slice(-12);
+      if (out.join("")) lines.push(...out.map((l) => `    ${l}`));
+    }
+    return lines.join("\n");
+  }
+
+  /**
+   * A project's settings for new worktrees in words (`toryo project`, `toryo_project`), after changing them if asked:
+   * `copy` (patterns; [] for none) and `setup` ("" for none). With the files the patterns match now (names only).
+   */
+  async projectText(ref, { copy, setup } = {}) {
+    const { config } = await this.state();
+    const p = ref ? config.projects.find((x) => x.id === ref || x.name === ref) : config.projects[0];
+    if (!p) throw new Error(ref ? `No project called “${ref}”.` : "There are no projects yet.");
+    const changing = copy !== undefined || setup !== undefined;
+    if (changing) await this.call("PATCH", `/api/projects/${p.id}`, { worktree: { ...p.worktree, ...(copy !== undefined ? { copy } : {}), ...(setup !== undefined ? { setup } : {}) } });
+    const w = await this.call("GET", `/api/projects/${p.id}/worktree-files`);
+    const lines = [`${p.name} (${p.path})${changing ? ": saved." : ""}`];
+    if (w.why) lines.push(`Its rooms can't have worktrees of their own: ${w.why}`);
+    lines.push(`Files copied into a new worktree: ${w.copy.length ? w.copy.join(", ") : "none"}${w.copy.length ? `; they match now: ${w.files.join(", ") || "nothing"}` : ""}.`);
+    if (w.error) lines.push(`A new worktree couldn't be made with these patterns: ${w.error}.`);
+    if (w.refused.length) lines.push(`Not copied: ${w.refused.slice(0, 10).map((x) => `${x.path} (${x.why})`).join("; ")}${w.refused.length > 10 ? `; and ${w.refused.length - 10} more` : ""}.`);
+    lines.push(w.setup ? `Setup, run there before the first turn: ${w.setup}` : "No setup runs in a new worktree.");
+    return lines.join("\n");
+  }
+
   async control(ref, action) {
     const r = await this.resolveRoom(ref);
     await this.call("POST", `/api/rooms/${r.id}/control`, { action });

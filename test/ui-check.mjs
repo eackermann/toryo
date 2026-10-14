@@ -67,6 +67,7 @@ try {
     // Step 5y: a build that keeps its folder, and one in its own worktree.
     { agent: "codex", match: "Busy here", hang: true },
     { agent: "codex", match: "Own build here", hang: true },
+    { agent: "codex", match: "Setup build here", hang: true },
     // Step 5x: a turn that keeps a room busy, then the first message of a new session.
     { agent: "codex", match: "Hold this", hang: true },
     { agent: "codex", match: "Next sprint", workMs: 1200, reply: "Ready.\nTORYO: REPLY" },
@@ -1484,6 +1485,26 @@ try {
   await page.click('#home .deskbar button[data-do="release-folder"]');
   await until(async () => (await view(stripRoom.id)).events.filter((e) => e.type === "turn").length > usedTurns);
   await page.waitForFunction(() => !/You're using/.test(document.querySelector("#home .deskbar")?.innerText ?? ""));
+
+  // 5za. A room's own worktree gets the project's private files and its setup: the room shows the setup like the
+  // checks, and Settings shows what a new worktree gets (names only), with the patterns as written.
+  const setupProject = await ownProject("withsetup");
+  writeFileSync(join(base, "withsetup", ".gitignore"), ".env\n");
+  writeFileSync(join(base, "withsetup", ".env"), "TOKEN=ui-secret\n");
+  await fetch(`${url}api/projects/${setupProject}`, { method: "PATCH", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify({ worktree: { copy: [".env"], setup: "echo setting up" } }) });
+  const setupRoom = await post("api/rooms", { projectId: setupProject, mode: "build", task: "Setup build here", title: "Setup room", members: ["codex", "claude"], builder: "codex", reviewer: "claude", folder: "own" });
+  await openRoom(setupRoom.id, "Setup room");
+  await page.waitForSelector("#log .gate[data-setup]");
+  assert.match(await page.innerText("#log .gate[data-setup]"), /Setup finished\s+echo setting up/);
+  await page.waitForFunction(() => /Copied into the worktree \(only their names are shown\): \.env\./.test(document.querySelector("#log")?.innerText ?? ""));
+  await page.click("#settingsBtn");
+  assert.equal(await page.inputValue("#pSetup"), "echo setting up");
+  await page.fill("#pCopy", ".env\n.gitignore");
+  await page.click("#previewCopy");
+  await page.waitForFunction(() => /Copied into \S+: \.env\. Not copied: \.gitignore \(it's one of the project's own files/.test(document.querySelector("#copyPreview")?.innerText ?? ""));
+  assert.equal(/ui-secret/.test(await page.innerText("body")), false, "only names are shown");
+  await page.click("#sheet [data-close]");
+  await post(`api/rooms/${setupRoom.id}/control`, { action: "stop" });
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");

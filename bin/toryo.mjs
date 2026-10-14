@@ -24,7 +24,7 @@ const flag = (name, fallback) => {
   const v = args[i + 1];
   return v && !v.startsWith("--") ? v : true;
 };
-const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["to", "port", "host", "project", "plan", "room", "builder", "reviewer", "handoff-file", "slice", "thread", "question", "from", "checker", "five-hour", "weekly", "window", "at"].includes(args[i - 1].slice(2))));
+const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["to", "port", "host", "project", "plan", "room", "builder", "reviewer", "handoff-file", "slice", "thread", "question", "from", "checker", "five-hour", "weekly", "window", "at", "copy", "setup"].includes(args[i - 1].slice(2))));
 const command = positional[0];
 
 const HELP = `Toryo: a relay desk for coding agents.
@@ -76,6 +76,10 @@ From any terminal (or an agent) while Toryo runs
                                 room stays where it is unless you say --own
                                 the builder already finished a round: the reviewer goes first
                                 with the Codex app in the crew, --thread <id> picks its thread for this room
+  toryo project [name] [--copy ".env*" ...] [--setup "npm ci"] [--no-copy] [--no-setup]
+                                what a room's own worktree gets: files copied in (only ones Git ignores; names only
+                                are shown) and a setup command run there before its first turn
+  toryo setup [room] [--retry]  a worktree's setup: where it stands and what it printed; --retry runs it again
   toryo mcp                   MCP server for Claude Code / Codex (phone access through their apps)
   toryo doctor                which agent CLIs Toryo can find
 
@@ -186,6 +190,19 @@ try {
       const mode = modes.includes(rest[0]) ? rest.shift() : undefined;
       const str = (n) => (typeof flag(n, null) === "string" ? flag(n, null) : undefined);
       console.log(await client.newSession(ref, { keepMemory: Boolean(flag("keep-memory", false)), mode, text: rest.join(" "), planPath: str("plan"), builder: str("builder"), reviewer: str("reviewer"), wait: Boolean(flag("wait", false)), folder: folderFlag() }));
+      process.exit(0);
+    }
+    case "setup": {
+      // A room's worktree setup: where it stands and what it printed; --retry runs it again.
+      console.log(await client.setupText(positional[1] ?? roomArg(), { retry: Boolean(flag("retry", false)) }));
+      process.exit(0);
+    }
+    case "project": {
+      // A project's settings for new worktrees; --copy (repeatable), --setup, --no-copy, --no-setup change them.
+      const copies = args.flatMap((a, i) => (a === "--copy" && args[i + 1] && !args[i + 1].startsWith("--") ? [args[i + 1]] : []));
+      const copy = args.includes("--no-copy") ? [] : copies.length ? copies : undefined;
+      const setup = args.includes("--no-setup") ? "" : typeof flag("setup", null) === "string" ? flag("setup", null) : undefined;
+      console.log(await client.projectText(positional[1] ?? (typeof flag("project", null) === "string" ? flag("project", null) : undefined), { copy, setup }));
       process.exit(0);
     }
     case "start": {
