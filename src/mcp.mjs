@@ -104,6 +104,24 @@ const TOOLS = [
     },
   },
   {
+    name: "toryo_session_new",
+    description:
+      "Start a new session in a room, for new work such as planning the next sprint: the session it's in ends (its planning round or build, and its open questions), its history stays, and each agent starts fresh unless keepMemory (the Codex app keeps its thread). Refused while anything runs or is queued in the room. Optionally start the first step: a message (chat), a planning topic (plan) or a build task (build).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        room: { type: "string", description: "Room id or part of its title; defaults to the most recent room" },
+        keepMemory: { type: "boolean", description: "Keep the agents' memory of the earlier sessions" },
+        mode: { type: "string", enum: ["chat", "plan", "build"], description: "A first step, optional" },
+        text: { type: "string", description: "The message, planning topic or build task" },
+        planPath: { type: "string" },
+        builder: { type: "string", enum: ["codex", "claude", "cursor", "grok", "codexapp"] },
+        reviewer: { type: "string", enum: ["codex", "claude", "cursor", "grok", "codexapp"] },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "toryo_start",
     description:
       "Start a new room: chat (a question for the crew), plan (a planning round on a topic) or build (a task, optionally with a plan file). For a build whose builder already finished a round, set reviewFirst: the reviewer goes first, using handoff (or, with the Codex app as builder, the thread's last reply).",
@@ -190,6 +208,9 @@ export function runMcpServer(client = new ToryoClient()) {
           }
           case "toryo_control":
             text = await client.control(a.room, a.action);
+            break;
+          case "toryo_session_new":
+            text = await client.newSession(a.room, a);
             break;
           case "toryo_start":
             text = await client.start(a);

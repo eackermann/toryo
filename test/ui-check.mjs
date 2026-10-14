@@ -64,6 +64,9 @@ try {
     // Step 5u: a turn long enough to watch on the session's strip. Step 5v: a build whose checks it watches.
     { agent: "codex", match: "Strip turn", progress: "npm test", workMs: 3000, reply: "Done.\nTORYO: REPLY" },
     { agent: "codex", match: "Strip checks", reply: "Built.\nTORYO: REVIEW Slice 1: It | h.md" },
+    // Step 5x: a turn that keeps a room busy, then the first message of a new session.
+    { agent: "codex", match: "Hold this", hang: true },
+    { agent: "codex", match: "Next sprint", workMs: 1200, reply: "Ready.\nTORYO: REPLY" },
     // Step 5s: a turn that takes a while to start (preparing), then works, saying what it runs.
     { agent: "codex", match: "Phases for Home", delayMs: 2500, progress: "npm run build", workMs: 4000, reply: "Built.\nTORYO: REPLY" },
     { agent: "codex", match: "Slow review of the (lexer|docs)", delayMs: 6000, reply: "Built it.\nTORYO: REVIEW Slice 1: It | h.md" },
@@ -1288,6 +1291,51 @@ try {
     desk3.kill("SIGTERM");
     await new Promise((r) => desk3.once("exit", r));
   }
+
+  // 5x. A new session, from the room's menu. Refused while Codex works, with a way to stop the room; then a double
+  // click starts one session, with a first message. The earlier session folds, and the strip can show it.
+  await openRoom(stripRoom.id, "Strip room");
+  await post(`api/rooms/${stripRoom.id}/messages`, { text: "Hold this.", to: "codex", answering: false });
+  await until(async () => (await view(stripRoom.id)).live.length === 1);
+  await page.click("#roomBtn");
+  await page.click("[data-new-session]");
+  await page.waitForSelector("#sessionForm .ns-busy:not([hidden])");
+  assert.match(await page.innerText("#sessionForm .ns-busy"), /^Codex is replying\. Wait for it to finish, or stop the room first\./);
+  await page.click("#sessionForm [data-ns-stop]");
+  await until(async () => (await view(stripRoom.id)).live.length === 0);
+  await page.click('#sessionForm .modecard[data-mode="chat"]');
+  await page.fill("#nsText", "Next sprint.");
+  await page.dblclick("#nsGo");
+  await page.waitForSelector("#sheet", { state: "hidden" });
+  await page.waitForSelector('#log .sessionmark:has-text("Session 2 started")');
+  assert.equal((await view(stripRoom.id)).events.filter((e) => e.type === "session").length, 1, "one session, however many clicks");
+  // The earlier session: one closed line, which opens to show it.
+  const fold = "#log details.sessionfold";
+  assert.match(await page.innerText(`${fold} > summary`), /^Session 1\b/);
+  assert.equal(await page.$eval(fold, (d) => d.open), false);
+  const oldTurn = (await view(stripRoom.id)).events.find((e) => e.type === "turn");
+  assert.equal(await page.isVisible(`#log [data-id="${oldTurn.id}"]`), false);
+  // The strip starts again: this session's reply.
+  await until(async () => (await view(stripRoom.id)).events.some((e) => e.type === "turn" && /Ready/.test(e.text ?? "")));
+  await page.waitForFunction(() => /^Session 2 · Other work \d+ s · \d+ s in all$/.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+  // Session 1 on the strip, from the list; a piece of it opens the fold to its turn; then back.
+  await page.click("#sessionStrip .ss-words");
+  await page.click('#sheet [data-show-session="0"]');
+  await page.waitForFunction(() => /^Session 1 \(earlier\) · Other work/.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+  assert.equal(await page.isVisible("#sessionStrip .ss-back"), true);
+  await page.click(`#sessionStrip .ss-seg[data-seg="${oldTurn.id}"]`);
+  await page.waitForFunction((id) => document.querySelector(`#log [data-id="${id}"]`)?.checkVisibility(), oldTurn.id);
+  assert.equal(await page.$eval(fold, (d) => d.open), true);
+  await page.click("#sessionStrip .ss-back");
+  await page.waitForFunction(() => /^Session 2 · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
+  // Started from another client (the terminal, another window) while this page shows the room: session 2 folds as
+  // it happens, without a reload.
+  const sprintReply = (await view(stripRoom.id)).events.filter((e) => e.type === "turn").at(-1);
+  await post(`api/rooms/${stripRoom.id}/control`, { action: "new-session", ends: 2 });
+  await page.waitForSelector('#log .sessionmark:has-text("Session 3 started")');
+  assert.deepEqual(await page.$$eval("#log details.sessionfold > summary b", (bs) => bs.map((b) => b.textContent)), ["Session 1", "Session 2"]);
+  assert.equal(await page.isVisible(`#log [data-id="${sprintReply.id}"]`), false, "session 2's reply is in its fold");
+  await page.waitForFunction(() => /^Session 3 · /.test(document.querySelector("#sessionStrip .ss-words")?.innerText ?? ""));
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");

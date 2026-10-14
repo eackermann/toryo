@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BREAK_MS, Timeline, durationWords, sessionWords, workKind } from "../web/phases.js";
+import { BREAK_MS, Sessions, Timeline, durationWords, earlierWords, sessionWords, workKind, workWords } from "../web/phases.js";
 
 const T0 = Date.parse("2026-10-13T10:00:00Z");
 const min = 60_000;
@@ -143,6 +143,23 @@ test("in words: durations, and the session in a sentence", () => {
   // A little work, under a second: said, not taken for nothing.
   const tiny = timeline([{ ...turn("a", "chat", 0, 0), endedAt: new Date(T0 + 300).toISOString() }]).view({ now: T0 + 400 });
   assert.equal(sessionWords(tiny), "This session, 0 s, under a second of work so far.");
+});
+
+test("sessions: split where a new one began; each event stays in its own, also when it changes; earlier ones end where the next began", () => {
+  const ss = new Sessions();
+  for (const e of [turn("a", "build", 0, 10), { id: "q", type: "question", at: iso(10), open: true }, { id: "s2", type: "session", n: 2, at: iso(20) }, turn("b", "review", 25, null)]) ss.add(e);
+  assert.deepEqual([ss.list.length, ss.n], [2, 2]);
+  // The question closes as the new session starts: it belongs to session 1, where it waited 10 minutes.
+  ss.add({ id: "q", type: "question", at: iso(10), open: false, closedAt: iso(20) });
+  const first = ss.view(0);
+  assert.deepEqual([first.start, first.end, first.totals.build, first.totals.waiting], [T0, T0 + 20 * min, 10 * min, 10 * min]);
+  const now = ss.view(undefined, { now: T0 + 30 * min });
+  assert.deepEqual([now.start, now.totals.build, now.totals.review, now.totals.waiting], [T0 + 20 * min, 0, 5 * min, 0]);
+  assert.equal(ss.view(0), first, "an earlier session's view is kept until one of its events changes");
+  assert.equal(ss.of("a"), 0);
+  assert.equal(ss.of("b"), 1);
+  assert.equal(earlierWords({ n: 1, start: iso(0), end: iso(20), totals: first.totals }).replace(/, .* to .*:/, ":"), "session 1: building 10 min.");
+  assert.deepEqual([workWords({ build: 0, other: 300 }), workWords({}), workWords(first.totals)], ["under a second of work", "nothing run", "building 10 min"]);
 });
 
 test("a room with thousands of events: each one taken in on its own, and the view stays quick", () => {

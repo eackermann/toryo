@@ -3,7 +3,7 @@ import { noteIntent } from "./intent.js";
 import { limitMeters } from "./meters.js";
 import { stripStatus } from "./status.js";
 import { markAnimation, phases, rethemeSparklers, ringFor, ringParts, wakeSparklers, workKind } from "./rings.js";
-import { LANES, Timeline, durationWords, phaseList, sessionWords } from "./phases.js";
+import { LANES, Sessions, durationWords, phaseList, sessionWords, workWords } from "./phases.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -411,8 +411,9 @@ async function loadRoom(id, { keepScroll = false, open = false } = {}) {
     S.view = v;
     if (switching) restoreDraft(v.room);
     S.live = new Map(v.live.map((l) => [l.turnId, l]));
-    S.timeline = new Timeline();
+    S.timeline = new Sessions();
     for (const ev of v.events) S.timeline.add(ev);
+    if (switching) S.shownSession = null;
     if (S.page === "room" && location.hash !== `#/r/${id}`) history.replaceState(null, "", `#/r/${id}`);
     renderTop();
     renderRooms();
@@ -795,6 +796,35 @@ function foldEl(rounds, key) {
   return box;
 }
 
+/** An earlier session, folded into one line: its number, dates and phase totals; it opens to show it. */
+function sessionFoldEl(k, part) {
+  const v = S.timeline.view(k);
+  const iso = (ms) => new Date(ms).toISOString();
+  const turns = part.filter((e) => e.type === "turn" && !e.imported).length;
+  const key = `session:${k}`;
+  return el(`<details class="rounds sessionfold" data-fold="${key}" data-session="${k}" ${S.openFolds.has(key) ? "open" : ""}><summary>${ic("dots")}<b>Session ${S.timeline.list[k].n}</b><span class="muted">${[`${whenText(iso(v.start))} to ${whenText(iso(v.end))}`, workWords(v.totals), `${turns} turn${turns === 1 ? "" : "s"}`].map(esc).join(" · ")}</span>${ic("chev", "i chev")}</summary><div class="inner"></div></details>`);
+}
+
+/** Where a new session began: who starts fresh, who keeps their memory, and what ended with the one before. */
+function sessionMarkEl(ev) {
+  const and = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0] ?? "");
+  const fresh = (ev.fresh ?? []).map(name);
+  const kept = (ev.kept ?? []).filter((a) => a !== "codexapp").map(name);
+  const bits = [
+    fresh.length ? `${and(fresh)} start${fresh.length === 1 ? "s" : ""} fresh` : "",
+    kept.length ? `${and(kept)} keep${kept.length === 1 ? "s its" : " their"} memory` : "",
+    ev.kept?.includes("codexapp") ? "the Codex app keeps its thread" : "",
+    ev.closed?.length ? `${ev.closed.length} question${ev.closed.length === 1 ? "" : "s"} closed` : "",
+    ev.notSent?.length ? `${ev.notSent.length} note${ev.notSent.length === 1 ? "" : "s"} not sent` : "",
+  ].filter(Boolean);
+  return el(`<div class="slicemark sessionmark" data-id="${esc(ev.id)}"><span class="no" aria-hidden="true">${esc(ev.n)}</span><strong>Session ${esc(ev.n)} started</strong><span class="muted">${esc([whenText(ev.at), ...bits].join(" · "))}</span></div>`);
+}
+
+/** Opens every fold a message is in (a folded round, an earlier session), so it can be seen. */
+function openFoldsAround(node) {
+  for (let d = node?.closest("details"); d; d = d.parentElement?.closest("details")) d.open = true;
+}
+
 function renderTimeline(scroll = true) {
   const log = $("#log");
   rememberEditors();
@@ -816,8 +846,21 @@ function renderTimeline(scroll = true) {
         <button type="button" class="btn small" data-jump="${firstId}">Jump to the first new message</button><button type="button" class="iconbtn" data-dismiss title="Dismiss" aria-label="Dismiss">${ic("x")}</button></div>`),
     );
   }
+  // Earlier sessions fold, one line each, which opens to show it; the current session is drawn as usual.
+  const starts = events.flatMap((e, i) => (e.type === "session" ? [i] : []));
+  starts.forEach((to, k) => {
+    const part = events.slice(k ? starts[k - 1] : 0, to);
+    const fold = sessionFoldEl(k, part);
+    for (const ev of part) {
+      const node = renderEvent(ev);
+      if (node) $(".inner", fold).appendChild(node);
+      S.rendered.set(ev.id, JSON.stringify(ev));
+    }
+    log.appendChild(fold);
+  });
+  const current = starts.length ? events.slice(starts.at(-1)) : events;
   // In a build, each slice gets a marker, and its earlier rounds fold into one line.
-  const { slices, where } = r.mode === "build" ? sliceStructure(events) : { slices: [], where: new Map() };
+  const { slices, where } = r.mode === "build" ? sliceStructure(current) : { slices: [], where: new Map() };
   const foldOf = new Map();
   slices.forEach((sl, n) => {
     const rounds = foldedRounds(sl);
@@ -825,7 +868,7 @@ function renderTimeline(scroll = true) {
     for (const rd of rounds) for (const e of rd.events) foldOf.set(e.id, fold);
   });
   const marked = new Set();
-  for (const ev of events) {
+  for (const ev of current) {
     const at = where.get(ev.id);
     if (at && !marked.has(at.slice)) {
       marked.add(at.slice);
@@ -842,8 +885,7 @@ function renderTimeline(scroll = true) {
     const id = S.focusOn;
     requestAnimationFrame(() => {
       const card = $(`#log [data-id="${CSS.escape(id)}"]`);
-      const fold = card?.closest("details.rounds");
-      if (fold) fold.open = true;
+      openFoldsAround(card);
       const at = card?.getBoundingClientRect();
       const box = log.getBoundingClientRect();
       if (card) scrollLog(Math.max(0, log.scrollTop + at.top - box.top - (log.clientHeight - at.height) / 2));
@@ -864,7 +906,7 @@ function renderTimeline(scroll = true) {
 function upsertEvent(ev, { quiet = false } = {}) {
   const events = S.view.events;
   // The session's timeline takes it in (only what it says changes: no rescan); a refresh draws the strip once.
-  if (S.timeline && ["turn", "gate", "question", "owner", "mark", "system"].includes(ev.type)) {
+  if (S.timeline && ["turn", "gate", "question", "owner", "mark", "system", "session"].includes(ev.type)) {
     S.timeline.add(ev);
     if (!quiet) renderSession();
   }
@@ -889,7 +931,9 @@ function upsertEvent(ev, { quiet = false } = {}) {
   const turnMoved = ev.type === "turn" && (!before || before.state !== ev.state);
   const readyMoved = ev.type === "question" && ev.kind === "plan-ready" && before?.open !== ev.open;
   const planReady = events.some((e) => e.type === "question" && e.kind === "plan-ready" && e.open);
-  if ((room()?.mode === "build" && turnMoved) || readyMoved || (turnMoved && planReady)) {
+  // A new session (from here, another window, the terminal) folds the one before it, in any room.
+  const sessionStarted = ev.type === "session" && !before;
+  if (sessionStarted || (room()?.mode === "build" && turnMoved) || readyMoved || (turnMoved && planReady)) {
     const top = log.scrollTop;
     renderTimeline(false);
     requestAnimationFrame(() => scrollLog(stick ? undefined : top));
@@ -930,6 +974,8 @@ function renderEvent(ev) {
       return questionEl(ev);
     case "gate":
       return gateEl(ev);
+    case "session":
+      return sessionMarkEl(ev);
     default:
       return null;
   }
@@ -939,7 +985,7 @@ function ownerEl(ev) {
   const to = (ev.to ?? []).map(name);
   const label = { topic: "Planning topic", decisions: "Your decisions", answer: "Your answer", "change-request": "Change request" }[ev.kind] ?? "";
   // A note no agent has yet can still be changed or withdrawn, unless it answered a question (it stays as sent).
-  const queued = !ev.kind && !ev.answers?.length && !ev.cancelled && !ev.deliveredTo?.length && !Object.keys(ev.readBy ?? {}).length;
+  const queued = !ev.kind && !ev.answers?.length && !ev.cancelled && !ev.notSent?.length && !ev.deliveredTo?.length && !Object.keys(ev.readBy ?? {}).length;
   const node = el(`<div class="owner" data-id="${ev.id}" data-cancelled="${Boolean(ev.cancelled)}">
     <div class="to">${label ? `${label} · ` : ""}${!ev.kind && ev.intent ? `<span class="intent" data-intent="${esc(ev.intent)}">${ev.intent === "ask" ? "Ask" : "Tell"}</span> · ` : ""}You → <b>${esc(to.join(", "))}</b> · ${clock(ev.at)}${ev.delivery === "now" ? " · sent now" : ""}${ev.editedAt ? " · edited" : ""}${(ev.answers ?? []).map((a) => ` · answers “${esc(a.question.length > 80 ? `${a.question.slice(0, 80)}…` : a.question)}”`).join("")}</div>
     <div class="md">${renderMarkdown(ev.text)}</div>
@@ -1100,6 +1146,7 @@ function noteStates(ev) {
       if (replied) return `<a href="#" data-jump="${esc(replied)}">${esc(name(a))} replied</a>`;
       if (ev.readBy?.[a]) return `<span>${esc(name(a))} is reading it</span>`;
       if (ev.deliveredTo?.includes(a)) return `<span>delivered to ${esc(name(a))}</span>`;
+      if (ev.notSent?.includes(a)) return `<span>not sent to ${esc(name(a))}: a new session started</span>`;
       return `<span>waiting for ${esc(name(a))}'s ${working.has(a) ? "turn to end" : "next turn"}</span>`;
     })
     .join(" · ");
@@ -2140,6 +2187,9 @@ function roomSheet() {
     <div class="pair"><label class="field"><span class="lbl">Review rounds per slice before asking you</span><input type="number" name="maxRounds" min="1" max="20" value="${st.maxRounds}"></label>
       <label class="field"><span class="lbl">Nudges when a builder stops without a status</span><input type="number" name="maxNudges" min="0" max="10" value="${st.maxNudges}"></label></div>
     <label class="field"><span class="lbl">Longest turn before Toryo gives up (minutes)</span><input type="number" name="turnTimeoutMin" min="5" max="1440" value="${st.turnTimeoutMin ?? 240}"></label>
+    <div class="field"><span class="lbl">Session ${esc(r.session?.n ?? 1)}</span>
+      <p class="hint" style="margin:0">For new work in this room, such as the next sprint: this session ends and its history stays, folded. Nothing is deleted.</p>
+      <div><button class="btn" type="button" data-new-session>Start a new session…</button></div></div>
     <div style="display:flex;gap:8px;align-items:center"><button class="btn primary" type="submit">Save</button><button class="btn" type="button" data-close>Cancel</button><span class="sep" style="flex:1"></span><button class="btn danger" type="button" id="deleteRoom">Delete room</button></div>
     <p class="hint" style="margin:0">Deleting removes the room from Toryo. Its transcript stays on disk in ~/.toryo/rooms/${esc(r.id)}, and nothing in your repository changes.${r.status === "running" ? " The turn that's running now is stopped first." : ""}</p></form>`);
   $("#roomForm").addEventListener("submit", async (e) => {
@@ -2189,6 +2239,115 @@ function roomSheet() {
   );
 }
 
+// ------------------------------------------------------------------ a new session
+
+/** What keeps the room from starting a new session, in words (the desk says the same when it refuses). */
+function sessionBusy(r) {
+  const doing = { build: "building", review: "reviewing", plan: "planning", checks: "running", chat: "replying" };
+  const sum = S.state?.rooms.find((x) => x.id === r.id);
+  const out = (sum?.working ?? []).map((w) => (w.agent === "toryo" ? "The checks are running" : `${name(w.agent)} is ${doing[workKind(w.kind)]}`));
+  const queue = r.queue ?? [];
+  if (queue.length) {
+    const what = queue.map((q) => (q.agent === "toryo" ? "the checks" : `${name(q.agent)}'s ${{ build: "building turn", review: "review", plan: "planning turn", checks: "checks", chat: "reply" }[workKind(q.kind)]}`));
+    out.push(`${what.join(", ").replace(/^./, (c) => c.toUpperCase())} ${what.length > 1 ? "are" : "is"} queued`);
+  }
+  if (r.appTurn && !(sum?.working ?? []).some((w) => w.agent === "codexapp")) out.push("The Codex app still has this room's turn");
+  return out;
+}
+
+/**
+ * Start a new session in the room: what ends (its planning round or build, open questions, notes not sent yet), the
+ * agents' memory, and the first step, as the new-room form starts one. Refused while anything runs or is queued:
+ * the sheet says what, and offers to stop the room.
+ */
+function newSessionSheet() {
+  const r = room();
+  if (!r) return;
+  const n = r.session?.n ?? 1;
+  const sum = S.state?.rooms.find((x) => x.id === r.id);
+  const ends = [];
+  if (r.mode === "plan" && r.plan) ends.push(`the planning round on “${r.plan.topic}”`);
+  if (r.mode === "build" && r.build) ends.push(`the build${r.build.slice ? ` (${r.build.slice})` : ""}`);
+  const asks = sum?.questions?.length ?? 0;
+  if (asks) ends.push(`${asks} open question${asks === 1 ? "" : "s"}, which close`);
+  const unsent = S.view.events.filter((e) => e.type === "owner" && !e.kind && !e.cancelled && !e.notSent?.length && (e.to ?? []).some((a) => !(e.deliveredTo ?? []).includes(a) && !e.readBy?.[a])).length;
+  if (unsent) ends.push(`${unsent} note${unsent === 1 ? "" : "s"} the agents haven't had yet, which won't be sent`);
+  const members = r.crew.members;
+  const v = S.timeline?.view(undefined, {});
+  const totals = v ? `${durationWords(v.length)}: ${workWords(v.totals)}` : "";
+  openSheet(`${sheetHead("New session", `Start session ${n + 1}`)}
+  <form id="sessionForm" style="display:grid;gap:14px">
+    <p style="margin:0">For new work in this room, such as the next sprint. Session ${n} ends${ends.length ? `: ${esc(ends.join("; "))}` : ""}. It stays in the room, folded, with its totals${totals ? ` (${esc(totals)})` : ""}. The room's name, crew, settings, folder and ledger stay.</p>
+    <div class="ns-busy" role="alert" hidden><span></span> <button class="btn small" type="button" data-ns-stop>Stop the room</button></div>
+    <div class="field"><label class="opt"><input type="checkbox" id="nsKeep"> Keep the agents' memory of this room</label>
+      <span class="hint">Otherwise each agent starts fresh on its next turn, with Toryo's briefing.${members.includes("codexapp") ? " The Codex app keeps its thread either way: its memory is the thread." : ""}</span></div>
+    <div class="field"><span class="lbl">Then</span><div class="modecards ns-modes">
+      <button type="button" class="modecard" data-mode="none" aria-pressed="true">${ic("dots")}<b>Nothing yet</b><span>The room waits in chat.</span></button>
+      <button type="button" class="modecard" data-mode="chat" aria-pressed="false">${ic("chat")}<b>Chat</b><span>A first message for the crew.</span></button>
+      <button type="button" class="modecard" data-mode="plan" aria-pressed="false">${ic("plan")}<b>Plan</b><span>A planning round.</span></button>
+      <button type="button" class="modecard" data-mode="build" aria-pressed="false">${ic("build")}<b>Build</b><span>A task, or a plan's slices.</span></button>
+    </div></div>
+    <div data-for="chat" class="field" hidden><label for="nsText">First message</label><textarea id="nsText" rows="3"></textarea></div>
+    <div data-for="plan" class="field" hidden><label for="nsTopic">What should be planned?</label><textarea id="nsTopic" rows="3" placeholder="The next sprint: the goal, constraints, what's out of scope…"></textarea></div>
+    <div data-for="build" style="display:grid;gap:12px" hidden>
+      <div class="field"><label for="nsPlan">Plan file (optional)</label><input type="text" id="nsPlan" placeholder="docs/plans/my-plan.md" value="${esc(r.plan?.planPath ?? r.build?.planPath ?? "")}"></div>
+      <div class="field"><label for="nsTask">Task</label><textarea id="nsTask" rows="3" placeholder="What to build. With a plan file: “Work through the remaining slices.”"></textarea></div>
+      <div class="pair"><div class="field"><label for="nsBuilder">Builder</label><select id="nsBuilder">${agentOptions(members, r.crew.builder)}</select></div>
+      <div class="field"><label for="nsReviewer">Reviewer</label><select id="nsReviewer">${agentOptions(members, r.crew.reviewer)}</select></div></div>
+      ${handoffFields("ns")}
+    </div>
+    <div style="display:flex;gap:8px"><button class="btn primary" type="submit" id="nsGo">Start session ${n + 1}</button><button class="btn" type="button" data-close>Cancel</button></div>
+  </form>`);
+  const form = $("#sessionForm");
+  const busyBox = $(".ns-busy", form);
+  const showBusy = (text) => {
+    busyBox.hidden = !text;
+    $("span", busyBox).textContent = text ?? "";
+  };
+  const busy = sessionBusy(r);
+  if (busy.length) showBusy(`${busy.join(". ")}. Wait for ${busy.length > 1 ? "them" : "it"} to finish, or stop the room first.`);
+  const mode = () => $(".modecard[aria-pressed=true]", form)?.dataset.mode ?? "none";
+  form.addEventListener("click", async (e) => {
+    const card = e.target.closest(".modecard");
+    if (card) {
+      for (const c of $$(".modecard", form)) c.setAttribute("aria-pressed", String(c === card));
+      for (const d of $$("[data-for]", form)) d.hidden = d.dataset.for !== mode();
+    }
+    if (e.target.closest("[data-ns-stop]")) {
+      await api("POST", `/api/rooms/${r.id}/control`, { action: "stop" }).catch(fail);
+      showBusy("Stopped. Anything still finishing ends in a moment; then start the new session.");
+    }
+  });
+  wireHandoff("ns");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const go = $("#nsGo");
+    // One request, however many clicks: the desk refuses a second one for the same session too.
+    if (go.disabled) return;
+    const m = mode();
+    const then =
+      m === "chat"
+        ? { mode: m, text: $("#nsText").value, to: "everyone" }
+        : m === "plan"
+          ? { mode: m, topic: $("#nsTopic").value }
+          : m === "build"
+            ? { mode: m, planPath: $("#nsPlan").value, task: $("#nsTask").value, builder: $("#nsBuilder").value, reviewer: $("#nsReviewer").value, ...handoffBody("ns") }
+            : undefined;
+    if (then?.reviewFirst && !then.task.trim()) then.task = "After the review, carry on with the remaining work.";
+    go.disabled = true;
+    try {
+      await api("POST", `/api/rooms/${r.id}/control`, { action: "new-session", ends: n, keepMemory: $("#nsKeep").checked, then });
+      closeSheet();
+      toast(`Session ${n + 1} started`, `Session ${n} is folded in the room, with its totals.`);
+      S.shownSession = null;
+      await loadRoom(r.id, { keepScroll: false });
+    } catch (error) {
+      go.disabled = false;
+      showBusy(error.message);
+    }
+  });
+}
+
 // ------------------------------------------------------------------ the session's timeline
 
 const LANE_NAMES = { plan: "Planning", build: "Building", review: "Reviewing", checks: "Checks", other: "Other work" };
@@ -2202,10 +2361,17 @@ function renderSession() {
   const box = $("#sessionStrip");
   const r = room();
   if (!r || !S.timeline || S.page !== "room") return;
+  // The session going on, or an earlier one you chose to see (from the list); it ends where the next began.
+  const count = S.timeline.list.length;
+  const shown = S.shownSession != null && S.shownSession < count - 1 ? S.shownSession : null;
+  const cur = S.timeline.current;
   const live = [...S.live.values()].filter((l) => l.kind === "gates").map((l) => ({ id: l.turnId, kind: "gates", agent: "toryo", startedAt: l.startedAt }));
-  const v = S.timeline.view({ live, end: r.done && S.timeline.last != null ? S.timeline.last : null });
+  const v = shown != null ? S.timeline.view(shown) : S.timeline.view(undefined, { live, end: r.done && cur.last != null ? cur.last : null });
+  const n = S.timeline.list[shown ?? count - 1].n;
   S.session = v;
-  if (!v.segments.length) {
+  S.sessionShown = { i: shown ?? count - 1, n, earlier: shown != null };
+  // A room with one session shows the strip once something has run; with earlier sessions, always (they're there).
+  if (!v.segments.length && count < 2) {
     box.hidden = true;
     return;
   }
@@ -2214,15 +2380,18 @@ function renderSession() {
   const span = (a, b, min = 0) => `left:${x(a).toFixed(3)}%;width:${Math.max(min, x(b) - x(a)).toFixed(3)}%`;
   const lanes = LANES.filter((lane) => lane !== "other" || v.totals.other > 0);
   const list = phaseList(v.totals);
-  const words = `${list.filter((p) => LANES.includes(p.key)).map((p) => `${LANE_NAMES[p.key]} ${durationWords(p.ms)}`).join(" · ") || "Nothing run yet"} · ${durationWords(v.length)} in all`;
+  const words = `${count > 1 ? `Session ${n}${shown != null ? " (earlier)" : ""} · ` : ""}${list.filter((p) => LANES.includes(p.key)).map((p) => `${LANE_NAMES[p.key]} ${durationWords(p.ms)}`).join(" · ") || (LANES.some((l) => v.totals[l] > 0) ? "Under a second of work" : "Nothing run yet")} · ${durationWords(v.length)} in all`;
   const worked = LANES.reduce((n, l) => n + v.totals[l], 0) || 1;
   // Built once, then changed in place, each part only when it changed: the words keep the focus while news comes in.
   if (!box.firstElementChild) {
     box.innerHTML = `<div class="ss-track" role="img"></div><div class="ss-bar" aria-hidden="true"></div>
-      <button type="button" class="ss-words" data-session-list title="The session, phase by phase"></button>`;
+      <div class="ss-side"><button type="button" class="ss-words" data-session-list title="The session, phase by phase"></button><button type="button" class="linkbtn ss-back" data-show-session="now" hidden></button></div>`;
   }
+  const back = $(".ss-back", box);
+  back.hidden = shown == null;
+  back.textContent = `Back to session ${S.timeline.n}`;
   const track = $(".ss-track", box);
-  track.setAttribute("aria-label", sessionWords(v));
+  track.setAttribute("aria-label", sessionWords(v, shown != null ? `Session ${n}` : "This session"));
   setHtml(track, `${v.waiting.map(([a, b]) => `<i class="ss-shade" data-k="waiting" style="${span(a, b)}"></i>`).join("")}
       ${[...v.paused, ...v.held].map(([a, b]) => `<i class="ss-shade" data-k="paused" style="${span(a, b)}"></i>`).join("")}
       ${lanes
@@ -2285,8 +2454,20 @@ function sessionSheet() {
   const v = S.session;
   if (!v) return;
   const list = phaseList(v.totals);
-  openSheet(`${sheetHead("This session", durationWords(v.length))}
-    <p>${esc(sessionWords(v))}${v.overlap ? " Phases can overlap (a reply while building, say), so the totals can add up to more than the session." : ""}</p>
+  const { i: at, n, earlier } = S.sessionShown ?? { i: 0, n: 1, earlier: false };
+  const iso = (ms) => new Date(ms).toISOString();
+  // Every session of the room, each one shown on the strip on request.
+  const sessions = S.timeline.list.length > 1
+    ? `<h3 class="eyebrow">Sessions</h3><ul class="ss-list">${S.timeline.list
+        .map((x, k) => {
+          const w = S.timeline.view(k === S.timeline.list.length - 1 ? undefined : k);
+          const label = `Session ${x.n}: ${whenText(iso(w.start))}${k === S.timeline.list.length - 1 ? ", now" : ` to ${whenText(iso(w.end))}`}, ${durationWords(w.length)}`;
+          return `<li>${k === at ? `<b>${esc(label)}</b> (on the strip)` : `<button type="button" class="linkbtn" data-show-session="${k === S.timeline.list.length - 1 ? "now" : k}">${esc(label)}</button>`}</li>`;
+        })
+        .join("")}</ul>`
+    : "";
+  openSheet(`${sheetHead(earlier ? `Session ${n}, earlier` : S.timeline.list.length > 1 ? `Session ${n}` : "This session", durationWords(v.length))}
+    <p>${esc(sessionWords(v, earlier ? `Session ${n}` : "This session"))}${v.overlap ? " Phases can overlap (a reply while building, say), so the totals can add up to more than the session." : ""}</p>
     <ul class="ss-list">${list.map((p) => `<li><b>${esc(p.words[0].toUpperCase() + p.words.slice(1))}</b> ${esc(durationWords(p.ms))}</li>`).join("")}</ul>
     ${LANES.filter((lane) => v.segments.some((s) => s.lane === lane))
       .map((lane) => `<h3 class="eyebrow">${LANE_NAMES[lane]}</h3><ul class="ss-list">${v.segments
@@ -2294,7 +2475,8 @@ function sessionSheet() {
         .map((s) => `<li>${s.inRoom === false ? esc(segmentWords(s)) : `<a href="#" data-seg="${esc(s.id)}">${esc(segmentWords(s))}</a>`}</li>`)
         .join("")}</ul>`)
       .join("")}
-    ${v.breaks.length ? `<h3 class="eyebrow">Breaks</h3><ul class="ss-list">${v.breaks.map((b) => `<li>${esc(`${clock(new Date(b.from).toISOString())}–${clock(new Date(b.to).toISOString())}: ${durationWords(b.to - b.from)} ${b.why === "waiting" ? "waiting for you" : "with nothing running"}`)}</li>`).join("")}</ul>` : ""}`);
+    ${v.breaks.length ? `<h3 class="eyebrow">Breaks</h3><ul class="ss-list">${v.breaks.map((b) => `<li>${esc(`${clock(new Date(b.from).toISOString())}–${clock(new Date(b.to).toISOString())}: ${durationWords(b.to - b.from)} ${b.why === "waiting" ? "waiting for you" : "with nothing running"}`)}</li>`).join("")}</ul>` : ""}
+    ${sessions}`);
 }
 
 // ------------------------------------------------------------------ Home
@@ -3035,6 +3217,16 @@ document.addEventListener("click", async (e) => {
     }
     if (hit("#home button[data-act]")) return homeAct(hit("#home button[data-act]"));
     if (hit("[data-session-list]")) return sessionSheet();
+    if (hit("[data-show-session]")) {
+      // The strip shows an earlier session, or the current one again.
+      const k = hit("[data-show-session]").dataset.showSession;
+      S.shownSession = k === "now" ? null : Number(k);
+      if (!$("#sheet").hidden) closeSheet();
+      renderSession();
+      $("#sessionStrip .ss-words")?.focus();
+      return;
+    }
+    if (hit("[data-new-session]")) return newSessionSheet();
     if (hit("[data-seg]")) {
       // A piece of the session: its turn (or checks) in the room's timeline.
       e.preventDefault();
@@ -3107,9 +3299,8 @@ document.addEventListener("click", async (e) => {
     if (hit("[data-room-settings]")) return roomSheet();
     if (hit("[data-jump]")) {
       const target = $(`[data-id="${CSS.escape(hit("[data-jump]").dataset.jump)}"]`);
-      // In a folded round: open it first.
-      const fold = target?.closest("details.rounds");
-      if (fold) fold.open = true;
+      // In a folded round or an earlier session: open it first.
+      openFoldsAround(target);
       target?.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
       if (matchMedia("(max-width: 1180px)").matches) setRoomTab("relay");
       return;

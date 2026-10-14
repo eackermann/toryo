@@ -12,7 +12,7 @@ import { UsageBook, groupOf, normalizeGroups, windowLabel } from "./usage.mjs";
 import { defaultDesk, holdAgents, holdKey, holdLabel, readDesk } from "./desk.mjs";
 import { evaluate as evaluateGuard, excepted, expire as expireGuard, guardWindow as parseGuardWindow, holdKeyOf, holdsFor, offerText, policyFor, setPolicy, when } from "./guard.mjs";
 import { noteIntent } from "../web/intent.js";
-import { Timeline } from "../web/phases.js";
+import { Sessions, workKind } from "../web/phases.js";
 import { firstLine, nowIso, shortId, slugify, truncate } from "./util.mjs";
 
 export const DEFAULT_SETTINGS = {
@@ -91,7 +91,7 @@ export class Engine extends EventEmitter {
     // approvals), kept up to date as events come in, and the desk's own journal (src/guard.mjs, deskControl).
     this.notable = new Map();
     this.deskJournal = [];
-    // Each room's session timeline (web/phases.js), kept event by event: how long it spent on each phase.
+    // Each room's sessions (web/phases.js), kept event by event: how long each spent on each phase.
     this.timelines = new Map();
     // While acting on a turn's outcome (#actOnOutcome): rooms whose saves wait for one save at the end, and the turn
     // whose outcome it is (questions asked then remember it, so acting on it again after a restart doesn't ask twice).
@@ -1524,6 +1524,58 @@ export class Engine extends EventEmitter {
     return { agents: [...members], why: "to everyone" };
   }
 
+  /**
+   * Start a new session in a room: the owner's "reset" for new work, without deleting anything. What was going on
+   * (a planning round, a build) ends, open questions close, notes the agents haven't had yet aren't sent, and the room
+   * waits in chat with nothing queued: no longer paused or stopped, and nothing runs until something is sent. Each
+   * agent starts fresh on its next turn unless `keepMemory`; the Codex app keeps its thread (its session). The name,
+   * crew, settings, folder and ledger stay. Refused while anything runs or is queued, naming it. `ends` is the
+   * session it ends, so a second click or another client is refused rather than starting two. `then`: a first step.
+   */
+  newSession(roomId, { ends, keepMemory = false, then } = {}) {
+    const room = this.#room(roomId);
+    const current = room.session?.n ?? 1;
+    if (ends == null || ends === "") throw new UserError(`Say which session this ends (ends: ${current}), so a second click can't start two.`);
+    if (Number(ends) !== current) throw new UserError(`Session ${ends} has already ended: this room is in session ${current} now. Nothing changed.`, 409);
+    const busy = this.#busyWith(room);
+    if (busy.length) throw new UserError(`${busy.join(". ")}. Wait for ${busy.length > 1 ? "them" : "it"} to finish, or stop the room first, then start the new session.`, 409);
+    const step = this.#firstStep(room, then);
+    const events = this.events.get(room.id);
+    const closed = events.filter((e) => e.type === "question" && e.open);
+    for (const q of closed) this.#patch(room, q, { open: false, answer: "(closed: a new session started)", closedAt: nowIso() });
+    room.waiting = null;
+    room.waitingQueue = [];
+    room.openChat = [];
+    // Notes an agent hasn't had yet belong to the session that ends: they aren't sent in the new one.
+    const unsent = [];
+    for (const o of this.#sessionEvents(room)) {
+      if (o.type !== "owner" || o.kind || o.cancelled) continue;
+      const missing = (o.to ?? []).filter((a) => !(o.deliveredTo ?? []).includes(a) && !o.readBy?.[a]);
+      if (missing.length) unsent.push(o), this.#patch(room, o, { notSent: missing });
+    }
+    this.#newFlow(room, { note: false });
+    room.queue = [];
+    room.mode = "chat";
+    room.build = null;
+    room.plan = null;
+    room.discuss = null;
+    room.done = false;
+    room.paused = false;
+    room.stopped = false;
+    const fresh = keepMemory ? [] : room.crew.members.filter(canStartFresh);
+    const kept = room.crew.members.filter((a) => !fresh.includes(a));
+    room.fresh = Object.fromEntries(fresh.map((a) => [a, "session"]));
+    const n = current + 1;
+    // Agents that keep their memory (the Codex app always: its session is its thread) are told once, on their next turn.
+    room.sessionNotice = Object.fromEntries(kept.map((a) => [a, n]));
+    const marker = this.#append(room, { type: "session", n, ends: current, fresh, kept, closed: closed.map((q) => q.id), notSent: unsent.map((o) => o.id) });
+    room.session = { n, eventId: marker.id, startedAt: marker.at };
+    this.#save(room);
+    if (step) return step();
+    this.#pump(room);
+    return this.summary(room);
+  }
+
   postMessage(roomId, { text, to = "auto", delivery = "next", discuss = 0, allowWrite = false, intent, answering }) {
     const room = this.#room(roomId);
     text = String(text ?? "").trim();
@@ -1956,6 +2008,8 @@ export class Engine extends EventEmitter {
         return this.startBuild(roomId, { task: args.task, planPath: args.planPath ?? room.plan?.planPath, builder: args.builder, reviewer: args.reviewer, reviewFirst: args.reviewFirst, handoff: args.handoff, slice: args.slice });
       case "start-plan":
         return this.startPlan(roomId, { topic: args.topic, participants: args.participants });
+      case "new-session":
+        return this.newSession(roomId, args);
       case "synthesize":
         return this.synthesize(roomId, args);
       case "plan-check": {
@@ -2339,6 +2393,9 @@ export class Engine extends EventEmitter {
     const rulesChanged = !fresh && !startFresh && (room.rulesSent ?? {})[req.agent] !== rules;
     if (rulesChanged) prompt += `${rulesUpdate(project, { inInstructions: usesSystemPrompt })}\n\n---\n\n`;
     if (startFresh) prompt += `${this.#freshBrief(room, req.agent, startFresh, new Set(ids))}\n\n---\n\n`;
+    // A new session, to an agent that keeps its memory of the earlier ones: said once.
+    const sessionNotice = !startFresh && !req.attach ? room.sessionNotice?.[req.agent] ?? null : null;
+    if (sessionNotice) prompt += `${prompts.newSession(sessionNotice)}\n\n---\n\n`;
     const backlog = catchUp(items);
     if (backlog) prompt += `${backlog}\n`;
     // The one-time briefing for a builder whose build started with a review of its earlier work.
@@ -2350,7 +2407,7 @@ export class Engine extends EventEmitter {
     prompt += req.instruction;
     // What this turn hands the agent. It counts as delivered only once the agent has started the turn, so a
     // launch that fails, or a restart before the agent began, sends the same messages and briefing again.
-    run.dispatch = req.attach?.dispatch ?? { flow: room.flow, ids, ownerIds, briefing, intro: fresh, fresh: startFresh || undefined, notes: notes.length ? notes : undefined, acks: building || undefined, rules, rulesBefore: (room.rulesSent ?? {})[req.agent] ?? null, rulesUpdate: rulesChanged || undefined };
+    run.dispatch = req.attach?.dispatch ?? { flow: room.flow, ids, ownerIds, briefing, intro: fresh, fresh: startFresh || undefined, sessionNotice: sessionNotice ?? undefined, notes: notes.length ? notes : undefined, acks: building || undefined, rules, rulesBefore: (room.rulesSent ?? {})[req.agent] ?? null, rulesUpdate: rulesChanged || undefined };
 
     const round = room.mode === "build" ? (room.build?.round ?? 0) + 1 : undefined;
     // Following a Codex app turn again (after a restart): when the app was given it, and when it took it up, are
@@ -2593,6 +2650,7 @@ export class Engine extends EventEmitter {
     if (d.intro) (room.introduced ??= {})[agent] = room.sessions[agent] ?? true;
     if (d.briefing && room.build && d.flow === room.flow) room.build.briefed = true;
     if (d.fresh && room.fresh?.[agent] === d.fresh) delete room.fresh[agent];
+    if (d.sessionNotice && room.sessionNotice?.[agent] === d.sessionNotice) delete room.sessionNotice[agent];
     if (d.rules) (room.rulesSent ??= {})[agent] = d.rules;
     if (d.rulesUpdate) this.#system(room, `${this.label(agent)} has the updated house rules from this turn on.`);
   }
@@ -2618,6 +2676,7 @@ export class Engine extends EventEmitter {
     if (d.intro && room.introduced) delete room.introduced[agent];
     if (d.briefing && room.build && d.flow === room.flow) room.build.briefed = false;
     if (d.fresh) (room.fresh ??= {})[agent] = d.fresh;
+    if (d.sessionNotice) (room.sessionNotice ??= {})[agent] = d.sessionNotice;
     if (d.rules) {
       room.rulesSent ??= {};
       if (d.rulesBefore == null) delete room.rulesSent[agent];
@@ -2640,10 +2699,12 @@ export class Engine extends EventEmitter {
           ? "Toryo starts the reviewer fresh for each new slice, so each slice gets an independent review and the session stays small."
           : why === "ask-mode"
             ? "Your last chat here was read-only in Ask mode, which it would keep, and this turn changes files, so Toryo started you in a new chat."
-            : "The owner started you fresh in this room.",
+            : why === "session"
+              ? "The owner started a new session in this room: what came before it is finished, so you start fresh."
+              : "The owner started you fresh in this room.",
       "You don't remember earlier turns here. This is what you need; read the files it names for the rest.",
     ];
-    const events = this.events.get(room.id);
+    const events = this.#sessionEvents(room);
     const latest = (test) => [...events].reverse().find((e) => e.type === "turn" && e.state === "done" && e.text?.trim() && test(e));
     const quote = (e, heading) => (e && !shown.has(e.id) ? `### ${heading}\n${stripStatus(e.text).trim()}\n\nIts status line: TORYO: ${e.status ?? "(none)"}${e.detail ? ` ${e.detail}` : ""}` : "");
     if (room.mode === "build" && room.build) {
@@ -2680,7 +2741,8 @@ export class Engine extends EventEmitter {
     const ledger = (room.ledger ??= []);
     const prefix = entry.kind === "decision" ? "D" : "L";
     const id = `${prefix}${ledger.filter((e) => (e.kind === "decision") === (prefix === "D")).length + 1}`;
-    ledger.push({ id, at: nowIso(), ...entry });
+    // The session and the build it came from: an approval only settles findings of its own build by itself.
+    ledger.push({ id, at: nowIso(), session: room.session?.n ?? 1, build: room.build?.startedAt, ...entry });
     return id;
   }
 
@@ -2699,8 +2761,11 @@ export class Engine extends EventEmitter {
       }
     if (status === "APPROVED") {
       const round = b.round + 1;
+      // The approval settles the changes asked for this slice in this build. A finding from an earlier session or
+      // build, with the same slice name, is only settled by a review that says so (Resolved: L<n>).
+      const ours = (f) => (f.session ?? 1) === (room.session?.n ?? 1) && (f.build == null || f.build === b.startedAt);
       for (const f of room.ledger ?? [])
-        if (f.kind === "changes" && f.state === "open" && f.slice === b.slice) Object.assign(f, { state: "resolved", resolution: `${b.slice || "the slice"} approved in round ${round}`, resolvedAt: nowIso() });
+        if (f.kind === "changes" && f.state === "open" && f.slice === b.slice && ours(f)) Object.assign(f, { state: "resolved", resolution: `${b.slice || "the slice"} approved in round ${round}`, resolvedAt: nowIso() });
       for (const m of text.matchAll(/^\s*(?:[-*]\s*)?\**Open\**\s*:\s*(.+)$/gim))
         this.#ledgerAdd(room, { kind: "open", slice: b.slice, round, by: req.agent, text: truncate(m[1].trim(), 1_000), state: "open", turnId: ev.id });
     } else if (status === "CHANGES" || !status) {
@@ -2715,7 +2780,8 @@ export class Engine extends EventEmitter {
     const decisions = ledger.filter((e) => e.kind === "decision").slice(-20);
     if (!open.length && !decisions.length) return "";
     const lines = ["### The ledger: open findings and the owner's decisions", "From earlier reviews in this room, which you don't remember. Check whether the open findings still apply."];
-    for (const f of open) lines.push(`- ${f.id} (${f.slice || "no slice"}, ${f.kind === "open" ? "left open on approval" : `round ${f.round} changes`}, ${this.label(f.by)}): ${truncate(f.text, 1_200)}`);
+    const now = room.session?.n ?? 1;
+    for (const f of open) lines.push(`- ${f.id} (${f.slice || "no slice"}${(f.session ?? 1) !== now ? `, session ${f.session ?? 1}` : ""}, ${f.kind === "open" ? "left open on approval" : `round ${f.round} changes`}, ${this.label(f.by)}): ${truncate(f.text, 1_200)}`);
     if (decisions.length) {
       lines.push("", "The owner's decisions:");
       for (const d of decisions) lines.push(`- ${d.id} (${d.slice || "no slice"}${d.from ? `, ${this.label(d.from)} asked` : ""}): ${truncate(d.question, 400)} → ${truncate(d.answer, 600)}`);
@@ -2731,7 +2797,10 @@ export class Engine extends EventEmitter {
   }
 
   #catchUpItems(room, agent, hideKinds, focus, { own = false } = {}) {
-    const events = this.events.get(room.id);
+    // Only this session's: what came before a new session is finished.
+    const events = this.#sessionEvents(room);
+    // Except a message from an earlier session you asked about (a second opinion on it): that one goes along.
+    const asked = focus && !events.some((e) => e.id === focus) ? this.events.get(room.id).find((e) => e.id === focus && e.type === "turn" && e.text?.trim()) : null;
     const seen = new Set(room.seen[agent] ?? []);
     const items = [];
     const ids = [];
@@ -2741,6 +2810,7 @@ export class Engine extends EventEmitter {
     const members = room.crew.members;
     // A discussion the owner forwarded to this agent as a change request: it reads it there, not twice.
     const forwarded = new Set(events.filter((e) => e.type === "owner" && e.kind === "change-request" && (e.to ?? []).includes(agent)).flatMap((e) => (e.forwarded ?? []).map((f) => f.id)));
+    if (asked) items.push({ heading: `${this.label(asked.agent)}${asked.role ? ` (${asked.role})` : ""}, from an earlier session in this room ← the message you were asked about`, body: asked.text });
     for (const ev of events) {
       if (seen.has(ev.id)) continue;
       if (forwarded.has(ev.id)) {
@@ -2938,7 +3008,8 @@ export class Engine extends EventEmitter {
 
   /** Mark notes this agent has read as answered by this turn. */
   #markReplies(room, agent, turnId) {
-    for (const o of this.events.get(room.id))
+    // This session's notes only: one read by a turn that never answered, before a new session, wasn't answered later.
+    for (const o of this.#sessionEvents(room))
       if (o.type === "owner" && o.readBy?.[agent] && !o.repliedBy?.[agent]) this.#patch(room, o, { repliedBy: { ...o.repliedBy, [agent]: turnId } });
   }
 
@@ -3454,7 +3525,7 @@ export class Engine extends EventEmitter {
    */
   #markPause(room) {
     const paused = Boolean(room.paused || room.stopped);
-    const was = this.#timelineOf(room).pausedNow();
+    const was = this.#timelineOf(room).current.pausedNow();
     if (paused && !was) this.#mark(room, room.stopped ? "stopped" : "paused");
     else if (!paused && was) this.#mark(room, "resumed");
   }
@@ -3468,18 +3539,73 @@ export class Engine extends EventEmitter {
 
   #timelineOf(room) {
     let t = this.timelines.get(room.id);
-    if (!t) this.timelines.set(room.id, (t = new Timeline()));
+    if (!t) this.timelines.set(room.id, (t = new Sessions()));
     return t;
   }
 
-  /** The room's session so far: when it began, how long it has lasted, and each phase's total (see web/phases.js). */
+  /**
+   * The room's session so far: its number, when it began, how long it has lasted, and each phase's total (see
+   * web/phases.js); and each earlier session's, which don't change.
+   */
   #session(room) {
     const live = this.#runningIn(room)
       .filter((r) => r.req.kind === "gates")
       .map((r) => ({ id: r.turnId, kind: "gates", agent: "toryo", startedAt: r.startedAt }));
     const t = this.#timelineOf(room);
-    const v = t.view({ now: this.now(), live, end: room.done && t.last != null ? t.last : null });
-    return { start: new Date(v.start).toISOString(), length: v.length, totals: v.totals, overlap: v.overlap };
+    const cur = t.current;
+    const v = t.view(undefined, { now: this.now(), live, end: room.done && cur.last != null ? cur.last : null });
+    const iso = (ms) => new Date(ms).toISOString();
+    const earlier = t.list.slice(0, -1).map((x, i) => {
+      const e = t.view(i);
+      return { n: x.n, start: iso(e.start), end: iso(e.end), length: e.length, totals: e.totals };
+    });
+    return { n: room.session?.n ?? t.n, start: iso(v.start), length: v.length, totals: v.totals, overlap: v.overlap, earlier };
+  }
+
+  /** The events of the room's current session (all of them in a room that has had one session). */
+  #sessionEvents(room) {
+    const events = this.events.get(room.id);
+    const from = room.session?.eventId ? events.findIndex((e) => e.id === room.session.eventId) : -1;
+    return from > 0 ? events.slice(from) : events;
+  }
+
+  /** What keeps a room busy, in words: turns and checks running, work queued, a Codex app turn it still keeps. */
+  #busyWith(room) {
+    const doing = { build: "building", review: "reviewing", plan: "planning", checks: "running", chat: "replying" };
+    const running = this.#runningIn(room);
+    const out = running.map((r) => (r.agent === "toryo" ? "The checks are running" : `${this.label(r.agent)} is ${doing[workKind(r.req.kind)]}`));
+    if (room.queue.length) {
+      const what = room.queue.map((q) => (q.agent === "toryo" ? "the checks" : `${this.label(q.agent)}'s ${{ build: "building turn", review: "review", plan: "planning turn", checks: "checks", chat: "reply" }[workKind(q.kind)]}`));
+      out.push(`${what.join(", ").replace(/^./, (c) => c.toUpperCase())} ${what.length > 1 ? "are" : "is"} queued`);
+    }
+    if (room.appTurn && !running.some((r) => r.agent === "codexapp")) out.push("The Codex app still has this room's turn");
+    return out;
+  }
+
+  /**
+   * The first step of a new session (`then`), checked before anything changes: a message (chat), a planning topic
+   * (plan) or a build task (build), as the new-room form starts them. Nothing (or mode "none"): the room just waits.
+   */
+  #firstStep(room, then) {
+    if (!then?.mode || then.mode === "none") return null;
+    if (then.mode === "chat") {
+      const text = String(then.text ?? "").trim();
+      if (!text) throw new UserError("Write the first message, or start the session without one.");
+      if (!this.route(room, text, then.to ?? "everyone").agents.length) throw new UserError("Nobody in this room matches that recipient.");
+      return () => this.postMessage(room.id, { text, to: then.to ?? "everyone", answering: false, intent: then.intent, discuss: then.discuss ?? 0 });
+    }
+    if (then.mode === "plan") {
+      if (!String(then.topic ?? "").trim()) throw new UserError("Say what you want to plan.");
+      return () => this.startPlan(room.id, { topic: then.topic, participants: then.participants });
+    }
+    if (then.mode === "build") {
+      if (!String(then.task ?? "").trim() && !String(then.planPath ?? "").trim()) throw new UserError("Give a task or a plan file.");
+      // A build that starts by reviewing work already handed over needs the handoff now, before anything changes.
+      const builder = then.builder && room.crew.members.includes(then.builder) ? then.builder : room.crew.builder;
+      const handoff = then.reviewFirst ? this.#handoffFor(this.project(room.projectId), builder, then.handoff, room.sessions.codexapp) : undefined;
+      return () => this.startBuild(room.id, { task: then.task, planPath: then.planPath, builder: then.builder, reviewer: then.reviewer, reviewFirst: then.reviewFirst, handoff, slice: then.slice });
+    }
+    throw new UserError("The first step is a message (chat), a planning topic (plan) or a build task (build).");
   }
 
   #system(room, text, { forAgents = false, level = "info" } = {}) {

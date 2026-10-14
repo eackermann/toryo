@@ -145,6 +145,10 @@ try {
   await until(async () => (await status(checked.id)).working?.[0]?.kind === "gates", "the slow checks");
   await until(async () => (await status(failing.id)).questions?.some((q) => q.kind === "error"), "the failed turn");
   await until(async () => (await status(tiny.id)).status === "done", "the finished build");
+  // A room in its second session: the first folds in its transcript, and its strip starts again.
+  const sprint = await room({ projectId: "demo", task: "Tiny build", title: "Sprint room" });
+  await until(async () => (await status(sprint.id)).status === "done", "the sprint room's first session");
+  await post(`api/rooms/${sprint.id}/control`, { action: "new-session", ends: 1 });
   await until(async () => (await Promise.all(busy.map((b) => status(b.id)))).every((r) => r.running.length), "the busy rooms");
   // Held: Claude is held, and the room's builder is Claude.
   await post("api/desk", { action: "hold", target: "claude" });
@@ -233,7 +237,8 @@ try {
     if (tab) await page.click(width > 1180 ? `[data-sidetab=${tab}]` : `[data-roomtab=${tab}]`);
     if (sheet) {
       if (width <= 760 && sheet === "#newRoomBtn") await page.click("#tabbar [data-view=rooms]");
-      await page.click(sheet);
+      // One button, or several in turn (a sheet opened from another).
+      for (const button of [].concat(sheet)) await page.click(button);
       await page.waitForSelector("#sheet:not([hidden])");
     }
     await page.waitForTimeout(400);
@@ -324,6 +329,8 @@ try {
   for (const [width, theme] of [[1440, "light"], [1440, "dark"], [390, "light"], [320, "dark"]]) {
     await shoot({ width, height: width > 400 ? 900 : 700, theme, room: build.id, sheet: "#newRoomBtn", file: `sheet-new-room-${width}-${theme}` });
     await shoot({ width, height: width > 400 ? 900 : 700, theme, room: build.id, sheet: "#settingsBtn", file: `sheet-settings-${width}-${theme}` });
+    await shoot({ width, height: width > 400 ? 900 : 700, theme, room: sprint.id, sheet: ["#roomBtn", "[data-new-session]"], file: `sheet-new-session-${width}-${theme}` });
+    await shoot({ width, height: width > 400 ? 900 : 700, theme, room: sprint.id, file: `sprint-${width}-${theme}` });
   }
   await shoot({ width: 1440, theme: "light", motion: "reduce", pane: "home", file: "home-1440-reduced-motion" });
   for (const width of [320, 390]) {

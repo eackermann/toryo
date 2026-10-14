@@ -501,6 +501,12 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .ss-bar { display: none; height: 8px; border-radius: 4px; overflow: hidden; background: color-mix(in srgb, var(--ink) 6%, transparent); }
 .ss-bar i { display: block; height: 100%; float: left; }
 .ss-list { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 4px; }
+.ss-side { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; justify-content: flex-end; min-width: 0; }
+.ss-back { font-size: 12.5px; }
+.sessionmark .no { background: var(--surface); border: 1.5px solid var(--line-strong); }
+.sessionfold > summary b { font-family: var(--f-display); }
+.ns-modes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ns-busy { padding: 10px 12px; border-radius: var(--r-card); background: var(--you-soft); color: var(--you-ink); font-size: 13.5px; }
 
 /* ---------- Home: every room at a glance (the prototype's Home, read-only until its buttons come) ---------- */
 .homeview { overflow: auto; height: 100%; min-height: 0; }
@@ -660,6 +666,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   .ss-track { display: none; }
   .ss-bar { display: block; }
   .ss-words { text-align: left; min-height: 44px; }
+  .ss-side { justify-content: flex-start; }
+  .ss-back { min-height: 44px; }
   /* Home, on a phone: one column, cards that wrap, tap-sized links. */
   .home { padding: 14px 14px 32px; gap: 14px; }
   .home .hero { padding: 18px 16px; }

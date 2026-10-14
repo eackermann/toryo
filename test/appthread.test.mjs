@@ -91,6 +91,34 @@ test("each room keeps its own Codex app thread; a new default only affects new r
   }
 });
 
+test("a new session keeps a room's Codex app thread: the app isn't started fresh, and it's told once", async () => {
+  const t = await setup([]);
+  const app = fakeApp(t.base);
+  const engine = new Engine({ store: new Store(t.home), snapshots: new Snapshots(t.home), notifier: { send() {} }, adapters: { ...ADAPTERS, codexapp: { ...ADAPTERS.codexapp, detect: async () => ({ installed: true }) } } });
+  try {
+    await engine.init({ detect: false });
+    engine.updateConfig({ agents: { codexapp: { ...app.cfg, thread: T.a } } });
+    const replies = (id) => turns(engine, id).filter((x) => x.state === "done").length;
+    const room = engine.createRoom({ projectId: "repo", mode: "chat", members: ["codexapp"], text: "First sprint.", to: "codexapp" });
+    await waitFor(() => replies(room.id) === 1, { label: "a reply" });
+    engine.newSession(room.id, { ends: 1 });
+    const marker = engine.roomView(room.id).events.find((x) => x.type === "session");
+    assert.deepEqual([marker.fresh, marker.kept, engine.rooms.get(room.id).sessions.codexapp], [[], ["codexapp"], T.a]);
+    for (const text of ["Next sprint.", "And again."]) {
+      engine.postMessage(room.id, { text, to: "codexapp", answering: false });
+      await waitFor(() => replies(room.id) === (text === "Next sprint." ? 2 : 3), { label: text });
+    }
+    assert.deepEqual(app.queued(), [T.a, T.a, T.a], "the same thread throughout");
+    const [, second, third] = turns(engine, room.id).map((x) => engine.turnPrompt(room.id, x.id));
+    assert.match(second, /## A new session\nThe owner started a new session in this room \(session 2\)\./);
+    assert.doesNotMatch(second, /First sprint/);
+    assert.doesNotMatch(third, /## A new session/, "said once");
+  } finally {
+    engine.shutdown();
+    t.cleanup();
+  }
+});
+
 test("a stop while a Codex app turn is being prepared sends nothing to the app", async () => {
   const t = await setup([]);
   try {

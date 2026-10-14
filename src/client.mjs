@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { toryoHome, truncate } from "./util.mjs";
 import { stripStatus } from "./protocol.mjs";
-import { durationWords, sessionWords } from "../web/phases.js";
+import { durationWords, earlierWords, sessionWords } from "../web/phases.js";
 
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor", grok: "Grok", codexapp: "Codex app" };
 const name = (a) => NAMES[a] ?? a;
@@ -119,14 +119,17 @@ export class ToryoClient {
     const view = await this.call("GET", `/api/rooms/${summary.id}`);
     const r = view.room;
     const lines = [`${r.title} · ${r.mode} · ${r.status} (id ${r.id})`];
-    if (summary.session) lines.push(sessionWords(summary.session));
+    if (summary.session) {
+      lines.push(`${summary.session.n > 1 ? `Session ${summary.session.n}. ` : ""}${sessionWords(summary.session)}`);
+      for (const e of summary.session.earlier ?? []) lines.push(`Earlier, ${earlierWords(e)}`);
+    }
     if (r.mode === "build" && r.build)
       lines.push(`Builder ${name(r.crew.builder)}, reviewer ${name(r.crew.reviewer)}. Plan: ${r.build.planPath || "none"}. Current: ${r.build.slice || "-"}, round ${r.build.round}. Approved: ${r.build.approved.join(", ") || "none yet"}.`);
     if (r.mode === "plan" && r.plan) lines.push(`Planning “${r.plan.topic}”, phase: ${r.plan.phase}. Plan file: ${r.plan.planPath}.`);
     for (const q of view.questions ?? [r.waiting, ...(r.waitingQueue ?? [])].filter(Boolean)) lines.push(`WAITING FOR YOU: ${asked(q)}`);
     for (const l of view.live) lines.push(`Working now: ${name(l.agent)} (${l.kind}), last: ${l.activity.at(-1)?.text ?? "starting"}`);
     lines.push("", "Recent:");
-    const events = view.events.filter((e) => ["turn", "owner", "question", "gate"].includes(e.type) || (e.type === "system" && /approved|complete|agree|ended|failed|Stopped/i.test(e.text)));
+    const events = view.events.filter((e) => ["turn", "owner", "question", "gate", "session"].includes(e.type) || (e.type === "system" && /approved|complete|agree|ended|failed|Stopped/i.test(e.text)));
     for (const e of events.slice(-last)) {
       if (e.type === "turn") {
         const body = stripStatus(e.text ?? "").trim();
@@ -135,6 +138,7 @@ export class ToryoClient {
       } else if (e.type === "owner") lines.push(`— You → ${(e.to ?? []).map(name).join(", ")}: ${truncate(e.text, 400)}`);
       else if (e.type === "question") lines.push(`— Question${e.open ? " (open)" : ""}: ${e.question}${e.answer ? ` → ${e.answer}` : ""}`);
       else if (e.type === "gate") lines.push(`— Checks: ${e.results.map((x) => `${x.name} ${x.ok ? "passed" : "FAILED"}`).join(", ")}`);
+      else if (e.type === "session") lines.push(`— Session ${e.n} started.`);
       else lines.push(`— ${e.text}`);
     }
     return lines.join("\n");
@@ -264,6 +268,20 @@ export class ToryoClient {
     } catch (error) {
       throw /^Unknown desk action|^Not found|Unknown route/i.test(error.message) ? new Error(OLD_DESK) : error;
     }
+  }
+
+  /**
+   * Start a new session in a room (`toryo session new`, `toryo_session_new`), ending the one it's in now: refused
+   * while anything runs there, as on the page. `mode` and `text`: a first step, as `start` takes them.
+   */
+  async newSession(ref, { keepMemory = false, mode, text, planPath, builder, reviewer } = {}) {
+    const r = await this.resolveRoom(ref);
+    const n = r.session?.n ?? 1;
+    if (mode && !["chat", "plan", "build"].includes(mode)) throw new Error("The first step is chat, plan or build.");
+    const then = !mode ? undefined : mode === "chat" ? { mode, text, to: "everyone" } : mode === "plan" ? { mode, topic: text } : { mode, task: text, planPath, builder, reviewer };
+    await this.call("POST", `/api/rooms/${r.id}/control`, { action: "new-session", ends: n, keepMemory, then });
+    const first = { chat: "your message went to the crew", plan: "a planning round started", build: "the build started" }[mode];
+    return `Session ${n + 1} started in “${r.title}”; session ${n} is kept in its history. ${keepMemory ? "The agents keep their memory." : "Each agent starts fresh on its next turn (the Codex app keeps its thread)."} ${first ? `Then ${first}.` : "Nothing runs until you send something."}`;
   }
 
   async control(ref, action) {

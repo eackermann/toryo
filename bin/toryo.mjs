@@ -59,6 +59,9 @@ From any terminal (or an agent) while Toryo runs
   toryo guard codex --window weekly --pause-until-reset      let Codex run until its weekly limit resets
   toryo guard codex --window weekly --release-expired-hold   release a hold whose limit has reset (auto-release off)
   toryo guard ok                hide the note about the usage guard
+  toryo session new [room] [--keep-memory] [chat|plan|build "text"] [--plan docs/plans/x.md]
+                                start a new session in a room (for the next sprint, say): the one it's in ends,
+                                its history stays, the agents start fresh unless --keep-memory; refused while work runs
   toryo start chat|plan|build "text" [--plan docs/plans/x.md] [--project name]
   toryo start build "text" --review-first [--builder codexapp] [--reviewer claude] [--handoff-file f.md] [--slice name]
                                 the builder already finished a round: the reviewer goes first
@@ -150,6 +153,17 @@ try {
           enabled: flag("off", false) ? false : flag("on", false) ? true : undefined,
         }),
       );
+      process.exit(0);
+    }
+    case "session": {
+      if (positional[1] !== "new") throw new Error('Usage: toryo session new [room] [--keep-memory] [chat|plan|build "text"]');
+      // The room is optional (or --room): a first word that's chat, plan or build is the first step.
+      const rest = positional.slice(2);
+      const modes = ["chat", "plan", "build"];
+      const ref = modes.includes(rest[0]) ? roomArg() : (rest.shift() ?? roomArg());
+      const mode = modes.includes(rest[0]) ? rest.shift() : undefined;
+      const str = (n) => (typeof flag(n, null) === "string" ? flag(n, null) : undefined);
+      console.log(await client.newSession(ref, { keepMemory: Boolean(flag("keep-memory", false)), mode, text: rest.join(" "), planPath: str("plan"), builder: str("builder"), reviewer: str("reviewer") }));
       process.exit(0);
     }
     case "start": {

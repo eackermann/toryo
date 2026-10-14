@@ -1,7 +1,7 @@
 // A session's timeline: when a room planned, built, reviewed and ran its checks, and how long each took, from its
 // events. Shared by the page, which draws it at the top of the room, and the desk, which says it in words (the room's
 // summary, `toryo show`, `toryo_room`). Kept event by event: an event that changes again replaces what it said, so
-// nothing is ever rescanned. Until rooms have sessions of their own, a room's session is its whole history.
+// nothing is ever rescanned. A room's sessions are split where the owner started a new one (a "session" event).
 
 /** What kind of work a request is: building, reviewing (plan checks too), planning, the checks, or a reply. */
 export function workKind(kind) {
@@ -179,6 +179,48 @@ export class Timeline {
   }
 }
 
+/**
+ * A room's sessions, a Timeline each: the first from the room's start, then one from each "session" event. An event
+ * belongs to the session it arrived in, also when it changes later. Earlier sessions end where the next began, and
+ * their views are kept until one of their events changes.
+ */
+export class Sessions {
+  constructor() {
+    this.list = [{ n: 1, id: null, at: null, timeline: new Timeline() }];
+    this.where = new Map();
+    this.views = new Map();
+  }
+
+  add(ev) {
+    if (ev.type === "session" && !this.where.has(ev.id)) this.list.push({ n: ev.n ?? this.list.length + 1, id: ev.id, at: at(ev.at), timeline: new Timeline() });
+    let i = this.where.get(ev.id);
+    if (i == null) this.where.set(ev.id, (i = this.list.length - 1));
+    this.list[i].timeline.add(ev);
+    this.views.delete(i);
+  }
+
+  /** The session going on now. */
+  get current() {
+    return this.list.at(-1).timeline;
+  }
+
+  get n() {
+    return this.list.at(-1).n;
+  }
+
+  /** Session `i` (0 for the first): the current one as `view` takes it, an earlier one up to where the next began. */
+  view(i = this.list.length - 1, opts = {}) {
+    if (i === this.list.length - 1) return this.list[i].timeline.view(opts);
+    if (!this.views.has(i)) this.views.set(i, this.list[i].timeline.view({ end: this.list[i + 1].at }));
+    return this.views.get(i);
+  }
+
+  /** Which session an event belongs to (0 for the first). */
+  of(id) {
+    return this.where.get(id) ?? this.list.length - 1;
+  }
+}
+
 /** Intervals ([from, to] pairs, or { from, to }) merged where they touch. */
 function union(items) {
   const xs = items
@@ -219,10 +261,23 @@ export function phaseList(totals) {
   return ["build", "review", "checks", "plan", "other", "waiting", "paused"].filter((k) => totals?.[k] >= 500).map((k) => ({ key: k, words: WORDS[k], ms: totals[k] }));
 }
 
+/** The work in a session's totals, in words: "building 3 h 10, reviewing 1 h 05", "under a second of work", "nothing run". */
+export function workWords(totals) {
+  const list = phaseList(totals).filter((p) => LANES.includes(p.key));
+  if (list.length) return list.map((p) => `${p.words} ${durationWords(p.ms)}`).join(", ");
+  return LANES.some((lane) => totals?.[lane] > 0) ? "under a second of work" : "nothing run";
+}
+
+/** An earlier session in a sentence: "session 1, 13 Oct 09:00 to 14 Oct 18:30: building 3 h 10, reviewing 1 h 05." */
+export function earlierWords(e) {
+  const when = (iso) => new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  return `session ${e.n}, ${when(e.start)} to ${when(e.end)}: ${workWords(e.totals)}.`;
+}
+
 /** The session in a sentence: "This session, 5 h 20: building 3 h 10, reviewing 1 h 05, checks 22 min, waiting for you 1 h 30." */
-export function sessionWords(v) {
+export function sessionWords(v, label = "This session") {
   if (!v) return "";
   const list = phaseList(v.totals);
   const any = LANES.some((lane) => v.totals?.[lane] > 0);
-  return `This session, ${durationWords(v.length)}${list.length ? `: ${list.map((p) => `${p.words} ${durationWords(p.ms)}`).join(", ")}` : any ? ", under a second of work so far" : ", nothing run yet"}.`;
+  return `${label}, ${durationWords(v.length)}${list.length ? `: ${list.map((p) => `${p.words} ${durationWords(p.ms)}`).join(", ")}` : any ? ", under a second of work so far" : ", nothing run yet"}.`;
 }

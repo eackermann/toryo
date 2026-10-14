@@ -239,6 +239,8 @@ The owner wants your independent view on ${author}'s message above. Check it aga
 End with: TORYO: OPINION`,
 
   interrupted: () => `The owner interrupted your previous turn with the note above. Take it into account and continue with your task. End with the status line your task requires.`,
+  newSession: (n) =>
+    `## A new session\nThe owner started a new session in this room (session ${n}). What came before it is finished: its questions are closed, and nothing from it is pending. You keep your memory of it; start from what follows.`,
 
   /** The builder's turn for notes the owner sent while it worked: it acts on them, then the relay carries on. */
   buildNotes: ({ status, detail, next }) => {
