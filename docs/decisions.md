@@ -221,3 +221,16 @@ The owner decided:
 Why: it's the design the owner chose for Toryo.
 
 The order: when the plan changed, safe question targeting (now Slice 5) was already built and in its last review round, so it finishes that review first. The owner confirmed it: once Slice 5 is approved, Slice 4 is built next, then Slice 6 onwards.
+
+## 2026-10-13: A timeline of each session's phases, and new sessions in a room
+
+The owner asked for:
+- **A session timeline** in the sticky bar at the top of the room, showing how long each phase of the current session took: build, review, test (the project's checks) and plan.
+- **New sessions.** A room is usually one session, but the owner wants to be able to reset a room or restart its session, for example to plan the next sprint of work.
+
+Why: to see at a glance where a session's time went, and to start new work in a room that already has a history.
+
+The owner left it to the builder to work this into the plan "wherever and however it makes sense". So these are proposals in the plan, open to the owner's review, not owner decisions:
+- **Where in the plan.** Two new slices right after Home: *Slice 10: Session phase timeline at the top of the room* and *Slice 11: Start a new session in a room*. The later slices move up by two (10–18 become 12–20).
+- **Where on the page.** The strip sits in the room's sticky header, since a session belongs to one room.
+- **What a reset is.** It starts a new session and deletes nothing. Earlier sessions stay in the room, folded. Agents start fresh by default, and the ledger stays.
