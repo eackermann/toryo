@@ -33,9 +33,9 @@
   </symbol>
 </svg>
 
-<div class="app" id="app" data-view="room">
+<div class="app" id="app" data-view="home" data-page="home">
   <header class="top">
-    <span class="brand"><svg class="mark" id="liveMark" viewBox="0 0 512 512" aria-hidden="true"><use href="#mark"/></svg><span class="wordmark" aria-label="Toryo">TŌRYŌ</span></span>
+    <a class="brand" href="#/" title="Home" aria-label="Toryo: Home"><svg class="mark" id="liveMark" viewBox="0 0 512 512" aria-hidden="true"><use href="#mark"/></svg><span class="wordmark" aria-hidden="true">TŌRYŌ</span></a>
     <div class="deskchips" id="deskchips"></div>
     <button class="iconbtn" id="themeBtn" type="button" title="Theme"></button>
     <button class="iconbtn" id="bellBtn" type="button" title="Browser notifications"></button>
@@ -56,6 +56,7 @@
     </aside>
 
     <main id="view">
+      <section class="homeview" id="home" aria-label="Home" tabindex="-1"></section>
       <div class="room" id="main" data-tab="relay">
         <div class="relay">
           <header class="roomhead" id="roomhead" hidden>
@@ -122,6 +123,7 @@
   </div>
 
   <nav class="tabbar" id="tabbar" aria-label="Sections">
+    <button type="button" data-view="home"></button>
     <button type="button" data-view="rooms"></button>
     <button type="button" data-view="room"></button>
   </nav>

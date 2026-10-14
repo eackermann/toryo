@@ -126,6 +126,9 @@ async function route(engine, method, parts, url, body) {
     engine.notifier?.send("Toryo", "Test notification: this is how Toryo tells you something needs you.");
     return { ok: true };
   }
+  // Home: every room at a glance, and Recent page by page (?before=<the last page's `next`>&limit=40).
+  if (a === "home" && !id && method === "GET") return engine.home({ recent: Number(url.searchParams.get("recent") ?? 40) || 40 });
+  if (a === "feed" && !id && method === "GET") return engine.feed({ limit: Number(url.searchParams.get("limit") ?? 40) || 40, before: url.searchParams.get("before") || null });
   // Desk-wide controls: Pause everything, holds on agents ({ action, target, headless }); see Engine.deskControl.
   if (a === "desk" && !id && method === "GET") return engine.deskView();
   if (a === "desk" && !id && method === "POST") return engine.deskControl(body.action, body);

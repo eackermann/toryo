@@ -30,6 +30,9 @@ export const DEFAULT_SETTINGS = {
 const BUILDER_KINDS = new Set(["build", "build-fix", "build-next", "build-nudge", "build-answer", "build-gate", "build-note"]);
 const REVIEW_KINDS = new Set(["review", "review-status", "review-answer"]);
 const PLAN_PARALLEL = new Set(["plan-proposal", "plan-critique", "plan-check"]);
+// Home's Recent keeps this many notable events per room, and this many lines of the desk's journal.
+const NOTABLE_KEPT = 300;
+const JOURNAL_KEPT = 300;
 // Chat replies, discussions and second opinions stand on their own. Everything else belongs to the
 // room's current run (`room.flow`: a build or a planning round); when a new run starts, queued work
 // from the old one is dropped, and turns from it that are still running no longer drive anything.
@@ -83,6 +86,10 @@ export class Engine extends EventEmitter {
     this.desk = defaultDesk();
     this.deskProblem = null;
     this.queueSeq = 0;
+    // Home's Recent: each room's notable events (finished turns, questions, your answers, failed checks,
+    // approvals), kept up to date as events come in, and the desk's own journal (src/guard.mjs, deskControl).
+    this.notable = new Map();
+    this.deskJournal = [];
     // While acting on a turn's outcome (#actOnOutcome): rooms whose saves wait for one save at the end, and the turn
     // whose outcome it is (questions asked then remember it, so acting on it again after a restart doesn't ask twice).
     this.outcomeRooms = new Set();
@@ -108,12 +115,25 @@ export class Engine extends EventEmitter {
     this.usage.load(this.store.readJson(this.store.path("limits.json"), null));
     // The desk's controls come before any room can start anything.
     this.#loadDesk();
+    this.deskJournal = this.store
+      .readText(this.store.path("desk-events.jsonl"))
+      .split("\n")
+      .slice(-JOURNAL_KEPT)
+      .flatMap((line, i) => {
+        try {
+          const e = JSON.parse(line);
+          return [{ id: e.id ?? `j${i}-${e.at}`, ...e }];
+        } catch {
+          return [];
+        }
+      });
     this.store.saveConfig(this.config);
     for (const id of this.store.listRoomIds()) {
       const room = this.store.loadRoom(id);
       if (!room || room.archived) continue;
       this.rooms.set(id, room);
       this.events.set(id, this.store.loadEvents(id));
+      for (const ev of this.events.get(id)) this.#noteNotable(room, ev);
       this.#recover(room);
     }
     // Turns whose end was recorded but whose outcome Toryo hadn't acted on when it stopped: act on them now, once,
@@ -181,6 +201,12 @@ export class Engine extends EventEmitter {
    * it (errors, stops, restarts, new runs). While it's kept, the room sends the app nothing else and no other
    * room sends into that thread. `lost` means following it failed and waits for you.
    */
+  /** The turn a Codex app marker names: the one the app was first given. */
+  #appOrigin(room, marker) {
+    const id = String(marker ?? "").match(/^\[(?:Toryo|Foreman) (\S+)\]$/)?.[1];
+    return id ? (this.events.get(room.id) ?? []).find((e) => e.id === id) ?? null : null;
+  }
+
   #appTurnFrom(room, followReq) {
     return { marker: followReq.attach.marker, thread: room.sessions.codexapp ?? null, req: followReq, lost: false };
   }
@@ -312,16 +338,19 @@ export class Engine extends EventEmitter {
     let message;
     let extra = {};
     let guardChanges = [];
+    let journalText = null;
     // A refused action leaves the controls exactly as they were.
     try {
       switch (action) {
         case "pause":
           restrictive = true;
           d.paused ??= { at: nowIso() };
+          journalText = "You paused everything";
           message = "Everything is paused. Turns and checks running now finish; nothing new starts until you resume.";
           break;
         case "resume": {
           d.paused = null;
+          journalText = "You resumed everything";
           const held = Object.keys(d.holds).map((k) => holdLabel(k, (a) => this.label(a)));
           const guarded = holdsFor(d.guard, null, this.now()).map((h) => this.#guardReason(h));
           message = `Everything resumed${held.length ? `, except what you hold: ${held.join(", ")}` : ""}.${guarded.length ? ` The usage guard still holds: ${guarded.join("; ")}.` : ""} Rooms you paused yourself stay paused.`;
@@ -335,6 +364,7 @@ export class Engine extends EventEmitter {
           if (action === "hold") {
             restrictive = true;
             d.holds[key] ??= { agents: holdAgents(key), at: nowIso() };
+            journalText = `You held ${label}`;
             message = `Holding ${label}: ${names(holdAgents(key))} finish${holdAgents(key).length > 1 ? "" : "es"} the turns they're on, then start${holdAgents(key).length > 1 ? "" : "s"} no new ones until you release ${holdAgents(key).length > 1 ? "them" : "it"}.`;
           } else {
             const offers = this.#guardOffers(holdAgents(key));
@@ -344,6 +374,7 @@ export class Engine extends EventEmitter {
               return { message: `You don't hold ${label}. ${offerText(offers)}`, offers, desk: this.deskView() };
             }
             delete d.holds[key];
+            journalText = `You released ${label}`;
             const still = Object.entries(d.holds).filter(([, h]) => h.agents.some((a) => holdAgents(key).includes(a)));
             message = `Released ${label}.${still.length ? ` Still held: ${still.map(([k]) => holdLabel(k, (a) => this.label(a))).join(", ")}.` : ""}${offers.length ? ` ${offerText(offers)}` : ""}`;
             extra = { offers };
@@ -448,8 +479,9 @@ export class Engine extends EventEmitter {
       throw new UserError(`Toryo couldn't save that (${why}). ${restrictive ? "It applies anyway, and nothing new starts until Toryo can save it." : "Nothing changed."}`, 500);
     }
     this.usage.groups = normalizeGroups(this.desk.groups);
-    // What you changed in the guard goes in the desk's journal (no notifications: you did it).
+    // What you changed goes in the desk's journal (no notifications: you did it).
     for (const c of guardChanges) this.#journal({ kind: `guard-${c.kind}`, key: c.key, text: this.#guardChangeText(c).title, by: "you" });
+    if (journalText) this.#journal({ kind: `desk-${action}`, text: journalText, by: "you" });
     this.emit("state");
     this.#pumpAll();
     return { message, ...extra, desk: this.deskView() };
@@ -630,8 +662,11 @@ export class Engine extends EventEmitter {
 
   /** The desk's journal: what the guard and the controls did, for Home's Recent later. Best effort. */
   #journal(entry) {
+    const line = { id: shortId("j"), at: new Date(this.now()).toISOString(), ...entry };
+    this.deskJournal.push(line);
+    if (this.deskJournal.length > JOURNAL_KEPT) this.deskJournal.shift();
     try {
-      this.store.appendLine("desk-events.jsonl", { at: new Date(this.now()).toISOString(), ...entry });
+      this.store.appendLine("desk-events.jsonl", line);
     } catch {
       /* the journal explains; it doesn't decide anything */
     }
@@ -1015,6 +1050,178 @@ export class Engine extends EventEmitter {
     };
   }
 
+  // ---------------------------------------------------------------- Home
+
+  /**
+   * Home: every room at a glance, from what the desk keeps in memory, never a whole transcript. The questions waiting
+   * for you (oldest first), the work running now (with how long it prepared, waited in the Codex app's queue and has
+   * worked, and when it last said something), the other rooms and what keeps them, usage per allowance, what each
+   * agent is doing, and the first page of Recent.
+   */
+  home({ recent = 40 } = {}) {
+    const now = this.now();
+    const rooms = [...this.rooms.values()].filter((r) => !r.archived);
+    const project = (r) => this.config.projects.find((p) => p.id === r.projectId) ?? null;
+    // Rooms working in the same folder: a builder there can change what the others read.
+    const byFolder = new Map();
+    for (const r of rooms) {
+      const f = project(r)?.path;
+      if (f) byFolder.set(f, [...(byFolder.get(f) ?? []), r]);
+    }
+    const where = (r) => ({
+      project: project(r)?.name ?? null,
+      folder: project(r)?.path ?? null,
+      shared: (byFolder.get(project(r)?.path) ?? []).filter((x) => x !== r).map((x) => ({ id: x.id, title: x.title })),
+    });
+    const questions = rooms
+      .flatMap((r) => this.#openQuestions(r).map((q) => ({ ...q, room: r.id, roomTitle: r.title })))
+      .sort((a, b) => (a.at ?? "").localeCompare(b.at ?? "") || a.id.localeCompare(b.id));
+    const working = [...this.running.values()]
+      .filter((run) => this.rooms.get(run.roomId) && !this.rooms.get(run.roomId).archived)
+      .map((run) => {
+        const room = this.rooms.get(run.roomId);
+        const last = run.activity.at(-1);
+        return {
+          room: room.id,
+          title: room.title,
+          mode: room.mode,
+          ...where(room),
+          turn: run.turnId,
+          agent: run.agent,
+          role: run.role ?? null,
+          kind: run.req.kind,
+          slice: room.mode === "build" ? this.#currentSlice(room) : null,
+          // The round going on now: the first is 1 (build.round counts the change requests before it).
+          round: room.mode === "build" && room.build ? (room.build.round ?? 0) + 1 : null,
+          task: room.mode === "build" ? room.build?.task || null : room.mode === "plan" ? room.plan?.topic ?? null : null,
+          // Preparing (from startedAt), in the Codex app's queue (from submittedAt), working (from workingAt).
+          phase: run.phase ?? "working",
+          startedAt: run.startedAt,
+          submittedAt: run.submittedAt ?? null,
+          workingAt: run.workingAt ?? null,
+          lastOutputAt: last?.at ?? run.workingAt ?? null,
+          activity: last?.text ?? null,
+          questions: this.#allWaiting(room).length + (room.openChat?.length ?? 0),
+        };
+      })
+      .sort((a, b) => (a.startedAt ?? "").localeCompare(b.startedAt ?? ""));
+    const busy = new Set(working.map((w) => w.room));
+    const others = rooms
+      .filter((r) => !busy.has(r.id))
+      .map((r) => {
+        const sum = this.summary(r);
+        return { id: r.id, title: r.title, mode: r.mode, status: sum.status, paused: sum.paused, held: sum.held, done: Boolean(r.done), blocked: sum.blocked, questions: sum.waitingCount, updatedAt: r.updatedAt ?? null, ...where(r) };
+      })
+      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    // What each agent is doing, and what keeps it from starting more. The two Codex interfaces each have a row.
+    // The agents found on this machine (or, before Toryo has looked, the ones configured), and any at work.
+    const detected = Object.keys(this.agentStatus ?? {}).length > 0;
+    const agents = Object.keys(this.adapters)
+      .filter((a) => (detected ? this.agentStatus[a]?.installed : this.config.agents?.[a]?.command) || this.usage.agents[a] || working.some((w) => w.agent === a))
+      .map((agent) => ({
+        agent,
+        label: this.label(agent),
+        group: groupOf(agent, this.desk.groups),
+        working: working.filter((w) => w.agent === agent).map((w) => ({ room: w.room, title: w.title, kind: w.kind })),
+        blockers: this.blockersFor({ agent, kind: "chat" }),
+      }));
+    return {
+      at: new Date(now).toISOString(),
+      desk: this.deskView(),
+      questions: questions.slice(0, 50),
+      questionCount: questions.length,
+      working,
+      rooms: others,
+      usage: this.usage.groupView(now),
+      agents,
+      // Recent's first `recent` items (up to 100): a page that shows more asks for more, so nothing falls in a gap.
+      recent: this.feed({ limit: recent }),
+    };
+  }
+
+  /**
+   * The slice a build is on, as the room shows it: the one it names, unless that's approved (a build moving to the
+   * next slice); then the plan's first slice not yet approved, or, without a plan to say, "the next slice".
+   */
+  #currentSlice(room) {
+    const b = room.build;
+    if (!b || room.done) return null;
+    if (b.slice && !(b.approved ?? []).includes(b.slice)) return b.slice;
+    if (b.planPath)
+      try {
+        const next = parseSlices(this.readProjectFile(room.projectId, b.planPath).content).find(
+          (s) => !(b.approved ?? []).some((a) => sliceMatches(s, a)) && !s.markedDone && !(s.checks > 0 && s.checks === s.checked),
+        );
+        if (next) return `${next.kind ?? "Slice"} ${next.number}: ${next.name}`;
+      } catch {
+        /* no plan file to read: say what's known */
+      }
+    return b.slice ? "the next slice" : null;
+  }
+
+  /**
+   * Recent, newest first: each room's notable events and the desk's journal, merged. Each item has a stable id
+   * (`<room>:<event>`, or `desk:<journal id>`) and the time it happened (a turn: when it ended). `before` is the
+   * cursor of the last item already shown (`next` from the page before): the next page carries on from there.
+   */
+  feed({ limit = 40, before = null } = {}) {
+    const items = [];
+    for (const [roomId, list] of this.notable) {
+      const room = this.rooms.get(roomId);
+      if (!room || room.archived) continue;
+      for (const ev of list.values()) {
+        const item = this.#feedItem(room, ev);
+        if (item) items.push(item);
+      }
+    }
+    for (const j of this.deskJournal) items.push({ id: `desk:${j.id}`, at: j.at, kind: "desk", room: null, what: j.kind, text: j.text, by: j.by ?? null });
+    // Things that happen in the same millisecond keep their order: a turn ends, then its checks, an approval, a
+    // question, your answer. The key (also the cursor) is the same after a restart.
+    const RANK = { turn: 0, checks: 1, approved: 2, question: 3, answer: 4, desk: 5 };
+    const key = (x) => `${x.at}|${RANK[x.kind] ?? 9}|${x.id}`;
+    // Plain string order, the same the cursor is compared with (localeCompare can ignore punctuation).
+    items.sort((a, b) => (key(a) < key(b) ? 1 : key(a) > key(b) ? -1 : 0));
+    const from = before ? items.findIndex((x) => key(x) < before) : 0;
+    const page = from < 0 ? [] : items.slice(from, from + Math.max(1, Math.min(100, limit)));
+    const more = from >= 0 && from + page.length < items.length;
+    return { items: page, next: more && page.length ? key(page.at(-1)) : null };
+  }
+
+  /**
+   * Whether an event belongs in Recent, and as what. Running turns, notes and routine messages don't, and nothing
+   * is said twice: a turn that asked you something is its question, and a failed turn's retry question is the failure.
+   */
+  #notableKind(ev) {
+    if (ev.type === "turn") return ev.state === "failed" || (ev.state === "done" && ev.status !== "OWNER") ? "turn" : null;
+    if (ev.type === "question") return ev.kind === "error" ? null : "question";
+    if (ev.type === "owner") return ev.kind === "answer" || ev.kind === "change-request" ? "answer" : null;
+    if (ev.type === "gate") return (ev.results ?? []).some((r) => !r.ok) ? "checks" : null;
+    if (ev.type === "system") return / approved after \d+ rounds?|approved the final review/.test(ev.text ?? "") ? "approved" : null;
+    return null;
+  }
+
+  /** Keep an event in its room's Recent once it's notable (a turn, when it ends); the oldest go past NOTABLE_KEPT. */
+  #noteNotable(room, ev) {
+    if (!this.#notableKind(ev)) return;
+    let list = this.notable.get(room.id);
+    if (!list) this.notable.set(room.id, (list = new Map()));
+    list.delete(ev.id);
+    list.set(ev.id, ev);
+    if (list.size > NOTABLE_KEPT) list.delete(list.keys().next().value);
+  }
+
+  #feedItem(room, ev) {
+    const kind = this.#notableKind(ev);
+    if (!kind) return null;
+    const base = { id: `${room.id}:${ev.id}`, room: room.id, roomTitle: room.title, event: ev.id, kind };
+    if (kind === "turn")
+      return { ...base, at: ev.endedAt ?? ev.at, agent: ev.agent, role: ev.role ?? null, turnKind: ev.kind, state: ev.state, status: ev.status ?? null, detail: truncate(ev.detail ?? "", 160), slice: ev.slice ?? null, error: ev.state === "failed" ? truncate(ev.error ?? "", 160) : null };
+    if (kind === "question") return { ...base, at: ev.at, from: ev.from ?? null, question: truncate(ev.question ?? "", 200), open: Boolean(ev.open) };
+    if (kind === "answer") return { ...base, at: ev.at, text: truncate(firstLine(ev.text ?? "", 200), 200), to: ev.to ?? [], answered: ev.answers?.[0]?.question ? truncate(ev.answers[0].question, 120) : null, change: ev.kind === "change-request" };
+    if (kind === "checks") return { ...base, at: ev.at, failed: (ev.results ?? []).filter((r) => !r.ok).map((r) => r.name) };
+    return { ...base, at: ev.at, text: truncate(ev.text ?? "", 200) };
+  }
+
   // ---------------------------------------------------------------- rooms
 
   createRoom({ projectId, title, mode = "chat", members, builder, reviewer, settings, task, planPath, topic, text, to, discuss, allowWrite, reviewFirst, handoff, slice, appThread }) {
@@ -1080,6 +1287,7 @@ export class Engine extends EventEmitter {
     }
     room.archived = true;
     this.rooms.delete(room.id);
+    this.notable.delete(room.id);
     this.store.saveRoom(room);
     this.emit("state");
   }
@@ -2070,6 +2278,7 @@ export class Engine extends EventEmitter {
     if (!adapter) throw new Error(`No adapter for ${req.agent}`);
     const cfg = this.agentConfig(project, req.agent);
     const role = this.#roleOf(room, req.agent);
+    run.role = role;
     const others = room.crew.members.filter((a) => a !== req.agent).map((a) => this.label(a));
     const pre = preamble({ agentLabel: this.label(req.agent), others, project });
 
@@ -2110,6 +2319,9 @@ export class Engine extends EventEmitter {
     run.dispatch = req.attach?.dispatch ?? { flow: room.flow, ids, ownerIds, briefing, intro: fresh, fresh: startFresh || undefined, notes: notes.length ? notes : undefined, acks: building || undefined, rules, rulesBefore: (room.rulesSent ?? {})[req.agent] ?? null, rulesUpdate: rulesChanged || undefined };
 
     const round = room.mode === "build" ? (room.build?.round ?? 0) + 1 : undefined;
+    // Following a Codex app turn again (after a restart): when the app was given it, and when it took it up, are
+    // the first turn's, not now.
+    const origin = req.attach ? this.#appOrigin(room, req.attach.marker) : null;
     const ev = this.#append(room, {
       id: turnId,
       type: "turn",
@@ -2125,7 +2337,15 @@ export class Engine extends EventEmitter {
       dispatch: run.dispatch,
       // For agents whose turns can't be cancelled: whether the agent has the message (then a restart follows it).
       submitted: this.adapters[req.agent]?.cancellable === false ? Boolean(req.attach) : undefined,
+      ...(req.attach ? { submittedAt: origin?.submittedAt ?? req.attach.since, pickedUpAt: origin?.pickedUpAt } : {}),
     });
+    if (req.attach) {
+      run.submittedAt = ev.submittedAt;
+      if (ev.pickedUpAt) {
+        run.phase = "working";
+        run.workingAt = ev.pickedUpAt;
+      }
+    }
     this.#save(room);
 
     const dir = this.store.turnDir(room.id, turnId);
@@ -2166,12 +2386,20 @@ export class Engine extends EventEmitter {
       timeoutMs: (room.settings.turnTimeoutMin ?? 240) * 60_000,
       attach: req.attach && { marker: req.attach.marker },
       // The agent has the turn: keep its session at once (a restart resumes it) and mark the messages delivered.
-      onStarted: ({ sessionId } = {}) => {
+      onStarted: ({ sessionId, at } = {}) => {
         if (sessionId) room.sessions[req.agent] = sessionId;
         if (run.phase !== "working") {
           run.phase = "working";
-          // For the Codex app: when it took the message up, as opposed to when it was given it.
-          if (req.agent === "codexapp" && !ev.pickedUpAt) this.#patch(room, ev, { pickedUpAt: nowIso() });
+          // When it started: the time the agent says (the Codex app's log, which can be from while Toryo was
+          // stopped), if it's a real time and not ahead of now; else now.
+          const said = Date.parse(at ?? "");
+          run.workingAt = Number.isFinite(said) && said <= Date.now() + 60_000 ? new Date(Math.min(said, Date.now())).toISOString() : nowIso();
+          // For the Codex app: when it took the message up, as opposed to when it was given it. Kept on the first
+          // turn too, so following it again after another restart still knows.
+          if (req.agent === "codexapp" && !ev.pickedUpAt) {
+            this.#patch(room, ev, { pickedUpAt: run.workingAt });
+            if (origin && origin !== ev && !origin.pickedUpAt) this.#patch(room, origin, { pickedUpAt: run.workingAt });
+          }
         }
         this.#commitDispatch(room, req.agent, run);
         this.#save(room);
@@ -2186,6 +2414,7 @@ export class Engine extends EventEmitter {
       // The Codex app accepted the message: keep the turn (on disk) until it ends; it's followed, never sent again.
       onSubmitted: () => {
         if (run.phase === "preparing" || run.phase === "sending") run.phase = "in-app";
+        run.submittedAt ??= nowIso();
         if (room.appTurn?.marker !== `[Toryo ${turnId}]`) room.appTurn = this.#appTurnFrom(room, this.#followReq(req, ev));
         if (!ev.submitted) this.#patch(room, ev, { submitted: true, submittedAt: nowIso() });
         this.#save(room);
@@ -2859,7 +3088,8 @@ export class Engine extends EventEmitter {
 
   #startChecks(room, req) {
     const project = this.project(room.projectId);
-    const run = { roomId: room.id, agent: "toryo", req, controller: new AbortController(), abandon: new AbortController(), activity: [], startedAt: nowIso(), turnId: shortId("g") };
+    const run = { roomId: room.id, agent: "toryo", req, controller: new AbortController(), abandon: new AbortController(), activity: [], startedAt: nowIso(), turnId: shortId("g"), phase: "checks" };
+    run.workingAt = run.startedAt;
     this.running.set(run.turnId, run);
     // Kept in the room until the checks finish, so a restart in between runs them again.
     room.activeGate = { ...req };
@@ -3154,6 +3384,7 @@ export class Engine extends EventEmitter {
     const event = { id: ev.id ?? shortId("e"), at: nowIso(), ...ev };
     this.events.get(room.id).push(event);
     this.store.appendEvent(room.id, event);
+    this.#noteNotable(room, event);
     room.updatedAt = event.at;
     this.emit("event", { roomId: room.id, event });
     return event;
@@ -3162,6 +3393,7 @@ export class Engine extends EventEmitter {
   #patch(room, ev, patch, emit = true) {
     Object.assign(ev, patch);
     this.store.appendEvent(room.id, { id: ev.id, ...patch });
+    this.#noteNotable(room, ev);
     room.updatedAt = nowIso();
     if (emit) this.emit("event", { roomId: room.id, event: ev });
   }

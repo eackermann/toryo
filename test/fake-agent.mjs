@@ -91,6 +91,8 @@ if (rule?.hang) {
 } else {
   if (rule?.delayMs) await new Promise((r) => setTimeout(r, rule.delayMs));
   start();
+  // `progress`: a line of activity as the turn gets to work (a command it runs), before `workMs`.
+  if (rule?.progress) progressLine(rule.progress);
   if (rule?.workMs) await new Promise((r) => setTimeout(r, rule.workMs));
   if (kind === "codex" && rule?.codexUsage) logCodexUsage(rule.codexUsage);
   if (rule?.fail) {
@@ -113,6 +115,12 @@ function emitNothing() {
   }
   if (rule.hookDrop) out({ type: "system", subtype: "informational", message: `Prompt dropped by a hook: ${rule.hookDrop}` });
   out({ type: "result", subtype: "success", is_error: false, result: rule.resultText ?? "", num_turns: rule.hookDrop || rule.zeroTurns ? 0 : 1, session_id: session });
+}
+
+/** One line of activity: a command started, as each CLI reports it. */
+function progressLine(text) {
+  if (kind === "codex") out({ type: "item.started", item: { id: "p1", type: "command_execution", command: text, status: "in_progress" } });
+  else out({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: text } }] } });
 }
 
 /** Codex's usage, as Codex writes it in the session's log (Toryo reads it from there after the turn). */

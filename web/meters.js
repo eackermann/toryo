@@ -50,5 +50,6 @@ export function limitMeters(l, agent, now = Date.now()) {
     return `<div class="meter" data-level="${w.used >= 90 ? "bad" : w.used >= 70 ? "warn" : "ok"}" data-window="${esc(w.type ?? w.label)}"><div class="row"><span>${esc(w.label)} limit</span><b>${Math.round(w.used)}%</b></div><div class="bar"><i style="width:${Math.min(100, Math.max(1, w.used))}%"></i></div><div class="row"><span>${resets(w.resetsAt, now)}</span>${ageCell}</div></div>`;
   };
   const error = l?.error ? `<div class="row asof" data-usage-error><span>Couldn't read the latest usage ${esc(ago(l.error.at, now))}: ${esc(l.error.error)}</span></div>` : "";
-  return `<div class="limits" data-agent="${esc(agent ?? "")}" title="Plan usage as the agent last reported it">${windows.map(meter).join("")}${error}</div>`;
+  // With no agent (an allowance's meters, on Home), the box isn't one the page redraws per agent.
+  return `<div class="limits"${agent == null ? "" : ` data-agent="${esc(agent)}"`} title="Plan usage as the agent last reported it">${windows.map(meter).join("")}${error}</div>`;
 }

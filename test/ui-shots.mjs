@@ -163,7 +163,7 @@ try {
       await page.goto(`${url}#/r/${build.id}`);
       await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "History build");
       await page.evaluate(() => document.fonts.ready);
-      const rings = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll(".roomlink")].map((b) => [b.querySelector(".ri-name").textContent, b.querySelector(".tile").dataset.ring])));
+      const rings = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll(".roomlink[data-room]")].map((b) => [b.querySelector(".ri-name").textContent, b.querySelector(".tile").dataset.ring])));
       assert.deepEqual(Object.fromEntries(Object.keys(expected).map((k) => [k, rings[k]])), expected);
       assert.ok(await page.$(".roomlink .tile[data-ring=build] canvas.sparkler"), "a working room's tile has its sparkler");
       assert.ok(await page.$(".roomlink .tile[data-ring=done] .badge"), "a finished room's tile has its check");
@@ -221,8 +221,13 @@ try {
     const page = await ctx.newPage();
     page.on("pageerror", (e) => errors.push(String(e)));
     page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
-    await page.goto(`${url}#/r/${room}`);
-    await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent);
+    if (pane === "home") {
+      await page.goto(`${url}#/`);
+      await page.waitForSelector(".home .hero");
+    } else {
+      await page.goto(`${url}#/r/${room}`);
+      await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent);
+    }
     await page.evaluate(() => document.fonts.ready);
     if (pane === "rooms") await page.click("#tabbar [data-view=rooms]");
     if (tab) await page.click(width > 1180 ? `[data-sidetab=${tab}]` : `[data-roomtab=${tab}]`);
@@ -244,11 +249,16 @@ try {
     assert.deepEqual(await page.evaluate(contrastProblems, Boolean(sheet)), [], `${file}: contrast`);
     // Nothing scrolls sideways: the page, and every scrolling area in it.
     const wide = await page.evaluate(() => {
-      const over = [document.documentElement, ...document.querySelectorAll(".log, .side, .rail, .sheet")].filter((n) => n.scrollWidth > n.clientWidth + 1 && getComputedStyle(n).overflowX !== "hidden");
+      const over = [document.documentElement, ...document.querySelectorAll(".log, .side, .rail, .sheet, .homeview")].filter((n) => n.scrollWidth > n.clientWidth + 1 && getComputedStyle(n).overflowX !== "hidden");
       return over.map((n) => `${n.className || n.tagName}: ${n.scrollWidth} > ${n.clientWidth}`);
     });
     assert.deepEqual(wide, [], `${file}: sideways scrolling`);
     await page.screenshot({ path: join(out, `${file}.png`) });
+    // Home scrolls inside its own area: a second picture, the whole of it.
+    if (pane === "home") {
+      await page.addStyleTag({ content: ".app { height: auto !important; min-height: 0 !important; } .desk, #view, .homeview { height: auto !important; overflow: visible !important; }" });
+      await page.screenshot({ path: join(out, `${file}-full.png`), fullPage: true });
+    }
     await ctx.close();
   };
   // The top bar's count opens the room with the oldest question (the chat's; the planning room's came later).
@@ -270,6 +280,9 @@ try {
     await page.close();
   }
   for (const theme of ["light", "dark"]) {
+    await shoot({ width: 1440, theme, pane: "home", file: `home-1440-${theme}` });
+    await shoot({ width: 1024, theme, pane: "home", file: `home-1024-${theme}` });
+    await shoot({ width: 390, height: 844, theme, pane: "home", file: `home-390-${theme}` });
     await shoot({ width: 1440, theme, room: build.id, file: `build-1440-${theme}` });
     await shoot({ width: 1440, theme, room: build.id, tab: "crew", file: `crew-1440-${theme}` });
     await shoot({ width: 1440, theme, room: chat.id, file: `chat-1440-${theme}` });
@@ -312,7 +325,9 @@ try {
     await shoot({ width, height: width > 400 ? 900 : 700, theme, room: build.id, sheet: "#newRoomBtn", file: `sheet-new-room-${width}-${theme}` });
     await shoot({ width, height: width > 400 ? 900 : 700, theme, room: build.id, sheet: "#settingsBtn", file: `sheet-settings-${width}-${theme}` });
   }
+  await shoot({ width: 1440, theme: "light", motion: "reduce", pane: "home", file: "home-1440-reduced-motion" });
   for (const width of [320, 390]) {
+    await shoot({ width, height: 700, theme: "light", pane: "home", file: `home-${width}` });
     await shoot({ width, height: 700, theme: "light", room: build.id, tab: "crew", file: `crew-${width}` });
     await shoot({ width, height: 700, theme: "light", room: plan.id, file: `plan-${width}` });
     await shoot({ width, height: 700, theme: "light", room: ready.id, file: `ready-plan-${width}` });

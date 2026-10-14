@@ -115,8 +115,13 @@ const S = {
   // The side panel's tab (wide screens), and the room's tab (narrower screens: the relay or one of the panels).
   sideTab: "plan",
   roomTab: "relay",
-  // On a phone: the rooms list or the room.
-  pane: "room",
+  // On a phone: Home, the rooms list or the room.
+  pane: "home",
+  // What the main view shows: Home or the room (null until the address has been read).
+  page: null,
+  // Home's overview (GET /api/home), and how many Recent items it shows.
+  home: null,
+  recent: 40,
   seen: readSeen(),
   connected: false,
 };
@@ -226,11 +231,15 @@ function connect() {
   es.addEventListener("open", () => {
     S.connected = true;
     renderDesk();
-    if (S.roomId) loadRoom(S.roomId, { keepScroll: true });
+    // The room on the screen, fetched afresh; on Home, the room behind it waits until you go back to it.
+    if (S.roomId && S.page === "room") loadRoom(S.roomId, { keepScroll: true });
+    // Back after being cut off: a fresh overview, since anything may have changed meanwhile.
+    if (S.page === "home") loadHome();
   });
   es.addEventListener("error", () => {
     S.connected = false;
     renderTop();
+    if (S.page === "home") renderHome();
   });
   es.addEventListener("state", (e) => {
     S.state = JSON.parse(e.data);
@@ -246,16 +255,21 @@ function connect() {
       renderRooms();
       renderDesk();
     }
-    if (sum.id === S.roomId) refreshRoomSoon();
+    // The room you're in, fetched again; not while Home is showing (going back to it fetches it fresh).
+    if (sum.id === S.roomId && S.page === "room") refreshRoomSoon();
+    homeSoon();
   });
   es.addEventListener("event", (e) => {
     const { roomId, event } = JSON.parse(e.data);
     keepLiveCopy(roomId, event);
-    if (roomId === S.roomId && S.view) upsertEvent(event);
+    // The room on the screen takes it in; on Home, going back to the room fetches it afresh.
+    if (roomId === S.roomId && S.view && S.page === "room") upsertEvent(event);
+    homeSoon();
   });
   es.addEventListener("activity", (e) => {
     const d = JSON.parse(e.data);
-    if (d.roomId === S.roomId) onActivity(d);
+    if (d.roomId === S.roomId && S.page === "room") onActivity(d);
+    if (S.page === "home") homeActivity(d);
   });
   es.addEventListener("notify", (e) => {
     const d = JSON.parse(e.data);
@@ -298,7 +312,7 @@ let refreshes = 0;
 function refreshRoomSoon() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(async () => {
-    if (!S.roomId) return;
+    if (!S.roomId || S.page !== "room") return;
     const n = ++refreshes;
     try {
       const v = await fetchView(S.roomId);
@@ -320,18 +334,53 @@ function refreshRoomSoon() {
 
 function onState() {
   renderRooms();
-  if (!S.state.config.projects.length) return renderWelcome();
-  const fromHash = location.hash.match(/^#\/r\/([\w-]+)/)?.[1];
-  if (!S.roomId) {
-    const target = (fromHash && S.state.rooms.find((r) => r.id === fromHash)) || S.state.rooms[0];
-    if (target) loadRoom(target.id);
-    else renderNoRooms();
+  if (!S.state.config.projects.length) {
+    showPage("room");
+    S.welcome = true;
+    return renderWelcome();
   }
+  // The first time, or once you've added your first project: the page the address names, a room or Home.
+  if (!S.page || S.welcome) {
+    S.welcome = false;
+    route();
+  } else homeSoon();
   renderTop();
   if (S.view) renderCrew();
 }
 
-async function loadRoom(id, { keepScroll = false } = {}) {
+/** The page the address names: a room (#/r/<id>), or Home (#/, or nothing). Back and forward follow it. */
+function route() {
+  const id = location.hash.match(/^#\/r\/([\w-]+)/)?.[1];
+  if (id && S.state?.rooms.some((r) => r.id === id)) {
+    if (id !== S.roomId || S.page !== "room") loadRoom(id, { open: true });
+  } else showHome();
+}
+
+/** Show Home or the room in the main view (and, on a phone, its tab). */
+function showPage(page) {
+  S.page = page;
+  $("#app").dataset.page = page;
+  $("#home").hidden = page !== "home";
+  $("#main").hidden = page !== "room";
+  setPane(page);
+}
+
+function showHome() {
+  const was = S.page;
+  showPage("home");
+  // An address that named nothing Home can show (an old room's): Home's own, without a new step back.
+  if (!/^#\/?$/.test(location.hash) && location.hash !== "") history.replaceState(null, "", "#/");
+  document.title = "Toryo";
+  renderRooms();
+  renderHome();
+  loadHome();
+  if (was === "room") $("#home").scrollTop = 0;
+}
+
+async function loadRoom(id, { keepScroll = false, open = false } = {}) {
+  // Opening a room (a link, the address, a new room) shows it at once; fetching one again (a reconnect, a saved
+  // setting) doesn't take you away from Home.
+  if (open) showPage("room");
   try {
     const v = await fetchView(id);
     const switching = S.roomId !== id;
@@ -339,7 +388,7 @@ async function loadRoom(id, { keepScroll = false } = {}) {
     S.view = v;
     if (switching) restoreDraft(v.room);
     S.live = new Map(v.live.map((l) => [l.turnId, l]));
-    if (location.hash !== `#/r/${id}`) history.replaceState(null, "", `#/r/${id}`);
+    if (S.page === "room" && location.hash !== `#/r/${id}`) history.replaceState(null, "", `#/r/${id}`);
     renderTop();
     renderRooms();
     renderTimeline(switching || !keepScroll);
@@ -354,8 +403,8 @@ async function loadRoom(id, { keepScroll = false } = {}) {
       if (S.state) S.state.rooms = S.state.rooms.filter((r) => r.id !== id);
       S.roomId = null;
       S.view = null;
-      history.replaceState(null, "", "#");
-      onState();
+      history.replaceState(null, "", "#/");
+      showHome();
     } else fail(error);
   }
 }
@@ -478,20 +527,22 @@ function renderRooms() {
     if (!byProject.has(r.projectId)) byProject.set(r.projectId, []);
     byProject.get(r.projectId).push(r);
   }
-  const before = new Map($$(".roomlink", box).map((b) => [b.dataset.room, b.querySelector(".tile")]));
-  box.innerHTML = S.state.config.projects
+  const before = new Map($$(".roomlink[data-room]", box).map((b) => [b.dataset.room, b.querySelector(".tile")]));
+  const asks = S.state.rooms.reduce((n, r) => n + (r.questions?.length ?? (r.waiting ? 1 : 0)), 0);
+  const home = `<a class="roomlink railhome" href="#/" aria-current="${S.page === "home" ? "page" : "false"}"><span class="homeico" aria-hidden="true">${ic("home")}</span><span class="ri-text"><span class="ri-name">Home</span><span class="ri-state">Every room at a glance</span></span>${asks ? `<span class="count" title="Questions waiting for you">${asks}</span>` : ""}</a>`;
+  box.innerHTML = home + S.state.config.projects
     .map((p) => {
       const rooms = byProject.get(p.id) ?? [];
       return `<div class="railgroup"><p class="eyebrow">${esc(p.name)}</p>${rooms.length ? "" : `<div class="hint none">No rooms yet.</div>`}${rooms
         .map((r) => {
           const st = railState(r);
-          return `<button type="button" class="roomlink" data-room="${r.id}" data-state="${r.status}" aria-current="${r.id === S.roomId}" title="${esc(`${r.title}: ${st.says}`)}">
+          return `<button type="button" class="roomlink" data-room="${r.id}" data-state="${r.status}" aria-current="${S.page === "room" && r.id === S.roomId}" title="${esc(`${r.title}: ${st.says}`)}">
             ${roomTile(r, 32)}<span class="ri-text"><span class="ri-name">${esc(r.title)}</span><span class="ri-state" ${st.k ? `data-k="${st.k}"` : ""}>${esc(st.text)}</span></span></button>`;
         })
         .join("")}</div>`;
     })
     .join("");
-  for (const link of $$(".roomlink", box)) {
+  for (const link of $$(".roomlink[data-room]", box)) {
     const old = before.get(link.dataset.room);
     const tile = link.querySelector(".tile");
     if (old && old.dataset.ringKey === tile.dataset.ringKey) tile.replaceWith(old);
@@ -1161,7 +1212,8 @@ function markSeenSoon() {
   clearTimeout(seenTimer);
   seenTimer = setTimeout(() => {
     const r = room();
-    if (!r || document.hidden) return;
+    // Read means on the screen: the page in view, showing this room (not Home, with the room behind it).
+    if (!r || document.hidden || S.page !== "room") return;
     const log = $("#log");
     if (log.scrollHeight - log.scrollTop - log.clientHeight > 200) return;
     const last = S.view.events.at(-1);
@@ -1722,7 +1774,8 @@ function newRoomSheet(mode = "chat") {
         );
       const created = await api("POST", "/api/rooms", body);
       closeSheet();
-      await loadRoom(created.id);
+      history.pushState(null, "", `#/r/${created.id}`);
+      await loadRoom(created.id, { open: true });
     } catch (error) {
       fail(error);
     }
@@ -2088,15 +2141,315 @@ function roomSheet() {
           S.state.rooms = S.state.rooms.filter((x) => x.id !== r.id);
           S.roomId = null;
           S.view = null;
-          history.replaceState(null, "", "#");
           $("#log").innerHTML = "";
-          onState();
+          // Home, after the room you were in is gone.
+          history.replaceState(null, "", "#/");
+          showHome();
         },
         { once: true },
       );
     },
     { once: true },
   );
+}
+
+// ------------------------------------------------------------------ Home
+
+/**
+ * Home's overview, fetched whole (GET /api/home: never a transcript). One fetch at a time: news while one is on its
+ * way asks for one more after it. A burst of news (many rooms at work) waits for a quarter of a second of quiet, and
+ * never more than a second, so it costs one fetch, not one per room or per event.
+ */
+let homeLoading = false;
+let homeAgain = false;
+let homeTimer = null;
+let homeFirstNews = 0;
+async function loadHome() {
+  if (homeLoading) {
+    homeAgain = true;
+    return;
+  }
+  homeLoading = true;
+  try {
+    do {
+      homeAgain = false;
+      try {
+        S.home = await api("GET", `/api/home?recent=${S.recent}`);
+        if (S.page === "home") renderHome();
+      } catch {
+        /* the next news, or the reconnect, tries again */
+      }
+    } while (homeAgain);
+  } finally {
+    homeLoading = false;
+  }
+}
+function homeSoon() {
+  if (S.page !== "home") return;
+  homeFirstNews ||= Date.now();
+  clearTimeout(homeTimer);
+  homeTimer = setTimeout(() => {
+    homeFirstNews = 0;
+    loadHome();
+  }, Math.max(0, Math.min(250, 1000 - (Date.now() - homeFirstNews))));
+}
+/** A working agent's latest line, straight from the live feed: no fetch. */
+function homeActivity({ turnId, item }) {
+  const card = $(`#home [data-turn="${CSS.escape(turnId)}"]`);
+  if (!card) return;
+  const line = $("[data-act]", card);
+  if (line) line.textContent = item.text ?? "";
+  const out = $("[data-ago]", card);
+  if (out && item.at) {
+    out.dataset.ago = item.at;
+    out.textContent = ago(item.at);
+  }
+}
+
+/** How long ago, to the second while it's recent (a turn's last output). */
+function ago(iso) {
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (!Number.isFinite(s)) return "";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} d ago`;
+}
+/** A moment in words, in your own time zone: "Tue 14 Oct, 09:00". */
+const whenText = (iso) => new Date(iso).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const span = (a, b) => duration(a, b ?? new Date().toISOString()) || "0s";
+
+function renderHome() {
+  const box = $("#home");
+  const h = S.home;
+  if (!h || !S.state) {
+    box.innerHTML = `<div class="home"><p class="hint">Loading Home…</p></div>`;
+    return;
+  }
+  const top = box.scrollTop;
+  // Drawn again as news comes: a link or button you'd reached (by keyboard, say) keeps the focus.
+  const focused = box.contains(document.activeElement) ? focusKey(document.activeElement) : null;
+  box.innerHTML = `<div class="home">${S.connected ? "" : `<div class="offline" role="status">${ic("alert")}<span>Reconnecting to the desk… What you see here may be out of date.</span></div>`}
+    ${homeHero(h)}
+    <div class="home-grid">
+      <div class="col">${homeNeeds(h)}${homeWorking(h)}${homeOthers(h)}</div>
+      <div class="col">${homeUsage(h)}${homeRecent(h)}</div>
+    </div></div>`;
+  box.scrollTop = top;
+  if (focused) [...box.querySelectorAll("a, button")].find((el) => focusKey(el) === focused)?.focus({ preventScroll: true });
+  wakeSparklers();
+}
+
+/** What makes one of Home's links or buttons the same one after Home is drawn again. */
+function focusKey(el) {
+  return `${el.tagName}|${el.getAttribute("href") ?? ""}|${el.dataset.openQuestion ?? ""}|${el.closest("[data-turn]")?.dataset.turn ?? ""}|${el.hasAttribute("data-more-recent")}|${el.closest("li")?.querySelector("time")?.dataset.ago ?? ""}`;
+}
+
+function homeHero(h) {
+  const working = new Set(h.working.map((w) => w.room)).size;
+  const asks = h.questionCount;
+  const need = asks ? `<em>${asks} question${asks > 1 ? "s need" : " needs"} you</em>` : "";
+  let headline;
+  if (h.desk.paused) headline = "Everything is paused.";
+  else if (working && asks) headline = `${working} room${working > 1 ? "s are" : " is"} working, and ${need}.`;
+  else if (asks) headline = `${need}. Nothing else is moving.`;
+  else if (working) headline = `${working} room${working > 1 ? "s are" : " is"} working. Nothing needs you.`;
+  else headline = "All quiet. Nothing is running, and nothing needs you.";
+  // What holds work up, desk-wide, in words. The buttons for these come with Home's controls.
+  const desk = [];
+  if (h.desk.problem) desk.push(`<span class="chip" data-k="bad">${ic("alert")}${esc(h.desk.problem.text)}</span>`);
+  if (h.desk.paused) desk.push(`<span class="chip" data-k="paused">${ic("pause")}Everything is paused: running turns and checks finish, nothing new starts</span>`);
+  for (const hold of h.desk.holds) desk.push(`<span class="chip" data-k="held">${ic("lock")}You hold ${esc(hold.label)}</span>`);
+  for (const g of h.desk.guard.holds) desk.push(`<span class="chip" data-k="${g.excepted ? "idle" : "held"}">${ic("lock")}${esc(g.excepted ? `The guard is paused for ${g.name}'s ${g.label} limit until it resets` : `${g.reason[0].toUpperCase()}${g.reason.slice(1)}`)}</span>`);
+  const lede = h.desk.guard.notice?.pending
+    ? "The usage guard is on: when an agent's 5-hour or weekly usage reaches 90%, Toryo lets its running turns finish and starts no new ones until that limit resets."
+    : h.desk.paused
+      ? "Rooms you paused yourself stay paused when you resume."
+      : "";
+  return `<section class="hero" aria-labelledby="h-home">
+    <div class="hero-text"><p class="eyebrow">Home · ${esc(new Date().toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }))}</p><h1 id="h-home">${headline}</h1>${lede ? `<p class="lede">${esc(lede)}</p>` : ""}</div>
+    ${desk.length ? `<div class="deskbar">${desk.join("")}</div>` : ""}
+  </section>`;
+}
+
+function homeTile(roomId, title) {
+  const sum = S.state.rooms.find((r) => r.id === roomId) ?? { id: roomId, title, status: "idle" };
+  return roomTile(sum, 40);
+}
+
+function homeNeeds(h) {
+  const cards = h.questions.map((q) => {
+    const asker = q.from ? `${name(q.from)} asks` : "Your call";
+    return `<article class="ask" data-q="${esc(q.id)}">
+      <header>${homeTile(q.room, q.roomTitle)}<div class="who"><strong>${esc(q.roomTitle)}</strong><span class="muted">${esc(asker)}</span></div><span class="wait">waiting <span data-since="${esc(q.at ?? "")}">${q.at ? since(q.at) : ""}</span></span></header>
+      <p class="q">${esc(q.question)}</p>
+      ${q.recommendation ? `<div class="rec"><span class="eyebrow">Recommended</span><p>${esc(q.recommendation)}</p></div>` : ""}
+      <div class="actions"><a class="btn" href="#/r/${esc(q.room)}" data-open-question="${esc(q.id)}">Open the room at this question</a></div>
+    </article>`;
+  });
+  const more = h.questionCount - h.questions.length;
+  return `<section class="panel needs" aria-labelledby="h-needs">
+    <header><h2 id="h-needs">Needs you</h2>${h.questionCount ? `<span class="count">${h.questionCount}</span>` : ""}<span class="hnote">Oldest first</span></header>
+    ${cards.length ? cards.join("") : `<div class="hempty">${ic("check")}<span>Nothing needs you. A room turns orange when something does.</span></div>`}
+    ${more > 0 ? `<p class="hint">And ${more} more, in their rooms.</p>` : ""}
+  </section>`;
+}
+
+/** The rooms sharing a folder, in a few words: one or two by name, more as a count (the names on hover). */
+function sharedText(shared) {
+  if (!shared?.length) return "";
+  const names = shared.map((x) => x.title);
+  const said = names.length <= 2 ? names.join(" and ") : `${names.length} other rooms`;
+  return `<span title="${esc(names.join(", "))}">shares its folder with ${esc(said)}</span>`;
+}
+
+/** What a turn is doing, in a few words: "building Slice 2, round 3", "a planning round on Export"… */
+function workWhat(w) {
+  if (w.agent === "toryo") return "running the project's checks";
+  const kind = workKind(w.kind);
+  const verb = { build: "building", review: "reviewing", plan: "planning", chat: KIND[w.kind]?.toLowerCase() ?? "replying" }[kind] ?? "working";
+  if (w.mode === "build" && w.slice) return `${verb} ${w.slice}${w.round > 1 ? `, round ${w.round}` : ""}`;
+  if (w.task) return `${verb}: ${w.task}`;
+  return verb;
+}
+
+/** A turn's times, kept apart: preparing, waiting in the Codex app's queue, working. */
+function workPhases(w) {
+  const out = [];
+  if (w.phase === "preparing") out.push(`preparing for <span data-since="${esc(w.startedAt)}">${since(w.startedAt)}</span>`);
+  else if (w.agent !== "toryo" && Date.parse(w.submittedAt ?? w.workingAt) - Date.parse(w.startedAt) >= 1000) out.push(`prepared in ${span(w.startedAt, w.submittedAt ?? w.workingAt)}`);
+  if (w.submittedAt) out.push(w.phase === "in-app" || w.phase === "sending" ? `in the Codex app's queue for <span data-since="${esc(w.submittedAt)}">${since(w.submittedAt)}</span>` : `waited ${span(w.submittedAt, w.workingAt)} in the Codex app's queue`);
+  return out.join(" · ");
+}
+
+function homeWorking(h) {
+  const cards = h.working.map((w) => {
+    const kind = w.agent === "toryo" ? "checks" : workKind(w.kind);
+    const chip = `<span class="act-k" data-k="${kind === "chat" ? "checks" : kind}">${ic(kind === "checks" ? "checks" : kind === "chat" ? "chat" : kind)}${{ build: "Building", review: "Reviewing", plan: "Planning", checks: "Checks", chat: "Replying" }[kind]}</span>`;
+    const since0 = w.workingAt ?? w.startedAt;
+    return `<a class="workcard" href="#/r/${esc(w.room)}" data-turn="${esc(w.turn)}">
+      ${homeTile(w.room, w.title)}
+      <div class="wc-main">
+        <div class="wc-title"><strong>${esc(w.title)}</strong><span class="muted">${esc(w.project ?? "")}${w.folder ? ` · <span class="mono">${esc(w.folder)}</span>` : ""}</span></div>
+        <div class="wc-line">${chip}<span><b>${esc(w.agent === "toryo" ? "Toryo" : name(w.agent))}</b>${w.role && w.role !== "other" ? `, ${esc(w.role)}` : ""} · ${esc(workWhat(w))}</span>${w.questions ? `<span class="act-k" data-k="you">Needs you too</span>` : ""}</div>
+        ${workPhases(w) ? `<div class="wc-phase">${workPhases(w)}</div>` : ""}
+        <div class="wc-act mono" data-act>${esc(w.activity ?? "")}</div>
+        ${w.shared?.length ? `<div class="wc-shared">${sharedText(w.shared)}</div>` : ""}
+      </div>
+      <div class="wc-time"><span class="big" data-since="${esc(since0)}">${since(since0)}</span><span class="muted">${w.phase === "working" || w.agent === "toryo" ? "working" : w.phase === "preparing" ? "since it started" : "since it was sent"}${w.lastOutputAt ? ` · last output <span data-ago="${esc(w.lastOutputAt)}">${ago(w.lastOutputAt)}</span>` : ""}</span></div>
+    </a>`;
+  });
+  return `<section class="panel" aria-labelledby="h-work">
+    <header><h2 id="h-work">Working now</h2>${h.working.length ? `<span class="count">${h.working.length}</span>` : ""}<span class="hnote">Time is this turn's, not the slice's</span></header>
+    ${cards.length ? cards.join("") : `<div class="hempty">${ic("pause")}<span>No one is working right now.</span></div>`}
+  </section>`;
+}
+
+function homeOthers(h) {
+  const rows = h.rooms.map((r) => {
+    const sum = S.state.rooms.find((x) => x.id === r.id);
+    const state = sum ? railState(sum).text : r.status;
+    return `<a class="roomrow" href="#/r/${esc(r.id)}">${homeTile(r.id, r.title)}<span class="rr-text"><strong>${esc(r.title)}</strong><span>${esc(state)}${r.project ? ` · ${esc(r.project)}` : ""}${r.shared?.length ? ` · ${sharedText(r.shared)}` : ""}</span></span><span class="rr-meta">${r.updatedAt ? `<span data-ago="${esc(r.updatedAt)}">${ago(r.updatedAt)}</span>` : ""}</span></a>`;
+  });
+  return `<section class="panel" aria-labelledby="h-other">
+    <header><h2 id="h-other">Other rooms</h2></header>
+    ${rows.length ? `<div class="rowlist">${rows.join("")}</div>` : S.state.rooms.length ? `<div class="hempty">${ic("rooms")}<span>Every room is working.</span></div>` : startRoom()}
+  </section>`;
+}
+
+/** No rooms yet: what a room is, and the three ways to start one. */
+function startRoom() {
+  return `<div class="startroom"><p>A room is one conversation with your crew. It can switch between chatting, planning and building, and everyone keeps their memory of the room.</p>
+    <div class="modecards">
+      <button type="button" class="modecard" data-new="chat">${ic("chat")}<b>Chat</b><span>Ask one agent or several, and let them discuss.</span></button>
+      <button type="button" class="modecard" data-new="plan">${ic("plan")}<b>Plan</b><span>Independent proposals, critiques, your call, a written plan.</span></button>
+      <button type="button" class="modecard" data-new="build">${ic("build")}<b>Build</b><span>One builds, the other reviews, slice by slice.</span></button></div></div>`;
+}
+
+/** One window of an allowance: how much is used, the guard's threshold on the bar, when it resets and when it was read. */
+function homeMeter(w, rule) {
+  const over = w.expired || (w.resetsAt && new Date(w.resetsAt) <= Date.now());
+  const used = over || w.used == null ? null : Math.round(w.used);
+  const at = rule?.enabled ? rule.at : null;
+  const level = used == null ? "none" : at != null && used >= at ? "bad" : used >= 70 ? "warn" : "ok";
+  const resets = w.resetsAt && !over ? `resets ${whenText(w.resetsAt)} (in ${duration(new Date().toISOString(), w.resetsAt)})` : over ? "has reset; waiting for a new reading" : "reset time not known";
+  const read = w.sourceAt ?? w.receivedAt;
+  return `<div class="hmeter" data-level="${level}" data-window="${esc(w.type)}">
+    <div class="row"><span>${esc(w.label ?? w.type)}</span><b>${used == null ? (over ? "reset" : "unknown") : `${used}%`}</b></div>
+    <div class="bar" role="img" aria-label="${esc(`${w.label ?? w.type}: ${used == null ? "no current reading" : `${used}% used`}${at != null ? `; the guard holds at ${at}%` : ""}`)}"><i style="width:${used == null ? 0 : Math.min(100, Math.max(1, used))}%"></i>${at != null ? `<span class="mark" style="left:${at}%"></span>` : ""}</div>
+    <div class="row sub"><span>${esc(resets)}</span><span>${read ? `read <span data-ago="${esc(read)}">${ago(read)}</span>${w.agent ? ` from ${esc(name(w.agent))}` : ""}` : ""}</span></div>
+  </div>`;
+}
+
+function homeUsage(h) {
+  const policies = h.desk.guard.policies;
+  const groups = [...new Set([...policies.map((p) => p.group), ...Object.keys(h.usage.groups ?? {})])];
+  const allow = groups
+    .map((group) => {
+      const p = policies.find((x) => x.group === group);
+      const g = h.usage.groups?.[group];
+      const agents = h.agents.filter((a) => a.group === group);
+      if (!agents.length && !g) return "";
+      const rules = Object.fromEntries((p?.rules ?? []).map((r) => [r.type, r]));
+      const on = (p?.rules ?? []).filter((r) => r.enabled);
+      const guard = on.length ? `guard at ${on.map((r) => `${r.at}% ${r.label}`).join(", ")}` : "guard off";
+      const holds = h.desk.guard.holds.filter((x) => x.group === group);
+      return `<div class="allow" data-group="${esc(group)}">
+        <header><strong>${esc(p?.label ?? group)}</strong><span class="muted">${esc(guard)}</span></header>
+        ${g?.windows?.length ? g.windows.map((w) => homeMeter(w, rules[w.type])).join("") : `<p class="hint">No usage reading yet.</p>`}
+        ${holds.map((x) => `<p class="guardhold" data-excepted="${x.excepted}">${ic("lock")}<span>${esc(x.excepted ? `The guard is paused for the ${x.label} limit until it resets.` : `${x.reason[0].toUpperCase()}${x.reason.slice(1)}.`)}</span></p>`).join("")}
+        <div class="agentrows">${agents
+          .map((a) => {
+            // "building in A, B and C; reviewing in D": one verb per kind of work.
+            const byVerb = new Map();
+            for (const w of a.working) {
+              const verb = workWhat({ ...w, agent: a.agent }).split(/[: ]/)[0];
+              byVerb.set(verb, [...(byVerb.get(verb) ?? []), `<a href="#/r/${esc(w.room)}">${esc(w.title)}</a>`]);
+            }
+            const list = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}` : xs[0]);
+            const doing = byVerb.size ? [...byVerb].map(([verb, rooms]) => `${esc(verb)} in ${list(rooms)}`).join("; ") : `<span class="muted">idle</span>`;
+            return `<div class="agentrow">${avatar(a.agent, 22)}<b>${esc(a.label)}</b><span>${doing}</span>${a.blockers.length ? `<span class="muted held">held: ${esc(a.blockers.join("; "))}</span>` : ""}</div>`;
+          })
+          .join("")}</div>
+      </div>`;
+    })
+    .join("");
+  return `<section class="panel" aria-labelledby="h-usage">
+    <header><h2 id="h-usage">Agents and usage</h2></header>
+    <div class="usage">${allow}</div>
+  </section>`;
+}
+
+/** One line of Recent, in words. */
+function recentText(f) {
+  const turnSaid = { APPROVED: "approved", CHANGES: "asked for changes", REVIEW: "handed over for review", OWNER: "asked you something", DONE: "says it's done", REPLY: "replied", PROPOSAL: "proposed a plan", CRITIQUE: "critiqued the proposals", AGREE: "agreed", DISAGREE: "disagreed" };
+  switch (f.kind) {
+    case "turn":
+      return f.state === "failed"
+        ? `<b>${esc(name(f.agent))}</b>'s ${esc((KIND[f.turnKind] ?? "turn").toLowerCase())} failed${f.error ? `: ${esc(f.error)}` : ""}`
+        : `<b>${esc(name(f.agent))}</b> ${esc(turnSaid[f.status] ?? `finished: ${(KIND[f.turnKind] ?? "a turn").toLowerCase()}`)}${f.detail ? `: ${esc(f.detail)}` : ""}`;
+    case "question":
+      return `<b>${esc(f.from ? name(f.from) : "Toryo")}</b> asked: ${esc(f.question)}${f.open ? "" : ` <span class="muted">(answered)</span>`}`;
+    case "answer":
+      return f.change ? `<b>You</b> sent a change request` : `<b>You</b> answered${f.answered ? ` “${esc(f.answered)}”` : ""}: ${esc(f.text)}`;
+    case "checks":
+      return `Checks failed: ${esc(f.failed.join(", "))}`;
+    default:
+      return esc(f.text ?? "");
+  }
+}
+
+function homeRecent(h) {
+  const icon = (f) => (f.kind === "turn" ? (f.state === "failed" ? "x" : f.status === "APPROVED" ? "check" : { build: "build", review: "review", plan: "plan" }[workKind(f.turnKind)] ?? "chat") : { question: "hand", answer: "chat", checks: "checks", approved: "check", desk: "lock" }[f.kind] ?? "dots");
+  const items = h.recent.items.map(
+    (f) => `<li data-k="${esc(f.kind)}"><span class="fi" aria-hidden="true">${ic(icon(f))}</span><span class="ft">${recentText(f)}${f.room ? `<br><a href="#/r/${esc(f.room)}">${esc(f.roomTitle)}</a>` : ""}</span><time datetime="${esc(f.at)}" data-ago="${esc(f.at)}">${ago(f.at)}</time></li>`,
+  );
+  return `<section class="panel" aria-labelledby="h-recent">
+    <header><h2 id="h-recent">Recent</h2></header>
+    ${items.length ? `<ul class="recent">${items.join("")}</ul>` : `<div class="hempty">${ic("clock")}<span>Nothing yet.</span></div>`}
+    ${h.recent.next && S.recent < 100 ? `<div><button type="button" class="btn small quiet" data-more-recent>Show older</button></div>` : ""}
+  </section>`;
 }
 
 // ------------------------------------------------------------------ empty states
@@ -2115,18 +2468,6 @@ function renderWelcome() {
       fail(error);
     }
   });
-  $("#crewPane").innerHTML = agentsOverview();
-  setSideTab("crew");
-}
-
-function renderNoRooms() {
-  $("#composer").hidden = true;
-  $("#log").innerHTML = `<div class="empty"><p class="eyebrow">${esc(S.state.config.projects.map((p) => p.name).join(", "))}</p><h2>Start a room</h2>
-    <p>A room is one conversation with your crew. It can switch between chatting, planning and building, and everyone keeps their memory of the room.</p>
-    <div class="modecards">
-      <button type="button" class="modecard" data-new="chat">${ic("chat")}<b>Chat</b><span>Ask one agent or several, and let them discuss.</span></button>
-      <button type="button" class="modecard" data-new="plan">${ic("plan")}<b>Plan</b><span>Independent proposals, critiques, your call, a written plan.</span></button>
-      <button type="button" class="modecard" data-new="build">${ic("build")}<b>Build</b><span>One builds, the other reviews, slice by slice.</span></button></div></div>`;
   $("#crewPane").innerHTML = agentsOverview();
   setSideTab("crew");
 }
@@ -2180,13 +2521,31 @@ document.addEventListener("click", async (e) => {
   const hit = (sel) => t.closest(sel);
   try {
     if (hit("[data-close]") || t.id === "sheet") return closeSheet();
-    if (hit(".roomlink")) {
-      setPane("room");
-      return loadRoom(hit(".roomlink").dataset.room);
+    if (hit(".roomlink[data-room]")) {
+      // A step in the browser's history, so Back returns to where you were (Home, or another room).
+      const id = hit(".roomlink[data-room]").dataset.room;
+      if (location.hash !== `#/r/${id}`) history.pushState(null, "", `#/r/${id}`);
+      return loadRoom(id, { open: true });
+    }
+    if (hit("[data-open-question]")) {
+      // From Home: the room, at that question.
+      S.focusOn = hit("[data-open-question]").dataset.openQuestion;
+      setRoomTab("relay");
+      return;
+    }
+    if (hit("[data-more-recent]")) {
+      S.recent = Math.min(100, S.recent + 30);
+      return loadHome();
     }
     if (hit("[data-sidetab]")) return setSideTab(hit("[data-sidetab]").dataset.sidetab);
     if (hit("[data-roomtab]")) return setRoomTab(hit("[data-roomtab]").dataset.roomtab);
-    if (hit("#tabbar [data-view]")) return setPane(hit("#tabbar [data-view]").dataset.view);
+    if (hit("#tabbar [data-view]")) {
+      // On a phone: Home and the room are pages (with an address); the rooms list is the rail.
+      const view = hit("#tabbar [data-view]").dataset.view;
+      if (view === "home") return S.page === "home" ? setPane("home") : (location.hash = "#/");
+      if (view === "room" && S.roomId && S.page !== "room") return (location.hash = `#/r/${S.roomId}`);
+      return setPane(view === "room" && !S.roomId ? "rooms" : view);
+    }
     if (hit("[data-next-ask]")) {
       // The oldest question waiting for you, in any room: open its room and show it.
       const asks = (S.state?.rooms ?? []).flatMap((x) => (x.questions ?? []).map((q) => ({ room: x.id, id: q.id, at: q.at ?? "" })));
@@ -2195,8 +2554,11 @@ document.addEventListener("click", async (e) => {
       setPane("room");
       setRoomTab("relay");
       S.focusOn = next.id;
-      if (next.room === S.roomId) renderTimeline();
-      else await loadRoom(next.room);
+      if (next.room === S.roomId && S.page === "room") renderTimeline();
+      else {
+        if (location.hash !== `#/r/${next.room}`) history.pushState(null, "", `#/r/${next.room}`);
+        await loadRoom(next.room, { open: true });
+      }
       return;
     }
     if (hit("[data-new]")) return newRoomSheet(hit("[data-new]").dataset.new);
@@ -2447,6 +2809,7 @@ $("#bellBtn").setAttribute("aria-label", "Browser notifications");
 $("#settingsBtn").innerHTML = ic("sliders");
 $("#roomBtn").innerHTML = `${ic("dots")}<span class="lbl">Room</span>`;
 $("#newRoomBtn").innerHTML = `${ic("plus")}New room`;
+$("#tabbar [data-view=home]").innerHTML = `${ic("home")}<span>Home</span>`;
 $("#tabbar [data-view=rooms]").innerHTML = `${ic("rooms")}<span>Rooms</span>`;
 $("#tabbar [data-view=room]").innerHTML = `${ic("chat")}<span>Room</span>`;
 applyTheme();
@@ -2458,13 +2821,12 @@ document.addEventListener("keydown", (e) => {
 });
 document.addEventListener("visibilitychange", () => !document.hidden && markSeenSoon());
 $("#log").addEventListener("scroll", markSeenSoon, { passive: true });
-window.addEventListener("hashchange", () => {
-  const id = location.hash.match(/^#\/r\/([\w-]+)/)?.[1];
-  if (id && id !== S.roomId) loadRoom(id);
-});
+// Links to rooms and Home, Back and Forward: the address decides.
+window.addEventListener("hashchange", () => S.state && route());
 
 setInterval(() => {
   for (const t of $$("[data-since]")) t.textContent = since(t.dataset.since);
+  for (const t of $$("[data-ago]")) t.textContent = ago(t.dataset.ago);
 }, 1000);
 
 // Usage meters change with time alone: a limit resets, a reading ages. Redraw them without waiting for news.
@@ -2473,6 +2835,9 @@ setInterval(() => {
     const html = limitMeters(S.state?.limits?.[box.dataset.agent], box.dataset.agent);
     if (html) box.outerHTML = html;
   }
+  // Home's, per allowance: only that panel, so nothing else on Home moves.
+  const usage = $("#home #h-usage")?.closest("section");
+  if (usage && S.home) usage.outerHTML = homeUsage(S.home);
 }, 30_000);
 
 

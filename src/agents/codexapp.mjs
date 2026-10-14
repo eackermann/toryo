@@ -284,7 +284,15 @@ export const codexapp = {
           if (!line.trim()) continue;
           if (!seen && line.includes(marker)) {
             seen = true;
-            onStarted?.({ sessionId: thread });
+            // When the app took it up: that log line's own time, which may be while Toryo was stopped.
+            let at = null;
+            try {
+              const ts = JSON.parse(line).timestamp;
+              if (typeof ts === "string" && Number.isFinite(Date.parse(ts))) at = new Date(ts).toISOString();
+            } catch {
+              /* a line Toryo can't read: the time it saw it will do */
+            }
+            onStarted?.({ sessionId: thread, at });
           }
           let ev;
           try {

@@ -145,23 +145,27 @@ test("after a restart, the Codex app agent follows its turn from the marker with
     writeFileSync(
       rollout,
       L({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "an older turn" } }) +
-        L({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: `${marker}\nDo it.` }] } }) +
+        L({ timestamp: "2026-10-13T10:30:00.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: `${marker}\nDo it.` }] } }) +
         L({ type: "event_msg", payload: { type: "token_count", rate_limits: { primary: { used_percent: 30, window_minutes: 300 } } } }),
     );
     setTimeout(() => appendFileSync(rollout, L({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "Done after restart.\nTORYO: REVIEW S | h.md" } })), 300);
     const turnDir = join(base, "turn-new");
     mkdirSync(turnDir);
     const activity = [];
+    const started = [];
     const result = await codexapp.run({
       cfg: { exe: join(base, "no-such-codex.exe"), codexHome: base, thread, open: () => assert.fail("must not open") },
       prompt: "ignored",
       turnDir,
       attach: { marker },
       onActivity: (a) => activity.push(a),
+      onStarted: (s) => started.push(s),
       timeoutMs: 20_000,
     });
     assert.equal(result.error, undefined);
     assert.equal(result.text, "Done after restart.\nTORYO: REVIEW S | h.md");
+    // It took the turn up at 10:30 (perhaps while Toryo was stopped): that's the time it says, not now.
+    assert.deepEqual(started, [{ sessionId: thread, at: "2026-10-13T10:30:00.000Z" }]);
     assert.ok(activity.some((a) => a.kind === "limits" && a.limits.windows[0].used === 30));
     assert.ok(activity.some((a) => /Following the Codex app's turn again/.test(a.text ?? "")));
   } finally {

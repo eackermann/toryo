@@ -70,7 +70,7 @@ Numbers are tabular wherever they change. The three families are bundled as woff
 
 ## Activity rings
 
-Every room tile wears a ring for what's happening, in the rooms list and in the room's header (and on Home, when it comes). An agent's monogram wears one while it works: on its live turn, and on its card in *Crew*. The state comes from the room's summary (`ringFor` in [`web/rings.js`](../web/rings.js)); the rings are CSS, and the sparkler is drawn on a canvas.
+Every room tile wears a ring for what's happening: in the rooms list, in the room's header, and on Home's cards. An agent's monogram wears one while it works: on its live turn, and on its card in *Crew*. The state comes from the room's summary (`ringFor` in [`web/rings.js`](../web/rings.js)); the rings are CSS, and the sparkler is drawn on a canvas.
 
 | State | Ring |
 |---|---|
@@ -113,13 +113,17 @@ What needs you is never hidden: a failed turn shows red, and in every other stat
 
 With reduced motion, nothing moves: rings are solid, no canvas is drawn, nothing pulses, and the page jumps instead of scrolling smoothly.
 
+## Home
+
+Home follows the prototype's: a sentence at the top (the count of what needs you in orange), then two columns, *Needs you*, *Working now* and *Other rooms* on the left, *Agents and usage* and *Recent* on the right. Under 1180 px they're one column. Question cards have the orange edge; working cards show the room's tile with its ring, the kind of work as a chip, and the time in large numbers. Each allowance's meters mark the guard's threshold with a line across the bar. *Recent* has an icon per kind of event (orange for a question, red for failed checks).
+
 ## Layout
 
 | Width | Layout |
 |---|---|
 | Over 1180 px | The rooms, the room's timeline, and its plan, crew and ledger beside it |
 | 760 to 1180 px | The rooms and the room. Plan, crew and ledger become tabs in the room, next to the relay |
-| Under 760 px | One column with a tab bar for the rooms and the room. The room's header gets compact. A question's buttons fill the card's width, at least 44 px tall, so they're easy to tap |
+| Under 760 px | One column with a tab bar: Home, the rooms, and the room. The room's header gets compact. A question's buttons fill the card's width, at least 44 px tall, so they're easy to tap |
 
 Nothing scrolls sideways at 320 and 390 pixels. Keyboard focus is always visible: a two-pixel blue outline.
 

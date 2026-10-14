@@ -90,6 +90,15 @@ Every turn ends with one line, and that line is the only thing Toryo reads. It h
 
 The page follows Toryo's design system ([docs/design-system.md](docs/design-system.md)). Color means what's happening, never who: the logo's purple plans, its blue builds and its mint reviews, and orange is only for what needs you. Agents are told apart by name and a neutral monogram. Light and dark follow your system, or the theme button in the top bar. The fonts ship with the page, so it still loads nothing from the internet.
 
+- **Home.** The page that opens first (`#/`; the Toryo name and the rail's *Home* lead back to it, and a phone has a Home tab). Every room at a glance:
+  - **A sentence** on what's going on, and what holds work up desk-wide: Pause everything, your holds, the usage guard.
+  - **Needs you:** every open question, oldest first, with its room, how long it has waited and the recommendation. Each opens its room at that question.
+  - **Working now:** who is working where, on what (slice and round, or the task), and for how long. A turn's times are kept apart: preparing, waiting in the Codex app's queue, working. Each card has its latest output and how long ago it came, and says which rooms share its folder.
+  - **Other rooms:** paused, held, stopped, idle or done, with what keeps them.
+  - **Agents and usage:** each allowance's limits, with the guard's threshold marked, the reset date and time, and how old each reading is. Each agent has a line on what it's doing and what holds it; headless Codex and the Codex app share one allowance but each has its own line.
+  - **Recent:** finished turns, questions, your answers, failed checks, approvals, and the desk's own events (holds, pauses, the guard), newest first.
+
+  Home is fetched as one summary, never whole transcripts, and updates as things happen. Cut off from the desk, it says so, and fetches afresh when it's back. Its buttons (answering, Pause everything, holds) come next.
 - **The top bar.** How many rooms are working, and how many questions need you; that count opens the room with the oldest question and shows it to you. The logo is live: each of its blocks breathes while that kind of work runs anywhere (blue builds, purple plans, mint reviews).
 - **The rooms.** Grouped by project. Each room's tile wears a ring for what it's doing:
   - **At work:** a sparkler runs round it in the color of the work.
@@ -214,13 +223,13 @@ These work across every room. Turns and checks already running always finish: th
 
 ## Planned
 
-The owner has chosen a Home view for managing several rooms. Home will show questions, current work and elapsed time, measured usage and resets, what the guard holds, and recent activity, with buttons for the controls above.
+Home (above) will get buttons: answering questions in place, with *Accept all recommendations* for a planning checkpoint, and the desk's controls (Pause everything, holds, the guard).
 
 Each room will show, at its top, a timeline of its current session: how long it spent planning, building, reviewing and running checks, in color and in words. A room will be able to start a new session, for example to plan the next sprint: the timeline starts again and the agents start fresh, while the earlier sessions stay in the room.
 
 New headless Build rooms will default to their own worktree, with the shared-folder choice still available and existing rooms left in place. Worktrees will live under `~/.toryo/worktrees`, include current uncommitted work, and show the room's own changes for an explicit return to main as uncommitted files. Conflicts will leave main untouched. The Codex app stays in main for this release. A second builder in one folder will be refused. A planning author can write shared documents into main between active turns/checks/reviews, then the build room gets a note listing changed files. Setup and checks will run one at a time per project unless its settings allow parallel runs; commands receive their room ID, folder, and port offset.
 
-These additions are **planned, not yet available**. The [implementation plan](docs/plans/plan-a-home-view-for-foreman-and-desk-wi.md) has already given the page the new look the owner approved (a design system, with rings that show what each room is doing), the plan checks described under *Plan* above, and the usage guard. Next comes Home, then the session timeline and new sessions, followed by a small builder guard, shared-file coordination, and worktrees. [Accepted review decisions](docs/decisions.md#2026-10-13-accepted-plan-review-and-worktree-defaults) and [plan-review decisions](docs/decisions.md#2026-10-13-plan-checks-and-discussion-handoffs) record the choices and why. The review's open questions are settled.
+These additions are **planned, not yet available**. The [implementation plan](docs/plans/plan-a-home-view-for-foreman-and-desk-wi.md) has already given the page the new look the owner approved (a design system, with rings that show what each room is doing), the plan checks described under *Plan* above, the usage guard, and Home's overview. Next come Home's buttons, then the session timeline and new sessions, followed by a small builder guard, shared-file coordination, and worktrees. [Accepted review decisions](docs/decisions.md#2026-10-13-accepted-plan-review-and-worktree-defaults) and [plan-review decisions](docs/decisions.md#2026-10-13-plan-checks-and-discussion-handoffs) record the choices and why. The review's open questions are settled.
 
 Later retains one-turn overrides, usage forecasts and advance warnings, further Swap work, turn caps, provider-exhaustion recovery, and immediate pause. Managed dev servers, general resource declarations, and test-database naming are also deferred; a worktree and port offset do not by themselves isolate services. Folder restoration would ask first because it overwrites files; a commit offer would require project permission. Separately, snapshots keeping their own copies of referenced data is a bug fix to do soon, outside this plan, so a project's Git cleanup cannot break old snapshots.
 

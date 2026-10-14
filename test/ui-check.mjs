@@ -56,6 +56,8 @@ try {
     { agent: "claude", match: "Anything missing", reply: "Slice 1 needs a test.\nTORYO: REPLY" },
     { agent: "codex", match: "The owner asked for changes to the plan", write: { path: "docs/plans/ui.md", content: "# Exports\n\n### Slice 1: One, tested\n" }, reply: "Added it.\nTORYO: REVIEW docs/plans/ui.md" },
     { agent: "codex", match: "Slow build of the parser", delayMs: 6000, reply: "Built the parser.\nTORYO: OWNER Ship it?" },
+    // Step 5s: a turn that takes a while to start (preparing), then works, saying what it runs.
+    { agent: "codex", match: "Phases for Home", delayMs: 2500, progress: "npm run build", workMs: 4000, reply: "Built.\nTORYO: REPLY" },
     { agent: "codex", match: "Slow review of the (lexer|docs)", delayMs: 6000, reply: "Built it.\nTORYO: REVIEW Slice 1: It | h.md" },
     { agent: "claude", hang: true },
     { agent: "codex", reply: "Which one? I recommend SQLite.\nTORYO: OWNER SQLite or Postgres?" },
@@ -105,11 +107,15 @@ try {
       s.close(() => resolve(port));
     });
   });
-  desk = spawn(node, [join(root, "bin", "toryo.mjs"), "--port", String(port)], {
-    env: { ...process.env, TORYO_HOME: home, TORYO_WEB_DIR: web, FAKE_SCRIPT: join(base, "script.json"), CODEX_HOME: join(base, "codex") },
-    stdio: ["ignore", "pipe", "inherit"],
-  });
-  await new Promise((resolve) => desk.stdout.on("data", (d) => /Toryo is running/.test(d) && resolve()));
+  // This check's own desk (its own port and folder); step 5s stops it and starts it again.
+  const startDesk = async () => {
+    desk = spawn(node, [join(root, "bin", "toryo.mjs"), "--port", String(port)], {
+      env: { ...process.env, TORYO_HOME: home, TORYO_WEB_DIR: web, FAKE_SCRIPT: join(base, "script.json"), CODEX_HOME: join(base, "codex") },
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    await new Promise((resolve) => desk.stdout.on("data", (d) => /Toryo is running/.test(d) && resolve()));
+  };
+  await startDesk();
   const url = `http://localhost:${port}/`;
 
   const browser = await chromium.launch();
@@ -123,20 +129,21 @@ try {
   await page.goto(url);
   await page.waitForSelector("#newRoomBtn");
 
-  // 0. Usage meters: each window says how old its own reading is, and a limit that resets while the page
-  // sits idle (no readings, no events, no navigation) shows as reset rather than keeping its old percentage.
+  // 0. Usage meters, on Home (the page that opens first): each window of Codex's allowance says how old its own
+  // reading is, and a limit that resets while the page sits idle (no readings, no events, no navigation) shows as
+  // reset rather than keeping its old percentage.
   const idle = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   idle.on("pageerror", (e) => errors.push(String(e)));
   await idle.clock.install();
   await idle.goto(url);
-  await idle.waitForSelector(".limits[data-agent=codex] [data-window=five_hour]");
-  const meter = (type) => idle.innerText(`.limits[data-agent=codex] [data-window=${type}]`);
-  assert.match(await meter("five_hour"), /64%[\s\S]*just now/);
-  assert.match(await meter("weekly"), /30%[\s\S]*6 h ago/);
+  await idle.waitForSelector(".home .allow[data-group=openai] .hmeter[data-window=five_hour]");
+  const meter = (type) => idle.innerText(`.home .allow[data-group=openai] .hmeter[data-window=${type}]`);
+  assert.match(await meter("five_hour"), /64%[\s\S]*resets .* \(in \d+ min\)[\s\S]*read (\d+s|1 min) ago from Codex/);
+  assert.match(await meter("weekly"), /30%[\s\S]*read 6 h ago/);
   await idle.clock.fastForward("15:00");
-  await idle.waitForFunction(() => /reset/.test(document.querySelector(".limits[data-agent=codex] [data-window=five_hour]")?.innerText ?? ""));
+  await idle.waitForFunction(() => /reset/.test(document.querySelector(".home .allow[data-group=openai] .hmeter[data-window=five_hour]")?.innerText ?? ""));
   assert.doesNotMatch(await meter("five_hour"), /64%/);
-  assert.match(await meter("five_hour"), /waiting for a new reading/);
+  assert.match(await meter("five_hour"), /has reset; waiting for a new reading/);
   await idle.close();
 
   // 1. Settings: saving without changes keeps the check's time limit; the project gets its own default thread.
@@ -826,6 +833,135 @@ try {
   await page.waitForTimeout(800);
   assert.ok(await page.$(`.decision.closed[data-id="${lateQ.id}"]`), "the answered question stays answered");
   await page.unroute(`**/api/rooms/${lateRoom.id}`);
+
+  // 5s. Home. The address decides (#/ is Home, #/r/<id> a room), and Back returns. Its questions come oldest first,
+  // each opening its room at that question, by mouse or keyboard. A hostile room title is only text. A turn's times
+  // are kept apart (preparing, then working, with its latest output). News in bursts costs a few fetches of the
+  // overview, not one per event. Cut off from the desk, it says so.
+  await page.click("a.brand");
+  await page.waitForFunction(() => location.hash === "#/" && !document.querySelector("#home").hidden && document.querySelector("#main").hidden);
+  assert.equal(await page.getAttribute(".roomlink.railhome", "aria-current"), "page");
+  const hostile = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], title: '<img src=x onerror="window.__xss=1">', text: "Ask me.", to: "codex" });
+  await until(async () => (await questions(hostile.id)).length === 1 && (await view(hostile.id)).live.length === 0);
+  const homeData = async () => (await fetch(`${url}api/home`)).json();
+  await page.waitForFunction((id) => document.querySelector(`#home .ask a[href="#/r/${id}"]`), hostile.id);
+  assert.equal(await page.evaluate(() => window.__xss), undefined);
+  assert.equal(await page.$$eval("#home img", (imgs) => imgs.length), 0);
+  assert.ok((await page.innerText("#home")).includes('<img src=x onerror="window.__xss=1">'), "the title, as text");
+  // Oldest first, as the desk has them.
+  const shown = await page.$$eval("#home .ask", (cards) => cards.map((c) => c.dataset.q));
+  assert.deepEqual(shown, (await homeData()).questions.map((q) => q.id));
+  // Open one from Home: its room, at that question. Back: Home again.
+  const [hostileQ] = await questions(hostile.id);
+  await page.click(`#home .ask[data-q="${hostileQ.id}"] [data-open-question]`);
+  await page.waitForFunction((id) => location.hash === `#/r/${id}` && !document.querySelector("#main").hidden, hostile.id);
+  await page.waitForFunction((qid) => {
+    const card = document.querySelector(`#log [data-id="${qid}"]`)?.getBoundingClientRect();
+    const log = document.querySelector("#log").getBoundingClientRect();
+    return card && card.top >= log.top - 1 && card.bottom <= log.bottom + 1;
+  }, hostileQ.id);
+  await page.goBack();
+  await page.waitForFunction(() => location.hash === "#/" && !document.querySelector("#home").hidden);
+  // By keyboard: the link takes the focus, keeps it while Home is drawn again with news, and Enter opens it.
+  await page.focus(`#home .ask[data-q="${hostileQ.id}"] [data-open-question]`);
+  const redrawn = page.waitForResponse((r) => r.url().includes("/api/home"));
+  await post(`api/rooms/${hostile.id}/messages`, { text: "News while you're focused.", to: "codex", answering: false });
+  await redrawn;
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.openQuestion), hostileQ.id, "the focus stays on the link");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction((id) => location.hash === `#/r/${id}`, hostile.id);
+  await page.goBack();
+  await page.waitForFunction(() => !document.querySelector("#home").hidden);
+  // A turn's times: preparing first (it takes a while to start), then working, with what it runs.
+  const phased = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], title: "Phases room", text: "Phases for Home.", to: "codex" });
+  const card = `#home .workcard[href="#/r/${phased.id}"]`;
+  await page.waitForFunction((sel) => /preparing for \d+:\d\d/.test(document.querySelector(sel)?.innerText ?? ""), card);
+  // Its latest output arrives live; the overview that follows says it's working.
+  await page.waitForFunction((sel) => /npm run build/.test(document.querySelector(sel)?.innerText ?? ""), card, { timeout: 15_000 });
+  await page.waitForFunction((sel) => /working · last output/.test(document.querySelector(sel)?.innerText ?? ""), card);
+  const working = await page.innerText(card);
+  assert.match(working, /prepared in \d+s/);
+  assert.match(working, /working · last output \d+s ago/);
+  // A burst of news (eight notes in a row): a few fetches of the overview, and no room fetched whole.
+  const fetched = [];
+  const onRequest = (r) => /\/api\/(home|rooms\/[\w-]+)(\?|$)/.test(r.url()) && r.method() === "GET" && fetched.push(new URL(r.url()).pathname);
+  page.on("request", onRequest);
+  for (let i = 0; i < 8; i++) await post(`api/rooms/${hostile.id}/messages`, { text: `Burst ${i}.`, to: "codex", answering: false });
+  await page.waitForTimeout(2500);
+  page.off("request", onRequest);
+  const homeFetches = fetched.filter((p) => p === "/api/home").length;
+  assert.ok(homeFetches >= 1 && homeFetches <= 6, `fetches of the overview: ${homeFetches}`);
+  assert.deepEqual(fetched.filter((p) => p !== "/api/home"), [], "no room fetched whole");
+  // Unseen while Home shows: what came in a room you're not looking at stays unread, so going back says so.
+  const away = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], title: "Away room", text: "Ask me.", to: "codex" });
+  await until(async () => (await view(away.id)).live.length === 0 && (await questions(away.id)).length === 1);
+  await openRoom(away.id, "Away room");
+  await page.waitForTimeout(1800);
+  await page.click("a.brand");
+  await page.waitForFunction(() => !document.querySelector("#home").hidden);
+  const doneTurns = async (id) => (await view(id)).events.filter((e) => e.type === "turn" && e.state === "done").length;
+  for (const text of ["One more.", "And another."]) {
+    const n = await doneTurns(away.id);
+    await post(`api/rooms/${away.id}/messages`, { text, to: "codex", answering: false });
+    await until(async () => (await doneTurns(away.id)) > n && (await view(away.id)).live.length === 0);
+  }
+  await page.waitForTimeout(1800);
+  await openRoom(away.id, "Away room");
+  await page.waitForSelector(".away");
+  assert.match(await page.innerText(".away"), /While you were away: 2 turns/);
+  await page.click("a.brand");
+  await page.waitForFunction(() => !document.querySelector("#home").hidden);
+
+  // Cut off (this check's desk stops): Home says so. Back (it starts again): the note goes, and Home fetches a fresh
+  // overview, which shows what changed meanwhile (the rooms whose turns were cut off are paused). The room behind
+  // Home isn't fetched: going back to it does that.
+  await until(async () => (await view(phased.id)).live.length === 0);
+  const errorsBefore = errors.length;
+  desk.kill("SIGTERM");
+  await new Promise((r) => desk.once("exit", r));
+  await page.waitForSelector("#home .offline", { timeout: 15_000 });
+  assert.match(await page.innerText("#home .offline"), /Reconnecting to the desk… What you see here may be out of date\./);
+  const onReconnect = [];
+  const record = (r) => r.method() === "GET" && /\/api\/(home|rooms\/[\w-]+)(\?|$)/.test(r.url()) && onReconnect.push(new URL(r.url()).pathname);
+  page.on("request", record);
+  await startDesk();
+  await page.waitForSelector("#home .offline", { state: "detached", timeout: 20_000 });
+  await page.waitForFunction(() => /Paused/.test(document.querySelector("#home")?.innerText ?? ""));
+  await page.waitForTimeout(1000);
+  page.off("request", record);
+  assert.ok(onReconnect.includes("/api/home"), "a fresh overview");
+  assert.deepEqual(onReconnect.filter((p) => p !== "/api/home"), [], "no room fetched behind Home");
+  // While it was down, the browser's attempts to reconnect failed, as they should.
+  errors.splice(errorsBefore).forEach((e) => assert.match(e, /ERR_CONNECTION_REFUSED|Failed to load resource|EventSource/));
+
+  // A new desk with no project yet: the welcome page. Adding the first project opens Home, without a reload.
+  // (Another desk of this check's own, with its own folder and port.)
+  const home2 = join(base, "home2");
+  mkdirSync(home2, { recursive: true });
+  writeFileSync(join(home2, "config.json"), JSON.stringify({ version: 1, notify: { windows: false }, agents: { codex: { command: [node, FAKE, "codex"] }, claude: { command: [node, FAKE, "claude"] }, codexapp: { exe, codexHome, openThread: "never" } }, projects: [] }));
+  const port2 = await new Promise((resolve) => {
+    const srv = createServer().listen(0, "127.0.0.1", () => {
+      const p2 = srv.address().port;
+      srv.close(() => resolve(p2));
+    });
+  });
+  const desk2 = spawn(node, [join(root, "bin", "toryo.mjs"), "--port", String(port2)], { env: { ...process.env, TORYO_HOME: home2, TORYO_WEB_DIR: web, FAKE_SCRIPT: join(base, "script.json"), CODEX_HOME: join(base, "codex") }, stdio: ["ignore", "pipe", "inherit"] });
+  try {
+    await new Promise((resolve) => desk2.stdout.on("data", (d) => /Toryo is running/.test(d) && resolve()));
+    const fresh = await (await browser.newContext({ viewport: { width: 1400, height: 900 } })).newPage();
+    fresh.on("pageerror", (e) => errors.push(String(e)));
+    await fresh.goto(`http://localhost:${port2}/`);
+    await fresh.waitForSelector("#welcomeForm");
+    await fresh.fill("#wPath", repo);
+    await fresh.click("#welcomeForm button[type=submit]");
+    await fresh.waitForFunction(() => !document.querySelector("#home").hidden && document.querySelector(".home .hero") && document.querySelector("#main").hidden);
+    assert.match(await fresh.innerText(".home .hero"), /All quiet/);
+    await fresh.close();
+  } finally {
+    desk2.kill("SIGTERM");
+    await new Promise((r) => desk2.once("exit", r));
+  }
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");
