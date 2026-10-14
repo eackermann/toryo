@@ -29,6 +29,17 @@ const S = {
   live: new Map(),
   plan: null,
   route: "auto",
+  // What the note you're writing answers, fixed when you begin it or press "Write my own answer" (see bindAnswer):
+  // { roomId, asker, byAgent: { agent: question id or null }, chosen, route }. Kept with the room's draft, and its
+  // recipient, across room switches and reloads.
+  answering: null,
+  // Rooms with a note on its way; a room sends one at a time.
+  sending: new Set(),
+  // Each room's draft revision: it changes with the text, the recipient and a question you choose, so a reply to a
+  // send acts only on the draft as it was sent.
+  revisions: new Map(),
+  // The saved revision of the draft this tab last loaded or wrote, per room (see revise).
+  loaded: new Map(),
   // Ask or Tell for the next note, once you've chosen; until then the text decides (see intent.js).
   intent: null,
   rendered: new Map(),
@@ -47,7 +58,7 @@ async function api(method, path, body) {
   });
   const type = res.headers.get("content-type") ?? "";
   const data = type.includes("json") ? await res.json() : await res.text();
-  if (!res.ok) throw new Error(data?.error ?? data ?? res.statusText);
+  if (!res.ok) throw Object.assign(new Error(data?.error ?? data ?? res.statusText), { status: res.status });
   return data;
 }
 
@@ -224,6 +235,7 @@ async function loadRoom(id, { keepScroll = false } = {}) {
     const switching = S.roomId !== id;
     S.roomId = id;
     S.view = v;
+    if (switching) restoreDraft(v.room);
     S.live = new Map(v.live.map((l) => [l.turnId, l]));
     if (location.hash !== `#/r/${id}`) history.replaceState(null, "", `#/r/${id}`);
     renderTop();
@@ -538,10 +550,10 @@ function renderEvent(ev) {
 function ownerEl(ev) {
   const to = (ev.to ?? []).map(name);
   const label = { topic: "Planning topic", decisions: "Your decisions", answer: "Your answer" }[ev.kind] ?? "";
-  // A note no agent has yet can still be changed or withdrawn.
-  const queued = !ev.kind && !ev.cancelled && !ev.deliveredTo?.length && !Object.keys(ev.readBy ?? {}).length;
+  // A note no agent has yet can still be changed or withdrawn, unless it answered a question (it stays as sent).
+  const queued = !ev.kind && !ev.answers?.length && !ev.cancelled && !ev.deliveredTo?.length && !Object.keys(ev.readBy ?? {}).length;
   return el(`<div class="owner" data-id="${ev.id}" data-cancelled="${Boolean(ev.cancelled)}">
-    <div class="to">${label ? `${label} · ` : ""}${!ev.kind && ev.intent ? `<span class="intent" data-intent="${esc(ev.intent)}">${ev.intent === "ask" ? "Ask" : "Tell"}</span> · ` : ""}You → <b>${esc(to.join(", "))}</b> · ${clock(ev.at)}${ev.delivery === "now" ? " · sent now" : ""}${ev.editedAt ? " · edited" : ""}</div>
+    <div class="to">${label ? `${label} · ` : ""}${!ev.kind && ev.intent ? `<span class="intent" data-intent="${esc(ev.intent)}">${ev.intent === "ask" ? "Ask" : "Tell"}</span> · ` : ""}You → <b>${esc(to.join(", "))}</b> · ${clock(ev.at)}${ev.delivery === "now" ? " · sent now" : ""}${ev.editedAt ? " · edited" : ""}${(ev.answers ?? []).map((a) => ` · answers “${esc(a.question.length > 80 ? `${a.question.slice(0, 80)}…` : a.question)}”`).join("")}</div>
     <div class="md">${renderMarkdown(ev.text)}</div>
     <div class="notestate">${ev.cancelled ? "<span>withdrawn</span>" : noteStates(ev)}${queued ? ` · <button type="button" class="linkbtn" data-note-edit>Edit</button> · <button type="button" class="linkbtn" data-note-cancel>Cancel note</button>` : ""}</div></div>`);
 }
@@ -660,7 +672,7 @@ function questionEl(ev) {
         <div class="pair"><div class="qrow"><label for="cqWho">Who writes the plan</label><select id="cqWho">${participants.map((p) => `<option value="${p}" ${p === r?.crew.builder ? "selected" : ""}>${name(p)}</option>`).join("")}</select></div>
         <div class="qrow"><label for="cqPath">Plan file</label><input type="text" id="cqPath" value="${esc(r?.plan?.planPath ?? "")}"></div></div>
       </div>
-      <div class="actions"><button class="btn primary" type="submit">Write the plan</button><button class="btn" type="button" data-focus-everyone>Discuss more first</button></div></form>`);
+      <div class="actions"><button class="btn primary" type="submit">Write the plan</button>${qs.length && qs.every((q) => q.recommendation?.trim()) ? `<button class="btn" type="button" data-accept-checkpoint title="Every question answered with its recommendation, as shown">Accept all recommendations</button>` : ""}<button class="btn" type="button" data-focus-everyone>Discuss more first</button></div></form>`);
   }
   if (ev.kind === "plan-ready")
     return el(`<div class="decision" data-id="${ev.id}"><div class="q">${esc(ev.question)}</div>
@@ -676,7 +688,7 @@ function questionEl(ev) {
   const chat = ev.kind === "chat-owner";
   return el(`<div class="decision" data-id="${ev.id}"><div class="q">${who}: ${esc(ev.question)}</div>
     ${ev.recommendation ? `<div class="rec"><b>Recommended:</b> ${esc(ev.recommendation)}</div>` : ""}
-    <div class="actions">${ev.recommendation ? `<button class="btn primary" type="button" ${chat ? `data-chat-accept="${ev.from}" data-rec="${esc(ev.recommendation)}"` : "data-accept"}>Use the recommendation</button>` : ""}
+    <div class="actions">${ev.recommendation ? `<button class="btn primary" type="button" ${chat ? "data-chat-accept" : "data-accept"}>Use the recommendation</button>` : ""}
     <button class="btn" type="button" data-answer-focus="${esc(ev.from ?? "")}">Write my own answer</button></div></div>`);
 }
 
@@ -826,6 +838,122 @@ function renderComposer() {
   renderIntent();
 }
 
+/**
+ * The open questions a note can answer, in the room's order: the ones it waits on, then chat questions (the planning
+ * form and a lost app turn have their own buttons). Read from the questions themselves, which arrive before the
+ * room's own lists are refreshed, so a question that has just appeared counts.
+ */
+function openAsks() {
+  const open = (S.view?.events ?? []).filter((e) => e.type === "question" && e.open && e.kind !== "plan-checkpoint" && e.kind !== "app-lost");
+  return [...open.filter((q) => q.kind !== "chat-owner"), ...open.filter((q) => q.kind === "chat-owner")];
+}
+
+/**
+ * Fix what your note answers, as the room shows it now, so a question answered elsewhere meanwhile can't be swapped
+ * for a newer one under your text. For each agent: the question the composer offers (the room's first, if that agent
+ * asked it), else its only open question, else nothing. `chosen`: the card whose "Write my own answer" you pressed.
+ */
+function bindAnswer(r, chosen) {
+  const asks = openAsks();
+  const byAgent = {};
+  for (const a of r.crew.members) {
+    const mine = asks.filter((q) => q.from === a);
+    byAgent[a] = asks[0]?.from === a ? asks[0].id : mine.length === 1 ? mine[0].id : null;
+  }
+  if (chosen) {
+    byAgent[chosen.from] = chosen.id;
+    revise(r.id);
+  }
+  keepAnswer(r.id, { roomId: r.id, asker: chosen?.from ?? asks[0]?.from ?? null, byAgent, chosen: Boolean(chosen), route: S.route });
+}
+
+/**
+ * A room's draft changed (its text, its recipient or the question it answers). The revision is kept in this tab and
+ * with the saved draft, which every tab of the page shares, so a late reply in one tab can't undo another tab's newer
+ * draft either.
+ */
+function revise(roomId) {
+  S.revisions.set(roomId, (S.revisions.get(roomId) ?? 0) + 1);
+  const token = `${Date.now().toString(36)}.${Math.random().toString(36).slice(2)}`;
+  S.loaded.set(roomId, token);
+  try {
+    localStorage.setItem(`toryo.revision.${roomId}`, token);
+  } catch {
+    /* ignore */
+  }
+}
+function savedRevision(roomId) {
+  try {
+    return localStorage.getItem(`toryo.revision.${roomId}`);
+  } catch {
+    return null;
+  }
+}
+
+/** Choose who gets the note; a draft keeps its recipient with it. */
+function setRoute(route) {
+  S.route = route;
+  const r = room();
+  if (r) revise(r.id);
+  if (r && bound(r)) keepAnswer(r.id, { ...bound(r), route });
+}
+
+/** A room's own draft: its text, what it answers and who it's to. Never another room's text. */
+function restoreDraft(r) {
+  let text = "";
+  try {
+    text = localStorage.getItem(`toryo.draft.${r.id}`) ?? "";
+  } catch {
+    /* ignore */
+  }
+  $("#msg").value = text;
+  // Another tab changed this room's draft since this tab last had it: the draft shown now is a different one.
+  const token = savedRevision(r.id);
+  if (S.loaded.has(r.id) && S.loaded.get(r.id) !== token) S.revisions.set(r.id, (S.revisions.get(r.id) ?? 0) + 1);
+  S.loaded.set(r.id, token);
+  $("#sendBtn").disabled = S.sending.has(r.id);
+  S.intent = null;
+  S.answering = keptAnswer(r.id);
+  S.route = S.answering?.route ?? "auto";
+  // A draft saved before drafts were tied to questions: what it was written for isn't known, so it answers nothing
+  // and goes as a note. To answer a question with it, press that question's "Write my own answer".
+  if (text.trim() && !S.answering) keepAnswer(r.id, { roomId: r.id, asker: null, byAgent: {}, chosen: false, route: S.route });
+}
+function forgetDraft(roomId) {
+  try {
+    localStorage.removeItem(`toryo.draft.${roomId}`);
+  } catch {
+    /* ignore */
+  }
+}
+/** Keep what a room's draft answers. Only the open room's is also the composer's. */
+function keepAnswer(roomId, binding) {
+  if (roomId === S.roomId) S.answering = binding;
+  try {
+    if (binding) localStorage.setItem(`toryo.answering.${roomId}`, JSON.stringify(binding));
+    else localStorage.removeItem(`toryo.answering.${roomId}`);
+  } catch {
+    /* ignore */
+  }
+}
+function keptAnswer(roomId) {
+  try {
+    const b = JSON.parse(localStorage.getItem(`toryo.answering.${roomId}`) ?? "null");
+    return b?.roomId === roomId ? b : null;
+  } catch {
+    return null;
+  }
+}
+const bound = (r) => (S.answering?.roomId === r.id ? S.answering : null);
+
+/** What a note to these agents answers, as fixed when you began it: a question's id, chat questions' ids, or false. */
+function answerFor(r, agents) {
+  const by = bound(r)?.byAgent ?? {};
+  if (agents.length === 1) return by[agents[0]] ?? false;
+  const ids = agents.map((a) => by[a]).filter((id) => id && S.view?.events.find((e) => e.id === id)?.kind === "chat-owner");
+  return ids.length ? ids : false;
+}
+
 /** What the room asks you first, as the desk routes it: the question it waits on, else the oldest unanswered chat question. */
 function asking(r) {
   if (r.waiting) return r.waiting;
@@ -835,13 +963,31 @@ function asking(r) {
 
 function previewRoute(text) {
   const r = room();
+  const route = baseRoute(r, text);
+  if (!bound(r)) return route;
+  // Once you've begun writing: what it answers, as fixed then.
+  const answers = answerFor(r, route.agents);
+  const ask = (id) => S.view.events.find((e) => e.id === id);
+  if (typeof answers === "string") {
+    const q = ask(answers);
+    if (!q?.open) return { ...route, why: "your answer to a question that has been answered meanwhile, so it won't be sent" };
+    return { ...route, why: `your answer to “${q.question.length > 60 ? `${q.question.slice(0, 60)}…` : q.question}”` };
+  }
+  if (answers && answers.some((id) => !ask(id)?.open)) return { ...route, why: `${route.why} · a question it answers has been answered meanwhile, so it won't be sent` };
+  if (!answers && openAsks().some((q) => route.agents.includes(q.from))) return { ...route, why: `${route.why} · a note, not an answer to the question waiting now` };
+  return route;
+}
+
+function baseRoute(r, text) {
   const members = r.crew.members;
   if (S.route === "everyone") return { agents: [...members], why: "to everyone" };
   if (S.route !== "auto") return { agents: [S.route], why: "you chose" };
   if (/@(all|everyone)\b/i.test(text)) return { agents: [...members], why: "you mentioned everyone" };
   const m = members.filter((a) => new RegExp(`@(${a}|${name(a)})\\b`, "i").test(text));
   if (m.length) return { agents: m, why: "you mentioned them" };
-  if (asking(r)?.from) return { agents: [asking(r).from], why: "it is waiting for your answer" };
+  // The agent whose question you began answering, else (as the desk routes it) the one asking now.
+  const asker = bound(r)?.asker ?? asking(r)?.from;
+  if (asker) return { agents: [asker], why: "it is waiting for your answer" };
   if (r.mode === "build") {
     if (/\b(review|check|verify|confirm|audit|test|tests)\b/i.test(text)) return { agents: [r.crew.reviewer], why: "it mentions checking" };
     if (/\b(fix|build|implement|add|change|rename|refactor|update|write|remove|make)\b/i.test(text)) return { agents: [r.crew.builder], why: "it mentions building or fixing" };
@@ -880,31 +1026,59 @@ async function send(e) {
   e?.preventDefault();
   const r = room();
   const text = $("#msg").value.trim();
-  if (!r || !text) return;
+  if (!r || !text || S.sending.has(r.id)) return;
+  if (!bound(r)) bindAnswer(r);
+  const answering = answerFor(r, previewRoute(text).agents);
+  // The reply may come after you've switched rooms or changed the draft (its text, its recipient or the question it
+  // answers), here or in another tab: it acts only on the draft as it was sent, in its own room, and leaves any other
+  // (and what it answers) alone.
+  const roomId = r.id;
+  const route = S.route;
+  // The draft as sent: this tab's revision of it, and the saved revision of the draft this tab loaded or wrote (not
+  // whatever another tab has saved since).
+  const revision = S.revisions.get(roomId) ?? 0;
+  const saved = S.loaded.get(roomId) ?? null;
+  const here = () => S.roomId === roomId;
+  // This tab still has the draft it sent; the saved drafts every tab shares still hold it too.
+  const mine = () => (S.revisions.get(roomId) ?? 0) === revision;
+  const shared = () => savedRevision(roomId) === saved;
+  S.sending.add(roomId);
   $("#sendBtn").disabled = true;
   try {
-    await api("POST", `/api/rooms/${r.id}/messages`, {
+    await api("POST", `/api/rooms/${roomId}/messages`, {
       text,
-      to: S.route,
+      to: route,
       delivery: $("#delivery").value,
       discuss: !$("#discussOpt").hidden && $("#discuss").checked ? Number($("#discussRounds").value) : 0,
       allowWrite: !$("#writeOpt").hidden && $("#allowWrite").checked,
       intent: S.intent ?? noteIntent(text),
+      answering,
     });
+    if (mine() && shared()) {
+      keepAnswer(roomId, null);
+      forgetDraft(roomId);
+    }
+    if (!mine() || !here()) return;
+    S.answering = null;
     $("#msg").value = "";
     $("#delivery").value = "next";
     S.intent = null;
     renderIntent();
-    try {
-      localStorage.removeItem(`toryo.draft.${r.id}`);
-    } catch {
-      /* ignore */
-    }
     renderRouteInfo();
   } catch (error) {
+    // Answered meanwhile (elsewhere): your text stays. Sent again, it's a note that answers nothing.
+    if (error.status === 409 && answering) {
+      const nothing = { roomId, asker: null, byAgent: {}, chosen: false, route };
+      if (mine() && shared()) keepAnswer(roomId, nothing);
+      else if (mine() && here()) S.answering = nothing;
+      if (here()) renderRouteInfo();
+      const where = here() ? "" : `In “${S.state?.rooms.find((x) => x.id === roomId)?.title ?? "another room"}”: `;
+      return toast("Not sent", `${where}${error.message} Your text is still there. Sent again, it goes as a note, not as an answer to the question waiting now.`, 12000);
+    }
     fail(error);
   } finally {
-    $("#sendBtn").disabled = false;
+    S.sending.delete(roomId);
+    $("#sendBtn").disabled = S.sending.has(S.roomId);
   }
 }
 
@@ -1534,7 +1708,7 @@ document.addEventListener("click", async (e) => {
       return renderIntent();
     }
     if (hit("[data-route]")) {
-      S.route = hit("[data-route]").dataset.route;
+      setRoute(hit("[data-route]").dataset.route);
       for (const b of $$("#recipients button")) b.setAttribute("aria-pressed", String(b.dataset.route === S.route));
       return renderRouteInfo();
     }
@@ -1559,23 +1733,26 @@ document.addEventListener("click", async (e) => {
       return;
     }
     if (hit("[data-accept]")) return api("POST", `/api/rooms/${r.id}/answer`, { accept: true, questionId: hit("[data-accept]").closest("[data-id]")?.dataset.id }).catch(fail);
-    if (hit("[data-chat-accept]")) {
-      const b = hit("[data-chat-accept]");
-      return api("POST", `/api/rooms/${r.id}/messages`, { text: `Go with your recommendation: ${b.dataset.rec}`, to: b.dataset.chatAccept }).catch(fail);
+    if (hit("[data-chat-accept]")) return api("POST", `/api/rooms/${r.id}/answer`, { accept: true, questionId: hit("[data-chat-accept]").closest("[data-id]")?.dataset.id }).catch(fail);
+    if (hit("[data-accept-checkpoint]")) {
+      const form = hit("[data-accept-checkpoint]").closest("form");
+      return api("POST", `/api/rooms/${r.id}/control`, { action: "accept-checkpoint", questionId: form.dataset.id, synthesizer: $("#cqWho", form).value, planPath: $("#cqPath", form).value }).catch(fail);
     }
     if (hit("[data-answer-focus]")) {
       const who = hit("[data-answer-focus]").dataset.answerFocus;
-      S.route = who && isMember(who) ? who : "auto";
+      setRoute(who && isMember(who) ? who : "auto");
+      const card = hit("[data-answer-focus]").closest("[data-id]")?.dataset.id;
+      if (who && isMember(who) && card) bindAnswer(r, { id: card, from: who });
       renderComposer();
       return $("#msg").focus();
     }
     if (hit("[data-focus-everyone]")) {
-      S.route = "everyone";
+      setRoute("everyone");
       renderComposer();
       return $("#msg").focus();
     }
     if (hit("[data-note-now]")) {
-      S.route = hit("[data-note-now]").dataset.noteNow;
+      setRoute(hit("[data-note-now]").dataset.noteNow);
       $("#delivery").value = "now";
       renderComposer();
       return $("#msg").focus();
@@ -1658,7 +1835,7 @@ document.addEventListener("submit", async (e) => {
       .join("\n");
     const extra = $("#cqExtra", form).value.trim();
     const decisions = [answers, extra].filter(Boolean).join("\n\n");
-    await api("POST", `/api/rooms/${room().id}/control`, { action: "synthesize", synthesizer: $("#cqWho", form).value, planPath: $("#cqPath", form).value, decisions }).catch(fail);
+    await api("POST", `/api/rooms/${room().id}/control`, { action: "synthesize", questionId: form.dataset.id, synthesizer: $("#cqWho", form).value, planPath: $("#cqPath", form).value, decisions }).catch(fail);
   }
 });
 
@@ -1671,6 +1848,10 @@ $("#msg").addEventListener("keydown", (e) => {
   }
 });
 $("#msg").addEventListener("input", () => {
+  const r = room();
+  if (r) revise(r.id);
+  if (r && !$("#msg").value.trim()) bound(r) && !bound(r).chosen && keepAnswer(r.id, null);
+  else if (r && !bound(r)) bindAnswer(r);
   renderRouteInfo();
   renderIntent();
   try {
@@ -1732,14 +1913,5 @@ setInterval(() => {
   }
 }, 30_000);
 
-const draftRestore = () => {
-  try {
-    const d = S.roomId && localStorage.getItem(`toryo.draft.${S.roomId}`);
-    if (d && !$("#msg").value) $("#msg").value = d;
-  } catch {
-    /* ignore */
-  }
-};
-setTimeout(draftRestore, 800);
 
 connect();

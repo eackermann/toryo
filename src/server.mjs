@@ -141,11 +141,20 @@ async function route(engine, method, parts, url, body) {
     if (!b && method === "GET") return engine.roomView(id);
     if (!b && method === "DELETE") return engine.deleteRoom(id);
     if (b === "messages" && method === "POST") return engine.postMessage(id, body);
-    if (b === "answer" && method === "POST") return engine.answer(id, body);
+    // An answer names its question, so it can never land on a different one that opened since.
+    if (b === "answer" && method === "POST") {
+      if (!body?.questionId) throw new UserError("Say which question you're answering (questionId). The room lists its open questions with their ids.");
+      return engine.answer(id, body);
+    }
     // A note still waiting for its agents: change it (PATCH, { text }) or withdraw it (DELETE).
     if (b === "notes" && c && method === "PATCH") return engine.editNote(id, c, { text: body.text });
     if (b === "notes" && c && method === "DELETE") return engine.editNote(id, c, { cancel: true });
-    if (b === "control" && method === "POST") return engine.control(id, body.action, body);
+    if (b === "control" && method === "POST") {
+      // These act on one question too (a failed turn, a planning round's checkpoint): they must name it.
+      if (["retry", "synthesize", "accept-checkpoint"].includes(body.action) && !body.questionId)
+        throw new UserError("Say which question this is for (questionId). The room lists its open questions with their ids.");
+      return engine.control(id, body.action, body);
+    }
     if (b === "plan" && method === "GET") return engine.planView(id);
     if (b === "turns" && c && d === "diff" && method === "GET") return engine.turnDiff(id, c, url.searchParams.get("path") || undefined);
     if (b === "turns" && c && d === "prompt" && method === "GET") return { __text: engine.turnPrompt(id, c) };

@@ -24,7 +24,7 @@ const flag = (name, fallback) => {
   const v = args[i + 1];
   return v && !v.startsWith("--") ? v : true;
 };
-const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["to", "port", "host", "project", "plan", "room", "builder", "reviewer", "handoff-file", "slice", "thread"].includes(args[i - 1].slice(2))));
+const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["to", "port", "host", "project", "plan", "room", "builder", "reviewer", "handoff-file", "slice", "thread", "question"].includes(args[i - 1].slice(2))));
 const command = positional[0];
 
 const HELP = `Toryo: a relay desk for coding agents.
@@ -40,7 +40,9 @@ From any terminal (or an agent) while Toryo runs
   toryo status                rooms, who is working, questions waiting for you
   toryo show [room] [--full]  a room's latest messages (room: id or part of its title)
   toryo say [--room R] [--to codex|claude|everyone] [--now] [--ask|--tell] "message"
-  toryo answer [--room R] "text"    or    toryo answer --accept
+  toryo answer [--room R] [--question ID] "text"    or    toryo answer [--question ID] --accept
+                                with several questions open (in that room, or in any room without --room),
+                                --question picks one; status lists their ids
   toryo pause|resume|stop [room]
   toryo start chat|plan|build "text" [--plan docs/plans/x.md] [--project name]
   toryo start build "text" --review-first [--builder codexapp] [--reviewer claude] [--handoff-file f.md] [--slice name]
@@ -92,7 +94,7 @@ try {
       console.log(await client.say(roomArg(), positional.slice(1).join(" "), { to: typeof flag("to", "auto") === "string" ? flag("to", "auto") : "auto", now: Boolean(flag("now", false)), intent: flag("ask", false) ? "ask" : flag("tell", false) ? "tell" : undefined }));
       process.exit(0);
     case "answer":
-      console.log(await client.answer(roomArg(), positional.slice(1).join(" "), { accept: Boolean(flag("accept", false)) }));
+      console.log(await client.answer(roomArg(), positional.slice(1).join(" "), { accept: Boolean(flag("accept", false)), question: typeof flag("question", null) === "string" ? flag("question", null) : undefined }));
       process.exit(0);
     case "pause":
     case "resume":

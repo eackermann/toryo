@@ -670,6 +670,8 @@ export class Engine extends EventEmitter {
       running,
       waiting: this.#firstAsk(room),
       waitingCount: this.#allWaiting(room).length + (room.openChat?.length ?? 0),
+      // Every open question, by id, so a client answers the one it means.
+      questions: this.#openQuestions(room),
       // Who is doing what right now, for the room list.
       working: this.#runningIn(room).map((r) => ({ agent: r.agent, kind: r.req.kind })),
       appThread: room.crew.members.includes("codexapp") ? room.sessions?.codexapp ?? null : null,
@@ -684,6 +686,7 @@ export class Engine extends EventEmitter {
     const room = this.#room(roomId);
     return {
       room: { ...room, status: this.#status(room) },
+      questions: this.#openQuestions(room),
       events: this.events.get(room.id),
       live: this.#runningIn(room).map((r) => ({
         turnId: r.turnId,
@@ -907,18 +910,24 @@ export class Engine extends EventEmitter {
     return this.summary(room);
   }
 
-  synthesize(roomId, { synthesizer, planPath, decisions } = {}) {
+  /**
+   * Your call on a planning round: who writes the plan, and your decisions. Only while the round waits for it (its
+   * checkpoint question is open; `questionId` names it), so a second submission can't start a second plan.
+   */
+  synthesize(roomId, { synthesizer, planPath, decisions, questionId } = {}) {
     const room = this.#room(roomId);
     if (!room.plan) throw new UserError("This room has no planning round.");
     const plan = room.plan;
-    plan.synthesizer = room.crew.members.includes(synthesizer) ? synthesizer : room.crew.builder;
+    const checkpoint = this.#allWaiting(room).find((w) => w.kind === "plan-checkpoint" && (!questionId || w.eventId === questionId));
+    if (!checkpoint)
+      throw new UserError(questionId ? "That planning question has already been answered: the plan is being written, or the round has moved on." : "The planning round isn't waiting for your call.", 409);
+    if (synthesizer && !(plan.participants ?? room.crew.members).includes(synthesizer))
+      throw new UserError(`${this.label(synthesizer)} isn't one of this round's planners, so it can't write the plan.`);
+    plan.synthesizer = synthesizer || (plan.participants?.includes(room.crew.builder) ? room.crew.builder : plan.participants?.[0] ?? room.crew.builder);
     if (planPath?.trim()) plan.planPath = planPath.trim();
     plan.phase = "synthesis";
-    const checkpoint = this.#allWaiting(room).find((w) => w.kind === "plan-checkpoint");
-    if (checkpoint) {
-      this.#takeWaiting(room, checkpoint);
-      this.#closeQuestion(room, decisions || "(no extra decisions)", checkpoint);
-    }
+    this.#takeWaiting(room, checkpoint);
+    this.#closeQuestion(room, decisions || "(no extra decisions)", checkpoint);
     if (decisions?.trim())
       this.#append(room, { type: "owner", text: `Decisions for the plan:\n${decisions.trim()}`, to: plan.participants, kind: "decisions", deliveredTo: [] });
     this.#system(room, `${this.label(plan.synthesizer)} is writing the plan to ${plan.planPath}.`, { forAgents: true });
@@ -929,6 +938,21 @@ export class Engine extends EventEmitter {
       instruction: prompts.planSynthesis({ planPath: plan.planPath }),
     });
     return this.summary(room);
+  }
+
+  /**
+   * Accept every recommendation at a planning checkpoint, as shown with it (its questions and recommendations), with
+   * the default author or the one named. A question without a recommendation can't be accepted this way: open the form.
+   */
+  acceptCheckpoint(roomId, { questionId, synthesizer, planPath } = {}) {
+    const room = this.#room(roomId);
+    const w = this.#allWaiting(room).find((x) => x.kind === "plan-checkpoint" && (!questionId || x.eventId === questionId));
+    if (!w) throw new UserError("That planning question has already been answered: the plan is being written, or the round has moved on.", 409);
+    const missing = (w.questions ?? []).filter((q) => !String(q.recommendation ?? "").trim());
+    if (missing.length)
+      throw new UserError(`Some questions have no recommendation to accept: ${missing.map((q) => `“${q.question}”`).join(", ")}. Answer them in the planning form.`);
+    const decisions = (w.questions ?? []).map((q) => `- ${q.question} → ${q.recommendation} (${this.label(q.from)}'s recommendation)`).join("\n");
+    return this.synthesize(roomId, { questionId: w.eventId, synthesizer, planPath, decisions });
   }
 
   // ---------------------------------------------------------------- owner input
@@ -956,34 +980,57 @@ export class Engine extends EventEmitter {
     return { agents: [...members], why: "to everyone" };
   }
 
-  postMessage(roomId, { text, to = "auto", delivery = "next", discuss = 0, allowWrite = false, intent }) {
+  postMessage(roomId, { text, to = "auto", delivery = "next", discuss = 0, allowWrite = false, intent, answering }) {
     const room = this.#room(roomId);
     text = String(text ?? "").trim();
     if (!text) throw new UserError("Write a message first.");
     const routed = this.route(room, text, to);
     if (!routed.agents.length) throw new UserError("Nobody in this room matches that recipient.");
+    // What the note answers, as you saw it when you began writing it (the page says): one question (`answering: id`;
+    // the note goes to whoever asked it), questions agents asked in chat when it goes to several (`[ids]`), or nothing
+    // (`false`). If one of them has been answered since, nothing is sent, so a note never lands on a newer question.
+    // Left out (`toryo say`, an older page), a note to an agent that has exactly one question open answers it.
+    const find = (id) => this.#allWaiting(room).find((w) => w.eventId === id) ?? this.#openChatQuestions(room).find((q) => q.id === id);
+    const stale = () => new UserError("That question has already been answered, so this wasn't sent.", 409);
+    let target = null;
+    let closes = [];
+    if (typeof answering === "string") {
+      target = find(answering);
+      if (!target) throw stale();
+      if (target.kind === "plan-checkpoint" || target.kind === "app-lost") throw new UserError("Answer that one with its own buttons.");
+    } else if (Array.isArray(answering)) {
+      closes = answering.map(find);
+      if (closes.some((q) => !q)) throw stale();
+      if (closes.some((q) => q.eventId || !routed.agents.includes(q.from))) throw new UserError("A note to several agents can only answer questions they asked in chat. Answer the others from their cards.");
+    } else if (answering == null) {
+      const open = (agent) => [...this.#allWaiting(room).filter((w) => w.from === agent && w.kind !== "app-lost"), ...this.#openChatQuestions(room).filter((q) => q.from === agent)];
+      for (const agent of routed.agents) {
+        const mine = open(agent);
+        if (mine.length !== 1) continue;
+        // The questions the room waits on are answered by a note to that agent alone; a chat question by any note.
+        if (!mine[0].eventId) closes.push(mine[0]);
+        else if (routed.agents.length === 1) target = mine[0];
+      }
+    } else if (answering !== false) throw new UserError("`answering` is a question's id, a list of ids, or false.");
     if (room.stopped) {
       room.stopped = false;
       room.paused = false;
       this.#system(room, "Resumed by your message.");
     }
-
-    // An answer to an open question?
-    const asked = routed.agents.length === 1 ? this.#allWaiting(room).find((w) => w.from && w.from === routed.agents[0]) : null;
-    if (asked) {
-      const ev = this.#append(room, { type: "owner", text, to: routed.agents, why: routed.why, kind: "answer", deliveredTo: [] });
-      this.#resolveWaiting(room, asked, text);
-      return { event: ev, routed };
+    if (target && !target.eventId) return { event: this.#answerChat(room, target, { text }), routed: { agents: [target.from], why: "your answer to its question" } };
+    if (target) {
+      const answered = typeof answering === "string" ? { agents: target.from ? [target.from] : [...room.crew.members], why: "your answer to its question" } : routed;
+      const ev = this.#append(room, { type: "owner", text, to: answered.agents, why: answered.why, kind: "answer", answers: [answerOf(target)], deliveredTo: [] });
+      this.#resolveWaiting(room, target, text);
+      return { event: ev, routed: answered };
     }
 
     // Ask (it needs an answer) or Tell (an instruction). Without your choice, a question mark or a question means Ask.
-    const ev = this.#append(room, { type: "owner", text, to: routed.agents, why: routed.why, delivery, allowWrite, intent: intent === "ask" || intent === "tell" ? intent : noteIntent(text), deliveredTo: [] });
-    // Close open chat questions from these agents: the owner has replied.
-    for (const q of this.events.get(room.id))
-      if (q.type === "question" && q.open && q.kind === "chat-owner" && routed.agents.includes(q.from)) {
-        this.#patch(room, q, { open: false, answer: text });
-        room.openChat = (room.openChat ?? []).filter((id) => id !== q.id);
-      }
+    const ev = this.#append(room, { type: "owner", text, to: routed.agents, why: routed.why, delivery, allowWrite, intent: intent === "ask" || intent === "tell" ? intent : noteIntent(text), answers: closes.length ? closes.map(answerOf) : undefined, deliveredTo: [] });
+    for (const q of closes) {
+      this.#patch(room, q, { open: false, answer: text });
+      room.openChat = (room.openChat ?? []).filter((id) => id !== q.id);
+    }
 
     const flowBusy = room.mode !== "chat" && (room.queue.length > 0 || this.#runningIn(room).length > 0) && !room.stopped;
     for (const agent of routed.agents) {
@@ -1049,6 +1096,8 @@ export class Engine extends EventEmitter {
     const ev = this.events.get(room.id).find((e) => e.id === eventId);
     if (!ev || ev.type !== "owner" || ev.kind) throw new UserError("That isn't a note you can change.", 404);
     if (ev.cancelled) throw new UserError("You've already withdrawn that note.", 409);
+    // It closed questions as their answer: changing it, or taking it back, would leave them answered with something else.
+    if (ev.answers?.length) throw new UserError("That note answered a question, so it stays as sent. If something has changed, write another note.", 409);
     const carried = this.#runningIn(room).some((r) => r.dispatch?.ids?.includes(ev.id) || r.dispatch?.ownerIds?.includes(ev.id));
     if (ev.deliveredTo?.length || Object.keys(ev.readBy ?? {}).length || carried)
       throw new UserError("That note has already gone to the crew, so it can't be changed now.", 409);
@@ -1084,10 +1133,13 @@ export class Engine extends EventEmitter {
     if (!w) {
       // A question an agent asked in chat: the room waits for it too, after the questions above.
       const q = this.#openChatQuestions(room).find((x) => !questionId || x.id === questionId);
-      if (q) return this.#answerChat(room, q, { text, accept });
-      throw new UserError(questionId ? "That question has already been answered." : "Nobody is waiting for an answer.");
+      if (q) {
+        this.#answerChat(room, q, { text, accept });
+        return this.summary(room);
+      }
+      throw new UserError(questionId ? "That question has already been answered." : "Nobody is waiting for an answer.", questionId ? 409 : 400);
     }
-    if (w.kind === "plan-checkpoint") return this.synthesize(roomId, { decisions: text });
+    if (w.kind === "plan-checkpoint") return accept ? this.acceptCheckpoint(roomId, { questionId: w.eventId }) : this.synthesize(roomId, { questionId: w.eventId, decisions: text });
     // The plan-ready recommendation is an action: start building with the plan. A written answer asks for changes.
     if (w.kind === "plan-ready" && accept) {
       this.#takeWaiting(room, w);
@@ -1096,7 +1148,7 @@ export class Engine extends EventEmitter {
     }
     const body = accept ? `Go with your recommendation${w.recommendation ? `: ${w.recommendation.replace(/[.\s]+$/, "")}` : ""}.` : String(text ?? "").trim();
     if (!body) throw new UserError("Write an answer first.");
-    const ev = this.#append(room, { type: "owner", text: body, to: w.from ? [w.from] : room.crew.members, kind: "answer", deliveredTo: [] });
+    const ev = this.#append(room, { type: "owner", text: body, to: w.from ? [w.from] : room.crew.members, kind: "answer", answers: [answerOf(w)], deliveredTo: [] });
     this.#resolveWaiting(room, w, body);
     return this.summary(room);
   }
@@ -1156,22 +1208,28 @@ export class Engine extends EventEmitter {
   #answerChat(room, q, { text, accept }) {
     const body = accept ? `Go with your recommendation${q.recommendation ? `: ${q.recommendation.replace(/[.\s]+$/, "")}` : ""}.` : String(text ?? "").trim();
     if (!body) throw new UserError("Write an answer first.");
-    this.#append(room, { type: "owner", text: body, to: [q.from], kind: "answer", deliveredTo: [] });
+    const ev = this.#append(room, { type: "owner", text: body, to: [q.from], kind: "answer", answers: [answerOf(q)], deliveredTo: [] });
     this.#patch(room, q, { open: false, answer: body });
     room.openChat = room.openChat.filter((id) => id !== q.id);
     if (!room.queue.some((r) => r.agent === q.from))
       this.#enqueue(room, { agent: q.from, kind: "chat", access: "read", parallel: true, whileWaiting: true, instruction: prompts.chat({ canWrite: false, others: [] }) });
     this.#save(room);
     this.#pump(room);
-    return this.summary(room);
+    return ev;
   }
 
   /** What the room asks you first: the question it waits on, else the oldest unanswered chat question. */
   #firstAsk(room) {
-    if (room.waiting) return { from: room.waiting.from, question: room.waiting.question, kind: room.waiting.kind };
+    if (room.waiting) return { id: room.waiting.eventId, from: room.waiting.from, question: room.waiting.question, kind: room.waiting.kind };
     const id = room.openChat?.[0];
     const q = id && this.events.get(room.id).find((e) => e.id === id);
-    return q ? { from: q.from, question: q.question, kind: q.kind } : null;
+    return q ? { id: q.id, from: q.from, question: q.question, kind: q.kind } : null;
+  }
+
+  /** Every open question with its id: the ones the room waits on, in order, then questions agents asked in chat. */
+  #openQuestions(room) {
+    const one = (id, x) => ({ id, kind: x.kind, from: x.from ?? null, question: x.question, recommendation: x.recommendation ?? "", ...(x.questions ? { questions: x.questions } : {}) });
+    return [...this.#allWaiting(room).map((w) => one(w.eventId, w)), ...this.#openChatQuestions(room).map((q) => one(q.id, q))];
   }
 
   /** Every question the room is waiting on: the current one first, then any that arrived while it was open. */
@@ -1342,6 +1400,8 @@ export class Engine extends EventEmitter {
         return this.startPlan(roomId, { topic: args.topic, participants: args.participants });
       case "synthesize":
         return this.synthesize(roomId, args);
+      case "accept-checkpoint":
+        return this.acceptCheckpoint(roomId, args);
       case "chat-mode":
         room.mode = "chat";
         this.#clearWaiting(room, "(switched to chat)");
@@ -1362,9 +1422,9 @@ export class Engine extends EventEmitter {
         break;
       }
       case "retry": {
-        const w = this.#allWaiting(room).find((x) => x.kind === "error");
+        const w = this.#allWaiting(room).find((x) => x.kind === "error" && (!args.questionId || x.eventId === args.questionId));
         if (w) return this.answer(roomId, { text: "Retry.", accept: false, questionId: w.eventId });
-        throw new UserError("Nothing to retry.");
+        throw new UserError(args.questionId ? "That has already been retried or answered." : "Nothing to retry.", args.questionId ? 409 : 400);
       }
       default:
         throw new UserError(`Unknown action: ${action}`);
@@ -2083,6 +2143,8 @@ export class Engine extends EventEmitter {
           notes.push(note);
           heading += ` · note ${note.n}, ${note.intent}`;
         }
+        // An answer to a question this agent asked: the question goes with it, so “Yes” says what it's yes to.
+        for (const a of ev.answers ?? []) if (a.from === agent) heading += ` · answering your question “${truncate(a.question, 200)}”`;
         items.push({ heading, body: ev.text });
         ids.push(ev.id);
         if (toMe) ownerIds.push(ev.id);
@@ -2668,6 +2730,11 @@ function defaultTitle(mode, text) {
   const t = firstLine(text ?? "", 60);
   if (t) return t;
   return mode === "build" ? "Build" : mode === "plan" ? "Planning" : "Conversation";
+}
+
+/** Which question an answer of yours answers, kept with it, so the agent reads your answer next to its question. */
+function answerOf(q) {
+  return { id: q.eventId ?? q.id, from: q.from ?? null, question: q.question };
 }
 
 function recommendationIn(text) {

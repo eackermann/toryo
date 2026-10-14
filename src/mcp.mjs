@@ -38,10 +38,11 @@ const TOOLS = [
   },
   {
     name: "toryo_answer",
-    description: "Answer the question a room is waiting on. Set accept to take the asking agent's recommendation.",
+    description:
+      "Answer a question a room is waiting on. Set accept to take the asking agent's recommendation. `question` is the id of the question you're answering (toryo_status and toryo_room list them); it can be left out only when just one question is open (in the room named, or in any room when no room is named).",
     inputSchema: {
       type: "object",
-      properties: { room: { type: "string" }, text: { type: "string" }, accept: { type: "boolean" } },
+      properties: { room: { type: "string" }, text: { type: "string" }, accept: { type: "boolean" }, question: { type: "string" } },
       additionalProperties: false,
     },
   },
@@ -120,7 +121,7 @@ export function runMcpServer(client = new ToryoClient()) {
             text = await client.say(a.room, a.text, { to: a.to ?? "auto", now: Boolean(a.now), intent: a.intent });
             break;
           case "toryo_answer":
-            text = await client.answer(a.room, a.text ?? "", { accept: Boolean(a.accept) });
+            text = await client.answer(a.room, a.text ?? "", { accept: Boolean(a.accept), question: a.question });
             break;
           case "toryo_control":
             text = await client.control(a.room, a.action);

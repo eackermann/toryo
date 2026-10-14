@@ -45,7 +45,15 @@ try {
   // The project, the fake agents' script, and a fake Codex app.
   execFileSync("git", ["init", "-q", repo]);
   writeFileSync(join(repo, "README.md"), "# ui\n");
-  writeFileSync(join(base, "script.json"), JSON.stringify({ rules: [{ agent: "claude", hang: true }, { agent: "codex", reply: "Which one?\nTORYO: OWNER SQLite or Postgres?" }], log: join(base, "calls.jsonl") }));
+  const rules = [
+    { agent: "codex", match: "step 1 of 4", reply: "Codex proposal.\n- Q: Use SQLite? (Recommended: yes)\nTORYO: PROPOSAL" },
+    { agent: "claude", match: "step 1 of 4", reply: "Claude proposal.\n- Q: Ship a CLI too? (Recommended: no)\nTORYO: PROPOSAL" },
+    { match: "step 2 of 4", reply: "Critique.\nTORYO: CRITIQUE" },
+    { agent: "claude", match: "Both of you", reply: "TORYO: OWNER Which host?" },
+    { agent: "claude", hang: true },
+    { agent: "codex", reply: "Which one? I recommend SQLite.\nTORYO: OWNER SQLite or Postgres?" },
+  ];
+  writeFileSync(join(base, "script.json"), JSON.stringify({ rules, log: join(base, "calls.jsonl") }));
   // The desk serves a copy of the page, so this check can change files under it.
   const web = join(base, "web");
   cpSync(join(root, "web"), web, { recursive: true });
@@ -98,7 +106,8 @@ try {
   const url = `http://localhost:${port}/`;
 
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  // A context, not a lone page, so a second tab can share its saved drafts (step 5j).
+  const page = await (await browser.newContext({ viewport: { width: 1400, height: 900 } })).newPage();
   const errors = [];
   const outside = [];
   page.on("pageerror", (e) => errors.push(String(e.stack ?? e)));
@@ -199,6 +208,349 @@ try {
   await page.waitForSelector("[data-fresh=codex]");
   await page.click("[data-fresh=codex]");
   await page.waitForFunction(() => /Starts fresh on its next turn/.test(document.querySelector("#crewPane")?.innerText ?? ""));
+
+  // 5c. "Write my own answer" names that card's question. Answered elsewhere first (another tab, the phone) and the
+  // agent asks again: the note isn't sent, so it never lands on the newer question, and your text stays.
+  const post = async (path, body) => (await fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify(body) })).json();
+  const questions = async (id) => (await (await fetch(`${url}api/rooms/${id}`)).json()).questions;
+  const [first] = await questions(asked.id);
+  await page.click(`.decision[data-id="${first.id}"] [data-answer-focus]`);
+  await page.waitForFunction(() => /your answer to “SQLite or Postgres\?”/.test(document.querySelector("#routeInfo").innerText));
+  await post(`api/rooms/${asked.id}/answer`, { questionId: first.id, text: "Postgres." });
+  await page.waitForFunction((id) => document.querySelector(`.decision:not(.closed)[data-id]:not([data-id="${id}"]) [data-chat-accept]`), first.id);
+  const [second] = await questions(asked.id);
+  assert.notEqual(second.id, first.id);
+  await page.fill("#msg", "SQLite please.");
+  await page.press("#msg", "Enter");
+  await page.waitForFunction(() => /already been answered/.test(document.querySelector("#toasts").innerText));
+  assert.equal(await page.inputValue("#msg"), "SQLite please.");
+  // The browser logs the refusal (409) as a failed request: expected here, and only here.
+  const refused = errors.findIndex((e) => /status of 409/.test(e));
+  assert.ok(refused >= 0);
+  errors.splice(refused, 1);
+  assert.deepEqual((await questions(asked.id)).map((q) => q.id), [second.id]);
+  // "Use the recommendation" answers its own card's question.
+  await page.fill("#msg", "");
+  await page.click(`.decision[data-id="${second.id}"] [data-chat-accept]`);
+  await page.waitForFunction((id) => /You answered: Go with your recommendation: SQLite/.test(document.querySelector(`.decision.closed[data-id="${id}"]`)?.innerText ?? ""), second.id);
+  const asking = await (await fetch(`${url}api/rooms/${asked.id}`)).json();
+  assert.ok(!asking.events.some((e) => e.type === "owner" && /SQLite please/.test(e.text)));
+
+  // 5c2. Typing straight into the composer binds the note to the question it shows, and the binding survives a
+  // reload. Answered elsewhere while the page reloads, so the reloaded page only ever sees the newer question: Enter
+  // is refused. Sent again, it goes as a note and answers nothing.
+  await page.waitForFunction(() => document.querySelectorAll(".decision:not(.closed) [data-chat-accept]").length === 1);
+  const [third] = await questions(asked.id);
+  await page.click("#msg");
+  await page.keyboard.type("Postgres, final answer.");
+  await page.waitForFunction(() => /your answer to “SQLite or Postgres\?”/.test(document.querySelector("#routeInfo").innerText));
+  await post(`api/rooms/${asked.id}/answer`, { questionId: third.id, text: "SQLite." });
+  // Waits for a condition on the desk (up to 10 s); not met in time is a failure.
+  const until = async (fn, what = "a condition on the desk") => {
+    for (let i = 0; i < 100; i++) {
+      if (await fn()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`Timed out waiting for ${what}`);
+  };
+  await until(async () => (await questions(asked.id)).some((q) => q.id !== third.id));
+  const [fourth] = await questions(asked.id);
+  assert.notEqual(fourth.id, third.id);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#msg").value === "Postgres, final answer.");
+  await page.waitForFunction(() => /answered meanwhile, so it won't be sent/.test(document.querySelector("#routeInfo").innerText));
+  await page.press("#msg", "Enter");
+  await page.waitForFunction(() => /Not sent[\s\S]*already been answered/.test(document.querySelector("#toasts").innerText));
+  assert.equal(await page.inputValue("#msg"), "Postgres, final answer.");
+  assert.deepEqual((await questions(asked.id)).map((q) => q.id), [fourth.id]);
+  const refusedAgain = errors.findIndex((e) => /status of 409/.test(e));
+  assert.ok(refusedAgain >= 0);
+  errors.splice(refusedAgain, 1);
+  await page.waitForFunction(() => /a note, not an answer/.test(document.querySelector("#routeInfo").innerText));
+  await page.press("#msg", "Enter");
+  await page.waitForFunction(() => [...document.querySelectorAll(".owner .md")].some((m) => /Postgres, final answer/.test(m.innerText)));
+  const noted = (await (await fetch(`${url}api/rooms/${asked.id}`)).json()).events.find((e) => e.type === "owner" && /final answer/.test(e.text));
+  assert.equal(noted.kind, undefined);
+  assert.equal(noted.answers, undefined);
+  assert.ok((await questions(asked.id)).some((q) => q.id === fourth.id), "the newer question is still open");
+
+  // 5d. A planning checkpoint: "Accept all recommendations" records each one as shown, with the author you pick.
+  const plan = await post("api/rooms", { projectId: "ui", mode: "plan", topic: "Storage", members: ["codex", "claude"], title: "Plan room" });
+  await page.waitForSelector(`.roomlink[data-room="${plan.id}"]`);
+  await page.click(`.roomlink[data-room="${plan.id}"]`);
+  await page.waitForSelector("[data-checkpoint] [data-accept-checkpoint]");
+  await page.selectOption("#cqWho", "claude");
+  await page.click("[data-accept-checkpoint]");
+  await page.waitForFunction(() => /Use SQLite\? → yes \(Codex's recommendation\)/.test(document.querySelector("#log").innerText));
+  const planned = await (await fetch(`${url}api/rooms/${plan.id}`)).json();
+  assert.equal(planned.room.plan.synthesizer, "claude");
+  assert.match(planned.events.find((e) => e.kind === "decisions").text, /Ship a CLI too\? → no \(Claude's recommendation\)/);
+
+  // 5e. Each room keeps its own draft, tied to its own question: text written in one room never answers another's.
+  const view = async (id) => (await fetch(`${url}api/rooms/${id}`)).json();
+  const openRoom = async (id, title) => {
+    await page.waitForSelector(`.roomlink[data-room="${id}"]`);
+    await page.click(`.roomlink[data-room="${id}"]`);
+    await page.waitForFunction((t) => document.querySelector("#roomTitle")?.textContent === t, title);
+  };
+  const other = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], text: "Ask me too.", to: "codex", title: "Second asking room" });
+  await until(async () => (await questions(other.id)).length === 1);
+  const [otherQ] = await questions(other.id);
+  const [firstQ] = await questions(asked.id);
+  await openRoom(asked.id, "Asking room");
+  await page.fill("#msg", "Draft for the first room.");
+  await page.waitForFunction(() => /your answer to/.test(document.querySelector("#routeInfo").innerText));
+  await openRoom(other.id, "Second asking room");
+  assert.equal(await page.inputValue("#msg"), "", "the first room's text stays in the first room");
+  await page.fill("#msg", "Draft for the second room.");
+  await openRoom(asked.id, "Asking room");
+  await page.waitForFunction(() => document.querySelector("#msg").value === "Draft for the first room.");
+  await page.press("#msg", "Enter");
+  await until(async () => (await view(asked.id)).events.find((e) => e.id === firstQ.id).open === false);
+  assert.equal((await view(asked.id)).events.find((e) => e.id === firstQ.id).answer, "Draft for the first room.");
+  assert.deepEqual((await questions(other.id)).map((q) => q.id), [otherQ.id]);
+  await openRoom(other.id, "Second asking room");
+  await page.waitForFunction(() => document.querySelector("#msg").value === "Draft for the second room.");
+  await page.press("#msg", "Enter");
+  await until(async () => (await view(other.id)).events.find((e) => e.id === otherQ.id).open === false);
+  assert.equal((await view(other.id)).events.find((e) => e.id === otherQ.id).answer, "Draft for the second room.");
+
+  // 5f. A draft keeps its recipient across a reload: with two agents asking, the one you chose gets the answer.
+  const two = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex", "claude"], text: "Both of you, ask me something.", to: "everyone", title: "Two askers" });
+  await until(async () => (await questions(two.id)).length === 2);
+  const [firstAsk, secondAsk] = await questions(two.id);
+  await openRoom(two.id, "Two askers");
+  await page.click(`#recipients [data-route="${secondAsk.from}"]`);
+  await page.fill("#msg", "Yes.");
+  const answersSecond = (q) => new RegExp(`your answer to “${q.replace(/[?]/g, "\\?")}”`);
+  await page.waitForFunction((re) => new RegExp(re).test(document.querySelector("#routeInfo").innerText), answersSecond(secondAsk.question).source);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#msg").value === "Yes.");
+  assert.equal(await page.getAttribute(`#recipients [data-route="${secondAsk.from}"]`, "aria-pressed"), "true");
+  await page.waitForFunction((re) => new RegExp(re).test(document.querySelector("#routeInfo").innerText), answersSecond(secondAsk.question).source);
+  await page.press("#msg", "Enter");
+  await until(async () => (await view(two.id)).events.find((e) => e.id === secondAsk.id).open === false);
+  assert.equal((await view(two.id)).events.find((e) => e.id === secondAsk.id).answer, "Yes.");
+  assert.ok((await questions(two.id)).some((q) => q.id === firstAsk.id), "the other agent's question is still open");
+
+  // 5g. A reply that comes after you've switched rooms acts only on the draft it sent. The first room's sends are held
+  // back (a slow connection) while you write in the second room.
+  const settled = async (id) => (await view(id)).live.length === 0 && (await questions(id)).length > 0;
+  await until(async () => (await settled(asked.id)) && (await settled(other.id)));
+  let gate = Promise.resolve();
+  let release = () => {};
+  const holdSends = () => (gate = new Promise((r) => (release = r)));
+  await page.route(`**/api/rooms/${asked.id}/messages`, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  const clearToasts = () => page.evaluate(() => document.querySelector("#toasts").replaceChildren());
+  const toastSays = (re) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector("#toasts").innerText), re.source);
+  const dropRefusal = () => {
+    const i = errors.findIndex((e) => /status of 409/.test(e));
+    assert.ok(i >= 0);
+    errors.splice(i, 1);
+  };
+  await openRoom(asked.id, "Asking room");
+  const [aQ] = await questions(asked.id);
+  await page.fill("#msg", "Slow answer for the first room.");
+  holdSends();
+  await page.press("#msg", "Enter");
+  await openRoom(other.id, "Second asking room");
+  const [bQ] = await questions(other.id);
+  await page.fill("#msg", "Answer for the second room.");
+  await page.waitForFunction(() => /your answer to/.test(document.querySelector("#routeInfo").innerText));
+  // Both questions are answered elsewhere; the second room's agent asks again.
+  await post(`api/rooms/${asked.id}/answer`, { questionId: aQ.id, text: "From the phone." });
+  await post(`api/rooms/${other.id}/answer`, { questionId: bQ.id, text: "From the phone." });
+  await until(async () => (await questions(other.id)).some((q) => q.id !== bQ.id));
+  const newer = (await questions(other.id)).find((q) => q.id !== bQ.id);
+  // The first room's refusal arrives here: it names its room, and this room's draft keeps what it answers.
+  await clearToasts();
+  let reply = page.waitForResponse((res) => res.url().endsWith(`/api/rooms/${asked.id}/messages`));
+  release();
+  assert.equal((await reply).status(), 409);
+  await toastSays(/Not sent[\s\S]*In “Asking room”/);
+  dropRefusal();
+  assert.equal(await page.inputValue("#msg"), "Answer for the second room.");
+  await page.waitForFunction(() => /answered meanwhile, so it won't be sent/.test(document.querySelector("#routeInfo").innerText));
+  await clearToasts();
+  await page.press("#msg", "Enter");
+  await toastSays(/Not sent/);
+  dropRefusal();
+  assert.ok((await questions(other.id)).some((q) => q.id === newer.id), "the second room's newer question is still open");
+  assert.ok(!(await view(other.id)).events.some((e) => e.type === "owner" && /Answer for the second room/.test(e.text)));
+  // A late success clears only the first room's draft.
+  await openRoom(asked.id, "Asking room");
+  assert.equal(await page.inputValue("#msg"), "Slow answer for the first room.", "its refusal kept the first room's text");
+  holdSends();
+  await page.press("#msg", "Enter");
+  await openRoom(other.id, "Second asking room");
+  reply = page.waitForResponse((res) => res.url().endsWith(`/api/rooms/${asked.id}/messages`));
+  release();
+  assert.equal((await reply).status(), 200);
+  await page.waitForFunction((id) => !localStorage.getItem(`toryo.draft.${id}`), asked.id);
+  assert.equal(await page.inputValue("#msg"), "Answer for the second room.", "the first room's reply left this draft alone");
+  await page.unroute(`**/api/rooms/${asked.id}/messages`);
+  const slow = (await view(asked.id)).events.find((e) => e.type === "owner" && /Slow answer/.test(e.text));
+  assert.equal(slow.answers, undefined, "sent again after its refusal, it went as a note");
+  await openRoom(asked.id, "Asking room");
+  assert.equal(await page.inputValue("#msg"), "");
+
+  // 5h. A draft saved by an earlier version of the page, with no record of what it answers, comes back as a note: it
+  // isn't tied to whatever question is open now.
+  await openRoom(two.id, "Two askers");
+  const [still] = await questions(two.id);
+  await page.evaluate((id) => {
+    localStorage.setItem(`toryo.draft.${id}`, "Old draft from before the update.");
+    localStorage.removeItem(`toryo.answering.${id}`);
+  }, two.id);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#msg").value === "Old draft from before the update.");
+  await page.waitForFunction(() => /a note, not an answer/.test(document.querySelector("#routeInfo").innerText));
+  await page.press("#msg", "Enter");
+  await until(async () => (await view(two.id)).events.some((e) => e.type === "owner" && /Old draft/.test(e.text)));
+  assert.equal((await view(two.id)).events.find((e) => e.type === "owner" && /Old draft/.test(e.text)).answers, undefined);
+  assert.ok((await questions(two.id)).some((q) => q.id === still.id), "the open question isn't answered by the old draft");
+
+  // 5i. Choosing another question while a send is on its way, with the same words still in the box, makes it a new
+  // draft: the late reply, a success or a refusal, leaves it and the question it now answers alone.
+  const pending = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], text: "Ask me.", to: "codex", title: "Pending room" });
+  const twoOpen = async () => {
+    const before = (await questions(pending.id)).length;
+    await post(`api/rooms/${pending.id}/messages`, { text: "And another.", to: "codex", answering: false });
+    await until(async () => (await questions(pending.id)).length > before && (await view(pending.id)).live.length === 0);
+    return questions(pending.id);
+  };
+  await until(async () => (await questions(pending.id)).length === 1 && (await view(pending.id)).live.length === 0);
+  await page.route(`**/api/rooms/${pending.id}/messages`, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  const tie = () => page.evaluate((id) => JSON.parse(localStorage.getItem(`toryo.answering.${id}`) ?? "null"), pending.id);
+  await openRoom(pending.id, "Pending room");
+  for (const [late, word] of [[200, "Yes."], [409, "No."]]) {
+    const [qa, qb] = await twoOpen();
+    await page.waitForSelector(`.decision[data-id="${qb.id}"] [data-answer-focus]`);
+    await page.fill("#msg", word);
+    assert.equal((await tie()).byAgent.codex, qa.id);
+    holdSends();
+    await page.press("#msg", "Enter");
+    // While it's on its way: the other card's "Write my own answer", the same words left in the box.
+    await page.click(`.decision[data-id="${qb.id}"] [data-answer-focus]`);
+    assert.equal((await tie()).byAgent.codex, qb.id);
+    if (late === 409) await post(`api/rooms/${pending.id}/answer`, { questionId: qa.id, text: "From the phone." });
+    await clearToasts();
+    reply = page.waitForResponse((res) => res.url().endsWith(`/api/rooms/${pending.id}/messages`));
+    release();
+    assert.equal((await reply).status(), late);
+    if (late === 409) {
+      await toastSays(/Not sent/);
+      dropRefusal();
+    } else await page.waitForFunction((id) => document.querySelector(`.decision.closed[data-id="${id}"]`), qa.id);
+    assert.equal(await page.inputValue("#msg"), word, "the late reply left the new draft in the box");
+    assert.equal((await tie()).byAgent.codex, qb.id, "and what it answers");
+    assert.equal((await tie()).route, "codex");
+    await page.waitForFunction(() => /your answer to “SQLite or Postgres\?”/.test(document.querySelector("#routeInfo").innerText));
+    await page.press("#msg", "Enter");
+    await until(async () => (await view(pending.id)).events.find((e) => e.id === qb.id).open === false);
+    assert.equal((await view(pending.id)).events.find((e) => e.id === qb.id).answer, word);
+    await until(async () => (await view(pending.id)).live.length === 0);
+  }
+  await page.unroute(`**/api/rooms/${pending.id}/messages`);
+
+  // 5j. Two tabs share their saved drafts. A late reply in the first tab never undoes a newer draft the second tab
+  // wrote for that room, whether the first tab is still elsewhere or back in the room showing it.
+  await page.route(`**/api/rooms/${pending.id}/messages`, async (route) => {
+    await gate;
+    await route.continue();
+  });
+  for (const [late, back] of [[200, false], [409, false], [200, true], [409, true]]) {
+    const [qa, qb] = await twoOpen();
+    await openRoom(pending.id, "Pending room");
+    await page.fill("#msg", "Sent from the first tab.");
+    holdSends();
+    await page.press("#msg", "Enter");
+    await openRoom(other.id, "Second asking room");
+    const tab = await page.context().newPage();
+    tab.on("pageerror", (e) => errors.push(String(e)));
+    await tab.goto(`${url}#/r/${pending.id}`);
+    await tab.waitForSelector(`.decision[data-id="${qb.id}"] [data-answer-focus]`);
+    await tab.fill("#msg", "Newer, from the second tab.");
+    await tab.click(`.decision[data-id="${qb.id}"] [data-answer-focus]`);
+    if (late === 409) await post(`api/rooms/${pending.id}/answer`, { questionId: qa.id, text: "From the phone." });
+    if (back) {
+      await openRoom(pending.id, "Pending room");
+      await page.waitForFunction(() => document.querySelector("#msg").value === "Newer, from the second tab.");
+    }
+    await clearToasts();
+    reply = page.waitForResponse((res) => res.url().endsWith(`/api/rooms/${pending.id}/messages`));
+    release();
+    assert.equal((await reply).status(), late);
+    if (late === 409) {
+      await toastSays(/Not sent/);
+      dropRefusal();
+    } else await until(async () => (await view(pending.id)).events.find((e) => e.id === qa.id).answer === "Sent from the first tab.", "the first tab's note to answer its question");
+    await new Promise((r) => setTimeout(r, 200));
+    const saved = await page.evaluate((id) => ({ text: localStorage.getItem(`toryo.draft.${id}`), tie: JSON.parse(localStorage.getItem(`toryo.answering.${id}`) ?? "null") }), pending.id);
+    assert.equal(saved.text, "Newer, from the second tab.", `late ${late}, ${back ? "back in the room" : "elsewhere"}: the newer draft stays`);
+    assert.equal(saved.tie?.byAgent.codex, qb.id, "and so does what it answers");
+    assert.equal(saved.tie?.route, "codex");
+    if (back) assert.equal(await page.inputValue("#msg"), "Newer, from the second tab.");
+    // The second tab sends its draft: it answers the question it chose.
+    await tab.press("#msg", "Enter");
+    await until(async () => (await view(pending.id)).events.find((e) => e.id === qb.id).open === false);
+    assert.equal((await view(pending.id)).events.find((e) => e.id === qb.id).answer, "Newer, from the second tab.");
+    // Its reply has come back (its box is empty, the saved draft gone) before it closes.
+    await tab.waitForFunction(() => document.querySelector("#msg").value === "");
+    await tab.close();
+    await until(async () => (await view(pending.id)).live.length === 0);
+  }
+  // 5k. The second tab writes first: its newer draft is saved before the first tab sends the older answer it still
+  // shows. The first tab's late reply leaves the second tab's draft alone, whether the first tab moved on or stayed.
+  for (const [late, stay] of [[200, false], [409, false], [200, true], [409, true]]) {
+    const [qa, qb] = await twoOpen();
+    // Start from the room's saved draft (the second tab sent the last one).
+    await openRoom(other.id, "Second asking room");
+    await openRoom(pending.id, "Pending room");
+    assert.equal(await page.inputValue("#msg"), "");
+    await page.fill("#msg", "Older, from the first tab.");
+    assert.equal((await page.evaluate((id) => JSON.parse(localStorage.getItem(`toryo.answering.${id}`)), pending.id)).byAgent.codex, qa.id);
+    const tab = await page.context().newPage();
+    tab.on("pageerror", (e) => errors.push(String(e)));
+    await tab.goto(`${url}#/r/${pending.id}`);
+    await tab.waitForSelector(`.decision[data-id="${qb.id}"] [data-answer-focus]`);
+    await tab.fill("#msg", "Newer, from the second tab.");
+    await tab.click(`.decision[data-id="${qb.id}"] [data-answer-focus]`);
+    if (late === 409) await post(`api/rooms/${pending.id}/answer`, { questionId: qa.id, text: "From the phone." });
+    holdSends();
+    await page.press("#msg", "Enter");
+    if (!stay) await openRoom(other.id, "Second asking room");
+    await clearToasts();
+    reply = page.waitForResponse((res) => res.url().endsWith(`/api/rooms/${pending.id}/messages`));
+    release();
+    assert.equal((await reply).status(), late);
+    if (late === 409) {
+      await toastSays(/Not sent/);
+      dropRefusal();
+    } else await until(async () => (await view(pending.id)).events.find((e) => e.id === qa.id).open === false);
+    await new Promise((r) => setTimeout(r, 200));
+    const saved = await page.evaluate((id) => ({ text: localStorage.getItem(`toryo.draft.${id}`), tie: JSON.parse(localStorage.getItem(`toryo.answering.${id}`) ?? "null") }), pending.id);
+    const what = `late ${late}, first tab ${stay ? "stayed" : "moved on"}`;
+    assert.equal(saved.text, "Newer, from the second tab.", `${what}: the second tab's draft stays`);
+    assert.equal(saved.tie?.byAgent.codex, qb.id, `${what}: and so does what it answers`);
+    assert.equal(saved.tie?.route, "codex");
+    // The first tab's own box: emptied once its note went, kept when it was refused.
+    if (stay) assert.equal(await page.inputValue("#msg"), late === 200 ? "" : "Older, from the first tab.", what);
+    await tab.press("#msg", "Enter");
+    await until(async () => (await view(pending.id)).events.find((e) => e.id === qb.id).open === false);
+    assert.equal((await view(pending.id)).events.find((e) => e.id === qb.id).answer, "Newer, from the second tab.");
+    // Its reply has come back (its box is empty, the saved draft gone) before it closes.
+    await tab.waitForFunction(() => document.querySelector("#msg").value === "");
+    await tab.close();
+    await until(async () => (await view(pending.id)).live.length === 0);
+  }
+  await page.unroute(`**/api/rooms/${pending.id}/messages`);
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");

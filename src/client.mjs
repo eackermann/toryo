@@ -5,6 +5,8 @@ import { stripStatus } from "./protocol.mjs";
 
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor", grok: "Grok", codexapp: "Codex app" };
 const name = (a) => NAMES[a] ?? a;
+/** One open question as text, with the id that answers it. */
+const asked = (q) => `${q.from ? `${name(q.from)} asks: ` : ""}${q.question}${q.recommendation ? ` (recommended: ${q.recommendation})` : ""}${q.id ? ` [id ${q.id}]` : ""}`;
 
 /** Talks to a running Toryo over its local HTTP API (found through server.json). */
 export class ToryoClient {
@@ -62,7 +64,7 @@ export class ToryoClient {
     for (const r of rooms.slice(0, 12)) {
       const who = r.running.length ? ` · ${r.running.map(name).join(" and ")} working` : "";
       lines.push(`• ${r.title} [${r.mode}, ${r.status}${who}] (id ${r.id})`);
-      if (r.waiting) lines.push(`    waiting for you: ${r.waiting.from ? `${name(r.waiting.from)} asks: ` : ""}${r.waiting.question}${r.waitingCount > 1 ? ` (and ${r.waitingCount - 1} more)` : ""}`);
+      for (const q of r.questions ?? (r.waiting ? [r.waiting] : [])) lines.push(`    waiting for you: ${asked(q)}`);
     }
     lines.push(`Agents: ${Object.entries(agents ?? {}).map(([id, a]) => `${name(id)} ${a.installed ? "✓" : "✗"}`).join("  ")}`);
     return lines.join("\n");
@@ -76,8 +78,7 @@ export class ToryoClient {
     if (r.mode === "build" && r.build)
       lines.push(`Builder ${name(r.crew.builder)}, reviewer ${name(r.crew.reviewer)}. Plan: ${r.build.planPath || "none"}. Current: ${r.build.slice || "-"}, round ${r.build.round}. Approved: ${r.build.approved.join(", ") || "none yet"}.`);
     if (r.mode === "plan" && r.plan) lines.push(`Planning “${r.plan.topic}”, phase: ${r.plan.phase}. Plan file: ${r.plan.planPath}.`);
-    if (r.waiting) lines.push(`WAITING FOR YOU: ${r.waiting.from ? `${name(r.waiting.from)} asks: ` : ""}${r.waiting.question}${r.waiting.recommendation ? ` (recommended: ${r.waiting.recommendation})` : ""}`);
-    for (const w of r.waitingQueue ?? []) lines.push(`ALSO WAITING (answered after the one above): ${w.from ? `${name(w.from)} asks: ` : ""}${w.question}`);
+    for (const q of view.questions ?? [r.waiting, ...(r.waitingQueue ?? [])].filter(Boolean)) lines.push(`WAITING FOR YOU: ${asked(q)}`);
     for (const l of view.live) lines.push(`Working now: ${name(l.agent)} (${l.kind}), last: ${l.activity.at(-1)?.text ?? "starting"}`);
     lines.push("", "Recent:");
     const events = view.events.filter((e) => ["turn", "owner", "question", "gate"].includes(e.type) || (e.type === "system" && /approved|complete|agree|ended|failed|Stopped/i.test(e.text)));
@@ -100,10 +101,35 @@ export class ToryoClient {
     return `Sent to ${res.routed.agents.map(name).join(", ")} in “${r.title}” (${res.routed.why}).`;
   }
 
-  async answer(ref, text, { accept = false } = {}) {
-    const r = await this.resolveRoom(ref);
-    await this.call("POST", `/api/rooms/${r.id}/answer`, { text, accept });
-    return `Answered in “${r.title}”.`;
+  /**
+   * Answer one open question: the one named by its id, else the only one open (in the room named, or in any room).
+   * With several open, nothing is sent; the reply lists them with their ids. (The desk refuses an id that's no
+   * longer open.)
+   */
+  async answer(ref, text, { accept = false, question } = {}) {
+    const rooms = ref ? [await this.resolveRoom(ref)] : (await this.state()).rooms;
+    if (!rooms.length) throw new Error("There are no rooms yet.");
+    // A desk started before questions had ids (not restarted since this update): it can't take an answer to a
+    // particular question, so one named is refused rather than sent somewhere else. Otherwise, as it always did.
+    if (!rooms.some((r) => Array.isArray(r.questions))) {
+      if (question) throw new Error("Toryo was started before questions had ids, so it can't take an answer to a particular question. Restart it first: toryo quit && toryo");
+      await this.call("POST", `/api/rooms/${rooms[0].id}/answer`, { text, accept });
+      return `Answered in “${rooms[0].title}”.`;
+    }
+    const open = rooms.flatMap((r) => (r.questions ?? []).map((q) => ({ ...q, room: r })));
+    const where = ref ? ` in “${rooms[0].title}”` : "";
+    let q = question ? open.find((x) => x.id === question) : open.length === 1 ? open[0] : null;
+    if (question && !q) {
+      if (!ref) throw new Error(`No open question has the id “${question}”: it has already been answered, or the id is wrong.`);
+      q = { id: question, room: rooms[0] };
+    }
+    if (!q) {
+      if (!open.length) throw new Error(`Nobody${where} is waiting for an answer.`);
+      const line = (x) => `  ${ref ? "" : `“${x.room.title}”: `}${asked(x)}`;
+      throw new Error([`${open.length} questions are open${where}. Say which one you're answering by its id:`, ...open.map(line)].join("\n"));
+    }
+    await this.call("POST", `/api/rooms/${q.room.id}/answer`, { text, accept, questionId: q.id });
+    return `Answered in “${q.room.title}”${q.question ? `: ${truncate(q.question, 120)}` : ""}.`;
   }
 
   async control(ref, action) {
