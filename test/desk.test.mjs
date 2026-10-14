@@ -180,7 +180,11 @@ test("a desk file Toryo can't read, or one from a newer Toryo, stops anything ne
       const { message } = e.deskControl("reset");
       assert.match(message, /the old file is at .*desk\.json\.unreadable-/);
       assert.ok(readdirSync(t.home).some((f) => f.startsWith("desk.json.unreadable-")));
-      assert.equal(JSON.parse(readFileSync(path, "utf8")).version, 1);
+      // A fresh desk, as a new one starts: version 2, with the usage guard on at its defaults.
+      const fresh = JSON.parse(readFileSync(path, "utf8"));
+      assert.equal(fresh.version, 2);
+      assert.deepEqual(fresh.guard.policies, {});
+      assert.equal(fresh.guard.notice.pending, true);
       await waitFor(() => turns(e, room.id).some((x) => x.state === "done"), { label: "reply after reset" });
       e.shutdown();
     } finally {

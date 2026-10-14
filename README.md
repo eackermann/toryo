@@ -135,7 +135,7 @@ Toryo's own page runs on this machine. To reach it while you're away, use the ap
 claude mcp add --scope user toryo -- ~/toryo/toryo mcp
 ```
 
-Open that Claude Code session with Remote Control (`claude --remote-control`, or `/remote-control`), then ask from the Claude app: *“What's Toryo doing?”*, *“Tell Codex to leave the migrations alone”*, *“Accept Claude's recommendation”*. The tools are `toryo_status`, `toryo_room`, `toryo_say`, `toryo_answer`, `toryo_plan` (check a ready plan, or forward your discussion of it), `toryo_control` and `toryo_start`.
+Open that Claude Code session with Remote Control (`claude --remote-control`, or `/remote-control`), then ask from the Claude app: *“What's Toryo doing?”*, *“Tell Codex to leave the migrations alone”*, *“Accept Claude's recommendation”*. The tools are `toryo_status`, `toryo_room`, `toryo_say`, `toryo_answer`, `toryo_plan` (check a ready plan, or forward your discussion of it), `toryo_control` (one room), `toryo_desk` (Pause everything, holds), `toryo_guard` (the usage guard) and `toryo_start`.
 
 Codex can use the same server: `codex mcp add toryo -- ~/toryo/toryo mcp` in WSL. For the Windows desktop app, run `codex mcp add toryo -- wsl.exe -e /home/<you>/toryo/toryo mcp` in PowerShell; that path is untested.
 
@@ -148,6 +148,7 @@ toryo status                     toryo show [room] [--full]
 toryo say --to codex "…"         toryo answer --accept
 toryo pause|resume|stop [room]   toryo start plan "…"
 toryo plan check                 toryo plan forward --from claude
+toryo pause --all                toryo hold codex    toryo guard
 ```
 
 `toryo status`, `toryo show`, `toryo_status` and `toryo_room` list each open question with its id. `toryo answer` and `toryo_answer` look in the room you name, or in every room if you don't. With just one question open there, they answer it. With several, they send nothing and list them; name one with `--question <id>` (`question` for `toryo_answer`). `toryo plan check` asks the other planners to check a ready plan (`--checker claude` for one of them); `toryo plan forward` sends your discussion with a planner to the author (`--from claude`, which can be left out when there's only one other planner). Both act on the only ready plan, or on the one you name with `--question <id>` (its card's id). Over the HTTP API, an answer (`POST /api/rooms/<id>/answer`), a retry and the planning calls (`retry`, `synthesize`, `accept-checkpoint`, `plan-check` and `forward-discussion` under `POST /api/rooms/<id>/control`) must name their question (`questionId`).
@@ -176,24 +177,50 @@ toryo plan check                 toryo plan forward --from claude
 
 `toryo doctor` shows what's installed. Each session can be continued in a terminal; the crew panel shows the resume command.
 
-## Planned
+## Desk-wide controls and the usage guard
 
-**Already working: Pause everything and holds, through the API only for now.** The page's buttons and the `toryo hold` / `toryo pause --all` commands come in later slices. They work through `POST /api/desk`, with `{ "action": "pause" }`, `"resume"`, or `{ "action": "hold" | "release", "target": "codex" }`.
+These work across every room. Turns and checks already running always finish: the controls only stop new ones from starting.
+
+**The usage guard** is on unless you turn it off, on new desks and existing ones alike.
+- **What it does.** When an agent's 5-hour or weekly usage reaches 90%, Toryo holds every agent that draws on that allowance. Headless Codex and the Codex app share one; Claude has its own. Running turns finish and nothing new starts, retries of failed turns included.
+- **When it lets go.** When that limit resets, the hold ends by itself and the work carries on, even with no new reading (Claude reports its usage only while it works). Toryo looks at least every 30 seconds and before starting anything, so a desk that slept through the reset decides as if it hadn't.
+- **What it reads.** It acts on new readings only: Codex's logs, read every 5 minutes, and what agents report during their turns. A late reading of a window that has already reset holds nothing. A limit whose reset time isn't known is never released by guesswork: a new reading under the threshold ends that hold. When Toryo starts, it looks at the latest saved readings again before anything starts, so a hold it couldn't save comes back.
+- **Notifications.** One when it holds an agent, and one when it lets go. A room it holds up shows *Held*, with the reason.
+- **Your settings.** `toryo guard` shows what it does and holds.
+  - **Thresholds:** `toryo guard codex --five-hour 85 --weekly 95` changes them; `--weekly off` turns one window's rule off (`--window weekly-opus --at off` for any other window); `--off` and `--on` turn all of an agent's rules off or on. Without an agent, each command is for every agent. A change that's refused (a threshold over 100%, say) changes nothing.
+  - **Release at reset:** with `--no-auto-release`, a reset waits for you: `toryo guard codex --window weekly --release-expired-hold`.
+  - **Changes apply at once:** a rule you turn off, or raise above the current reading, lets go straight away.
+- **Getting past it.**
+  - **Release:** `toryo release codex` releases your own hold, and says what the guard still holds, window by window. Each comes with the command, and the MCP arguments, to let the agent run anyway until that limit resets: `toryo guard codex --window weekly --pause-until-reset`.
+  - **After the reset:** the guard watches again.
+  - **No known reset time:** the guard can't be paused until then, and you're offered turning that rule off instead.
+- **The note.** `toryo status` explains the guard once, until you hide it with `toryo guard ok`. Settings you've changed are kept, and stay as you set them.
+
+**Pause everything and holds.** `toryo pause --all` and `toryo resume --all`; `toryo hold codex` and `toryo release codex` (or `claude`, `codexapp`, `codex --headless`). Over MCP they're `toryo_desk` and `toryo_guard`; over HTTP, `POST /api/desk`:
+- `{ "action": "pause" }` and `"resume"`;
+- `{ "action": "hold" | "release", "target": "codex" }`;
+- `"guard"`, with `target`, `rules`, `autoRelease` and `enabled`;
+- `"guard-pause"` and `"guard-release"`, with `target` and `window`;
+- `"guard-ok"`.
+
 - **Hold scopes.** `"codex"` holds both headless Codex and the Codex app. `"codexapp"` holds only the app, and `"codex"` with `"headless": true` only headless Codex. Any other agent's name holds that agent.
 - **Graceful.** Turns and checks already running finish; nothing new starts. Pause everything also stops new project checks, while a hold on an agent doesn't. Following a Codex app turn the app already has is never held up.
 - **Turns not yet sent.** A turn being prepared (its snapshot, its prompt, or Cursor creating its chat) when a hold or Pause everything comes isn't sent. It goes back to the front of the queue, unsent, with your notes still waiting for it, and the room shows it as *Not sent yet*. A held Codex app isn't asked to open its thread either, since opening it would start the turn.
 - **Separate from each room's own Pause.** Resuming the desk doesn't resume a room you paused, and resuming a room doesn't release a hold.
 - **Visible.** A room whose work is held up shows *Held* in the room list, and says once, in the room, what it's waiting for.
-- **Kept across restarts.** The controls live in `~/.toryo/desk.json` and are in force before any room starts.
-- **When the file is a problem.** If Toryo can't read that file, or a newer Toryo wrote it, nothing new starts and the file is left alone. Fix it and restart, or reset the controls (`"action": "reset"`, which sets the old file aside). If Toryo can't save a new hold, the hold applies anyway and nothing new starts until it's saved (`"action": "save"`). A release it can't save doesn't happen.
+- **Kept across restarts.** The controls, the guard's settings and what it holds live in `~/.toryo/desk.json` and are in force before any room starts. What the guard did is also written to `~/.toryo/desk-events.jsonl`.
+- **When the file is a problem.** If Toryo can't read that file, or a newer Toryo wrote it, nothing new starts and the file is left alone. Fix it and restart, or reset the controls (`"action": "reset"`, which sets the old file aside and starts with the guard at its defaults). If Toryo can't save a new hold, or the guard's state, the hold applies anyway and nothing new starts until it's saved (`"action": "save"`). A release it can't save doesn't happen.
 
-The owner has chosen a Home view for managing several rooms, with usage guards as the main feature. Guards will start on at 90% of both the 5-hour and weekly limits, release automatically at reset, and preserve settings already saved. A one-time notice will explain how to turn them off. Manual holds and Pause everything will let current work finish and survive a restart. Home will show questions, current work and elapsed time, measured usage and resets, and recent activity, with the same controls through the terminal and MCP.
+
+## Planned
+
+The owner has chosen a Home view for managing several rooms. Home will show questions, current work and elapsed time, measured usage and resets, what the guard holds, and recent activity, with buttons for the controls above.
 
 Each room will show, at its top, a timeline of its current session: how long it spent planning, building, reviewing and running checks, in color and in words. A room will be able to start a new session, for example to plan the next sprint: the timeline starts again and the agents start fresh, while the earlier sessions stay in the room.
 
 New headless Build rooms will default to their own worktree, with the shared-folder choice still available and existing rooms left in place. Worktrees will live under `~/.toryo/worktrees`, include current uncommitted work, and show the room's own changes for an explicit return to main as uncommitted files. Conflicts will leave main untouched. The Codex app stays in main for this release. A second builder in one folder will be refused. A planning author can write shared documents into main between active turns/checks/reviews, then the build room gets a note listing changed files. Setup and checks will run one at a time per project unless its settings allow parallel runs; commands receive their room ID, folder, and port offset.
 
-These additions are **planned, not yet available**. The [implementation plan](docs/plans/plan-a-home-view-for-foreman-and-desk-wi.md) has already given the page the new look the owner approved (a design system, with rings that show what each room is doing) and the plan checks described under *Plan* above. Next come the guard and Home, then the session timeline and new sessions, followed by a small builder guard, shared-file coordination, and worktrees. [Accepted review decisions](docs/decisions.md#2026-10-13-accepted-plan-review-and-worktree-defaults) and [plan-review decisions](docs/decisions.md#2026-10-13-plan-checks-and-discussion-handoffs) record the choices and why. The review's open questions are settled.
+These additions are **planned, not yet available**. The [implementation plan](docs/plans/plan-a-home-view-for-foreman-and-desk-wi.md) has already given the page the new look the owner approved (a design system, with rings that show what each room is doing), the plan checks described under *Plan* above, and the usage guard. Next comes Home, then the session timeline and new sessions, followed by a small builder guard, shared-file coordination, and worktrees. [Accepted review decisions](docs/decisions.md#2026-10-13-accepted-plan-review-and-worktree-defaults) and [plan-review decisions](docs/decisions.md#2026-10-13-plan-checks-and-discussion-handoffs) record the choices and why. The review's open questions are settled.
 
 Later retains one-turn overrides, usage forecasts and advance warnings, further Swap work, turn caps, provider-exhaustion recovery, and immediate pause. Managed dev servers, general resource declarations, and test-database naming are also deferred; a worktree and port offset do not by themselves isolate services. Folder restoration would ask first because it overwrites files; a commit offer would require project permission. Separately, snapshots keeping their own copies of referenced data is a bug fix to do soon, outside this plan, so a project's Git cleanup cannot break old snapshots.
 

@@ -64,8 +64,38 @@ const TOOLS = [
     },
   },
   {
+    name: "toryo_desk",
+    description:
+      "Desk-wide controls, across every room. pause: Pause everything (running turns and checks finish, nothing new starts). resume: undo that. hold / release: an agent (`target`: codex covers both headless Codex and the Codex app, codexapp the app only, claude…; `headless` with codex: headless Codex only). A release says what the usage guard still holds, with the toryo_guard arguments to pause that guard until its reset.",
+    inputSchema: {
+      type: "object",
+      properties: { action: { type: "string", enum: ["pause", "resume", "hold", "release"] }, target: { type: "string" }, headless: { type: "boolean" } },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "toryo_guard",
+    description:
+      "The usage guard: it holds an agent's allowance when a limit window reaches its threshold (90% of the 5-hour and weekly windows unless changed) and lets it go at reset. action show (the default with nothing to change): its rules and what it holds. set: change the rules for `target` (an agent; left out, every agent) with fiveHour / weekly (a percentage, or \"off\"), rules ({ <window>: { enabled, at } }), autoRelease, or enabled (every rule on or off). pause-until-reset: let `target` run until `window` (\"5-hour\", \"weekly\") resets. release-expired-hold: release a hold whose window has reset (when automatic release is off). ok: hide the note about the guard.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["show", "set", "pause-until-reset", "release-expired-hold", "ok"] },
+        target: { type: "string" },
+        window: { type: "string" },
+        fiveHour: { type: ["number", "string"] },
+        weekly: { type: ["number", "string"] },
+        rules: { type: "object" },
+        autoRelease: { type: "boolean" },
+        enabled: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "toryo_control",
-    description: "Pause, resume or stop a room.",
+    description: "Pause, resume or stop one room. (Pause everything, across rooms, is toryo_desk.)",
     inputSchema: {
       type: "object",
       properties: { room: { type: "string" }, action: { type: "string", enum: ["pause", "resume", "stop"] } },
@@ -143,6 +173,21 @@ export function runMcpServer(client = new ToryoClient()) {
           case "toryo_plan":
             text = await client.plan(a.room, a.action, { question: a.question, from: a.from, checkers: a.checkers });
             break;
+          case "toryo_desk":
+            text = await client.desk(a.action, { target: a.target, headless: Boolean(a.headless) });
+            break;
+          case "toryo_guard": {
+            const action = a.action ?? (a.rules || a.fiveHour != null || a.weekly != null || a.autoRelease != null || a.enabled != null ? "set" : "show");
+            text = await client.guard({
+              target: a.target,
+              ok: action === "ok",
+              pauseUntilReset: action === "pause-until-reset",
+              releaseExpired: action === "release-expired-hold",
+              window: action === "pause-until-reset" || action === "release-expired-hold" ? a.window : undefined,
+              ...(action === "set" ? { fiveHour: a.fiveHour, weekly: a.weekly, rules: a.rules, autoRelease: a.autoRelease, enabled: a.enabled } : {}),
+            });
+            break;
+          }
           case "toryo_control":
             text = await client.control(a.room, a.action);
             break;

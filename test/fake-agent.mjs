@@ -16,11 +16,14 @@
  * `zeroTurns` does too, reporting num_turns 0, and `hookDrop: "<text>"`
  * reports "Prompt dropped by a hook: <text>" first. `resultText` puts text
  * in that last result event (diagnostics after a drop). `delayMs` waits before
- * the session starts; `workMs` waits after it has started (a turn at work).
+ * the session starts; `workMs` waits after it has started (a turn at work). Usage is reported before a turn
+ * fails too (`fail` with `rateLimit`), as a real turn can report it and then fail. For Codex, `codexUsage`
+ * ({ primary, secondary }, as Codex logs them) is written to the session log under CODEX_HOME, where Toryo
+ * reads Codex's usage.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 const [kind, ...args] = process.argv.slice(2);
 if (args.includes("--version")) {
@@ -89,7 +92,10 @@ if (rule?.hang) {
   if (rule?.delayMs) await new Promise((r) => setTimeout(r, rule.delayMs));
   start();
   if (rule?.workMs) await new Promise((r) => setTimeout(r, rule.workMs));
+  if (kind === "codex" && rule?.codexUsage) logCodexUsage(rule.codexUsage);
   if (rule?.fail) {
+    // Usage reported, then an ordinary failure.
+    if (kind !== "codex" && rule.rateLimit) for (const info of [rule.rateLimit].flat().filter(Boolean)) out({ type: "rate_limit_event", rate_limit_info: info });
     process.stderr.write("fake failure\n");
     process.exit(1);
   }
@@ -107,6 +113,14 @@ function emitNothing() {
   }
   if (rule.hookDrop) out({ type: "system", subtype: "informational", message: `Prompt dropped by a hook: ${rule.hookDrop}` });
   out({ type: "result", subtype: "success", is_error: false, result: rule.resultText ?? "", num_turns: rule.hookDrop || rule.zeroTurns ? 0 : 1, session_id: session });
+}
+
+/** Codex's usage, as Codex writes it in the session's log (Toryo reads it from there after the turn). */
+function logCodexUsage(rateLimits) {
+  const d = new Date();
+  const dir = join(process.env.CODEX_HOME, "sessions", String(d.getFullYear()), String(d.getMonth() + 1).padStart(2, "0"), String(d.getDate()).padStart(2, "0"));
+  mkdirSync(dir, { recursive: true });
+  appendFileSync(join(dir, `rollout-fake-${session}.jsonl`), JSON.stringify({ timestamp: d.toISOString(), type: "event_msg", payload: { type: "token_count", rate_limits: rateLimits } }) + "\n");
 }
 
 function out(obj) {

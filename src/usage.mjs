@@ -51,6 +51,9 @@ export function typeForMinutes(minutes) {
   return `${minutes}_minute`;
 }
 
+/** A window type in words: "5-hour", "weekly", "weekly (Opus)". */
+export const windowLabel = (type, minutes) => labelFor(type, minutes);
+
 function labelFor(type, minutes) {
   if (KNOWN[type]) return KNOWN[type].label;
   if (Number.isFinite(minutes) && minutes > 0) return minutes % 60 === 0 ? `${minutes / 60}-hour` : `${minutes}-minute`;

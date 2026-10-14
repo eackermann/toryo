@@ -13,8 +13,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 export const FAKE = join(here, "fake-agent.mjs");
 
-/** A temporary Toryo home, a temporary git project, and an engine wired to the fake agents. */
-export async function setup(rules, { gates = [] } = {}) {
+/**
+ * A temporary Toryo home, a temporary git project, and an engine wired to the fake agents. `engine`: options for
+ * every engine `make` creates (a clock, say); `make(options)` adds to them.
+ */
+export async function setup(rules, { gates = [], engine: engineOptions = {} } = {}) {
   const base = mkdtempSync(join(tmpdir(), "toryo-test-"));
   const home = join(base, "home");
   const repo = join(base, "repo");
@@ -40,8 +43,8 @@ export async function setup(rules, { gates = [] } = {}) {
     projects: [{ id: "repo", name: "repo", path: repo, rules: "", decisions: "", gates, agents: {} }],
   });
   const notes = [];
-  const make = async () => {
-    const engine = new Engine({ store, snapshots: new Snapshots(home), notifier: { send: (t, b) => notes.push({ t, b }) } });
+  const make = async (options = {}) => {
+    const engine = new Engine({ store, snapshots: new Snapshots(home), notifier: { send: (t, b) => notes.push({ t, b }) }, ...engineOptions, ...options });
     await engine.init({ detect: false });
     return engine;
   };

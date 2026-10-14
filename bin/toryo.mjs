@@ -24,7 +24,7 @@ const flag = (name, fallback) => {
   const v = args[i + 1];
   return v && !v.startsWith("--") ? v : true;
 };
-const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["to", "port", "host", "project", "plan", "room", "builder", "reviewer", "handoff-file", "slice", "thread", "question", "from", "checker"].includes(args[i - 1].slice(2))));
+const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["to", "port", "host", "project", "plan", "room", "builder", "reviewer", "handoff-file", "slice", "thread", "question", "from", "checker", "five-hour", "weekly", "window", "at"].includes(args[i - 1].slice(2))));
 const command = positional[0];
 
 const HELP = `Toryo: a relay desk for coding agents.
@@ -48,6 +48,17 @@ From any terminal (or an agent) while Toryo runs
   toryo plan forward [--room R] [--question ID] [--from claude]
                                 your discussion with that planner goes to the plan's author as a change request
   toryo pause|resume|stop [room]
+  toryo pause --all | resume --all
+                                Pause everything: running turns and checks finish, nothing new starts anywhere
+  toryo hold codex|claude|codexapp [--headless]    toryo release codex|claude|codexapp [--headless]
+                                hold an agent in every room (codex: both Codex interfaces; codexapp: the app only;
+                                --headless: headless Codex only); a release says what the usage guard still holds
+  toryo guard                   what the usage guard does, and what it holds now
+  toryo guard [agent] --five-hour 90 --weekly 90 [--auto-release | --no-auto-release]
+                                its rules (--weekly off turns one off; --off or --on, all of them; no agent: every agent)
+  toryo guard codex --window weekly --pause-until-reset      let Codex run until its weekly limit resets
+  toryo guard codex --window weekly --release-expired-hold   release a hold whose limit has reset (auto-release off)
+  toryo guard ok                hide the note about the usage guard
   toryo start chat|plan|build "text" [--plan docs/plans/x.md] [--project name]
   toryo start build "text" --review-first [--builder codexapp] [--reviewer claude] [--handoff-file f.md] [--slice name]
                                 the builder already finished a round: the reviewer goes first
@@ -107,9 +118,40 @@ try {
     }
     case "pause":
     case "resume":
+      // --all: Pause everything (or resume it); otherwise one room.
+      if (flag("all", false)) {
+        console.log(await client.desk(command));
+        process.exit(0);
+      }
+      console.log(await client.control(positional[1] ?? roomArg(), command));
+      process.exit(0);
     case "stop":
       console.log(await client.control(positional[1] ?? roomArg(), command));
       process.exit(0);
+    case "hold":
+    case "release":
+      if (!positional[1]) throw new Error(`Say which agent: toryo ${command} codex`);
+      console.log(await client.desk(command, { target: positional[1], headless: Boolean(flag("headless", false)) }));
+      process.exit(0);
+    case "guard": {
+      const str = (n) => (typeof flag(n, null) === "string" ? flag(n, null) : undefined);
+      const ok = positional[1] === "ok";
+      console.log(
+        await client.guard({
+          ok,
+          target: ok ? undefined : positional[1],
+          fiveHour: str("five-hour"),
+          weekly: str("weekly"),
+          window: str("window"),
+          at: str("at"),
+          pauseUntilReset: Boolean(flag("pause-until-reset", false)),
+          releaseExpired: Boolean(flag("release-expired-hold", false)),
+          autoRelease: flag("auto-release", false) ? true : flag("no-auto-release", false) ? false : undefined,
+          enabled: flag("off", false) ? false : flag("on", false) ? true : undefined,
+        }),
+      );
+      process.exit(0);
+    }
     case "start": {
       const mode = positional[1];
       if (!["chat", "plan", "build"].includes(mode)) throw new Error("Usage: toryo start chat|plan|build \"text\"");

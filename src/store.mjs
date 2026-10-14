@@ -175,6 +175,11 @@ export class Store {
     this.writeJson(join(this.roomDir(room.id), "room.json"), room);
   }
 
+  /** Add one JSON line to a file under Toryo's home (a journal). */
+  appendLine(name, value) {
+    appendFileSync(this.path(name), JSON.stringify(value) + "\n");
+  }
+
   appendEvent(roomId, event) {
     mkdirSync(this.roomDir(roomId), { recursive: true });
     appendFileSync(join(this.roomDir(roomId), "events.jsonl"), JSON.stringify(event) + "\n");

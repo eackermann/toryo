@@ -8,8 +8,9 @@ import { readOnlyPaths, readOnlySupport } from "./agents/readonly.mjs";
 import { runGates } from "./gates.mjs";
 import { parseSlices, shortDuration, sliceMatches, sliceTimes } from "./plan.mjs";
 import { acceptRecommendation, catchUp, parseQuestions, parseStatus, preamble, prompts, rulesKey, rulesUpdate, splitRecommendation, stripStatus } from "./protocol.mjs";
-import { UsageBook, normalizeGroups } from "./usage.mjs";
+import { UsageBook, groupOf, normalizeGroups, windowLabel } from "./usage.mjs";
 import { defaultDesk, holdAgents, holdKey, holdLabel, readDesk } from "./desk.mjs";
+import { evaluate as evaluateGuard, excepted, expire as expireGuard, guardWindow as parseGuardWindow, holdKeyOf, holdsFor, offerText, policyFor, setPolicy, when } from "./guard.mjs";
 import { noteIntent } from "../web/intent.js";
 import { firstLine, nowIso, shortId, slugify, truncate } from "./util.mjs";
 
@@ -57,7 +58,7 @@ export function defaultConfig() {
 }
 
 export class Engine extends EventEmitter {
-  constructor({ store, snapshots, notifier, adapters = ADAPTERS, usagePollMs = 5 * 60_000 }) {
+  constructor({ store, snapshots, notifier, adapters = ADAPTERS, usagePollMs = 5 * 60_000, guardPollMs = 30_000, now = Date.now }) {
     super();
     this.setMaxListeners(100);
     this.store = store;
@@ -68,10 +69,15 @@ export class Engine extends EventEmitter {
     this.events = new Map();
     this.running = new Map();
     this.agentStatus = {};
+    // The clock the usage guard decides by (tests set their own).
+    this.now = now;
     // Plan usage, as the agents last reported it (src/usage.mjs). Codex's is re-read from its logs every `usagePollMs`.
-    this.usage = new UsageBook();
+    this.usage = new UsageBook({ now: () => this.now() });
     this.usagePollMs = usagePollMs;
     this.usageTimer = null;
+    // The usage guard's resets are looked at every `guardPollMs`, besides before anything starts.
+    this.guardPollMs = guardPollMs;
+    this.guardTimer = null;
     // Desk-wide controls (src/desk.mjs), and a problem with them: a file Toryo can't read, or one it couldn't save.
     // While there's a problem, nothing new starts.
     this.desk = defaultDesk();
@@ -122,6 +128,10 @@ export class Engine extends EventEmitter {
     if (this.usagePollMs > 0 && !this.usageTimer) {
       this.usageTimer = setInterval(() => this.refreshUsage().catch(() => {}), this.usagePollMs);
       this.usageTimer.unref?.();
+    }
+    if (this.guardPollMs > 0 && !this.guardTimer) {
+      this.guardTimer = setInterval(() => this.checkGuards(), this.guardPollMs);
+      this.guardTimer.unref?.();
     }
     // Rooms that weren't paused pick up where they were (for example, following the Codex app's turn).
     this.#pumpAll();
@@ -180,6 +190,8 @@ export class Engine extends EventEmitter {
     this.shuttingDown = true;
     clearInterval(this.usageTimer);
     this.usageTimer = null;
+    clearInterval(this.guardTimer);
+    this.guardTimer = null;
     for (const run of this.running.values()) {
       run.controller.abort("shutdown");
       run.abandon?.abort();
@@ -234,13 +246,16 @@ export class Engine extends EventEmitter {
 
   /** Take a usage reading from an agent. Returns whether it was news (a newer measurement, not one Toryo already had). */
   #setLimits(agent, reading, source) {
-    const { changed, fresh } = this.usage.accept(agent, reading, { receivedAt: nowIso(), source });
+    const { changed, fresh, results } = this.usage.accept(agent, reading, { receivedAt: new Date(this.now()).toISOString(), source });
     if (changed && this.usage.writable)
       try {
         this.store.writeJson(this.store.path("limits.json"), this.usage.toJSON());
       } catch {
         /* usage is informational */
       }
+    // A new measurement goes to the guard, for the windows it measured (a reading Toryo already had isn't news).
+    const types = results.filter((r) => ["new", "newer", "new-window"].includes(r.reason)).map((r) => r.type);
+    if (fresh && types.length) this.#guardReading(groupOf(agent, this.desk.groups), types);
     return Boolean(fresh);
   }
 
@@ -251,13 +266,21 @@ export class Engine extends EventEmitter {
     const read = readDesk(path, Object.keys(this.adapters));
     this.desk = read.desk ?? defaultDesk();
     this.deskProblem = read.problem ? { kind: "unreadable", text: read.problem, at: nowIso() } : null;
-    if (read.missing)
+    // A new desk, or one from before the usage guard: saved with the guard on, as the owner chose for both.
+    if (read.missing || read.migrated)
       try {
         this.store.writeJson(path, this.desk);
       } catch (error) {
         this.deskProblem = { kind: "unsaved", text: `Toryo couldn't save its desk controls (${path}): ${error.code ?? error.message}.`, at: nowIso() };
       }
     this.usage.groups = normalizeGroups(this.desk.groups);
+    // Before any room can start anything: the guard looks at the latest saved readings (on a desk that has just
+    // switched it on, and on one whose last hold may not have been saved before Toryo stopped), then at the windows
+    // that reset while Toryo was stopped. Your rules and exceptions stay as they are.
+    if (!read.problem) {
+      this.#guardAllReadings();
+      this.#expireGuards();
+    }
   }
 
   /** The desk's controls, for the page, the terminal and the phone. */
@@ -267,6 +290,7 @@ export class Engine extends EventEmitter {
       paused: d.paused,
       holds: Object.entries(d.holds).map(([key, h]) => ({ key, agents: h.agents, at: h.at, label: holdLabel(key, (a) => this.label(a)) })),
       groups: { ...d.groups },
+      guard: this.#guardView(),
       problem: this.deskProblem,
     };
   }
@@ -286,50 +310,131 @@ export class Engine extends EventEmitter {
     const names = (list) => list.map((a) => this.label(a)).join(" and ");
     let restrictive = false;
     let message;
-    switch (action) {
-      case "pause":
-        restrictive = true;
-        d.paused ??= { at: nowIso() };
-        message = "Everything is paused. Turns and checks running now finish; nothing new starts until you resume.";
-        break;
-      case "resume": {
-        d.paused = null;
-        const held = Object.keys(d.holds).map((k) => holdLabel(k, (a) => this.label(a)));
-        message = `Everything resumed${held.length ? `, except what you hold: ${held.join(", ")}` : ""}. Rooms you paused yourself stay paused.`;
-        break;
-      }
-      case "hold":
-      case "release": {
-        const key = holdKey(args.target ?? args.agent, { headless: Boolean(args.headless) }, agents);
-        if (!key) throw new UserError(args.headless ? "Only Codex can be held headless-only." : `There's no agent called “${args.target ?? args.agent ?? ""}”.`);
-        const label = holdLabel(key, (a) => this.label(a));
-        if (action === "hold") {
+    let extra = {};
+    let guardChanges = [];
+    // A refused action leaves the controls exactly as they were.
+    try {
+      switch (action) {
+        case "pause":
           restrictive = true;
-          d.holds[key] ??= { agents: holdAgents(key), at: nowIso() };
-          message = `Holding ${label}: ${names(holdAgents(key))} finish${holdAgents(key).length > 1 ? "" : "es"} the turns they're on, then start${holdAgents(key).length > 1 ? "" : "s"} no new ones until you release ${holdAgents(key).length > 1 ? "them" : "it"}.`;
-        } else {
-          if (!d.holds[key]) throw new UserError(`${label[0].toUpperCase()}${label.slice(1)} isn't held.`);
-          delete d.holds[key];
-          const still = Object.entries(d.holds).filter(([, h]) => h.agents.some((a) => holdAgents(key).includes(a)));
-          message = `Released ${label}.${still.length ? ` Still held: ${still.map(([k]) => holdLabel(k, (a) => this.label(a))).join(", ")}.` : ""}`;
+          d.paused ??= { at: nowIso() };
+          message = "Everything is paused. Turns and checks running now finish; nothing new starts until you resume.";
+          break;
+        case "resume": {
+          d.paused = null;
+          const held = Object.keys(d.holds).map((k) => holdLabel(k, (a) => this.label(a)));
+          const guarded = holdsFor(d.guard, null, this.now()).map((h) => this.#guardReason(h));
+          message = `Everything resumed${held.length ? `, except what you hold: ${held.join(", ")}` : ""}.${guarded.length ? ` The usage guard still holds: ${guarded.join("; ")}.` : ""} Rooms you paused yourself stay paused.`;
+          break;
         }
-        break;
+        case "hold":
+        case "release": {
+          const key = holdKey(args.target ?? args.agent, { headless: Boolean(args.headless) }, agents);
+          if (!key) throw new UserError(args.headless ? "Only Codex can be held headless-only." : `There's no agent called “${args.target ?? args.agent ?? ""}”.`);
+          const label = holdLabel(key, (a) => this.label(a));
+          if (action === "hold") {
+            restrictive = true;
+            d.holds[key] ??= { agents: holdAgents(key), at: nowIso() };
+            message = `Holding ${label}: ${names(holdAgents(key))} finish${holdAgents(key).length > 1 ? "" : "es"} the turns they're on, then start${holdAgents(key).length > 1 ? "" : "s"} no new ones until you release ${holdAgents(key).length > 1 ? "them" : "it"}.`;
+          } else {
+            const offers = this.#guardOffers(holdAgents(key));
+            if (!d.holds[key]) {
+              // Not held by you, but perhaps by the guard: say so, with the way past it.
+              if (!offers.length) throw new UserError(`${label[0].toUpperCase()}${label.slice(1)} isn't held.`);
+              return { message: `You don't hold ${label}. ${offerText(offers)}`, offers, desk: this.deskView() };
+            }
+            delete d.holds[key];
+            const still = Object.entries(d.holds).filter(([, h]) => h.agents.some((a) => holdAgents(key).includes(a)));
+            message = `Released ${label}.${still.length ? ` Still held: ${still.map(([k]) => holdLabel(k, (a) => this.label(a))).join(", ")}.` : ""}${offers.length ? ` ${offerText(offers)}` : ""}`;
+            extra = { offers };
+          }
+          break;
+        }
+        case "guard": {
+          // The guard's rules for one allowance (`target`: an agent or an allowance), or for all: thresholds per
+          // window (`rules`), automatic release, or all on or off (`enabled`).
+          const groups = args.target ? [this.#guardGroup(args.target)] : this.#guardGroups();
+          // Every allowance's change is made on a copy first: one refused leaves the guard exactly as it was.
+          const next = structuredClone(d.guard);
+          const changed = new Map();
+          for (const group of groups) {
+            const rules = { ...(args.rules ?? {}) };
+            if (args.enabled != null) for (const type of Object.keys(policyFor(next, group).rules)) rules[type] = { ...rules[type], enabled: Boolean(args.enabled) };
+            try {
+              changed.set(group, setPolicy(next, group, { rules, autoRelease: args.autoRelease }));
+            } catch (error) {
+              throw new UserError(error.message);
+            }
+          }
+          // Only the rules you changed are looked at again: a hold on another window stays as it is.
+          const changes = [];
+          for (const [group, types] of changed) {
+            const windows = this.usage.groupView(this.now()).groups[group]?.windows ?? [];
+            if (types.length) changes.push(...evaluateGuard(next, group, windows, this.now(), { types, settings: true }));
+          }
+          d.guard = next;
+          d.guard.notice = { pending: false, at: d.guard.notice.at ?? nowIso() };
+          restrictive = !changes.some((c) => c.kind === "end");
+          guardChanges = changes;
+          message = `${groups.map((g) => this.#policyText(g)).join(" ")}${changes.length ? ` ${changes.map((c) => this.#guardChangeText(c).title).join(". ")}.` : ""}`;
+          break;
+        }
+        case "guard-pause": {
+          // Pause one window's guard until that window resets.
+          const group = this.#guardGroup(args.target);
+          const type = guardWindow(args.window);
+          const key = holdKeyOf(group, type);
+          const hold = d.guard.holds[key];
+          const reading = (this.usage.groupView(this.now()).groups[group]?.windows ?? []).find((w) => w.type === type);
+          const until = hold?.resetsAt ?? (reading && !reading.expired ? reading.resetsAt : null);
+          const name = `${this.#groupName(group)}'s ${windowLabel(type)} limit`;
+          if (!until) throw new UserError(`${name} has no known reset time, so the guard can't be paused until then. To stop it holding, turn that rule off: ${this.#ruleOffCommand(group, type)}`);
+          if (hold?.state === "ready") throw new UserError(`${name} has already reset. Release the guard's hold instead: toryo guard ${this.#groupTarget(group)} --window ${type.replace(/_/g, "-")} --release-expired-hold`);
+          d.guard.exceptions[key] = { until, at: nowIso() };
+          const others = holdsFor(d.guard, group, this.now()).map((h) => this.#guardReason(h));
+          message = `The guard lets ${this.#groupName(group)} run until its ${windowLabel(type)} limit resets ${when(until)}; then it guards again.${others.length ? ` Still held: ${others.join("; ")}.` : ""}`;
+          guardChanges = [{ kind: "exception", key, until }];
+          break;
+        }
+        case "guard-release": {
+          // Release a hold whose window has reset (with automatic release off, it waits for you).
+          const group = this.#guardGroup(args.target);
+          const type = guardWindow(args.window);
+          const key = holdKeyOf(group, type);
+          const hold = d.guard.holds[key];
+          const name = `${this.#groupName(group)}'s ${windowLabel(type)} limit`;
+          if (!hold) throw new UserError(`The guard isn't holding ${this.#groupName(group)} for its ${windowLabel(type)} limit.`);
+          if (hold.state !== "ready")
+            throw new UserError(`${name} hasn't reset yet${hold.resetsAt ? ` (it resets ${when(hold.resetsAt)})` : ""}, so its hold can't be released as expired.${hold.resetsAt ? ` To let it run anyway until then: toryo guard ${this.#groupTarget(group)} --window ${type.replace(/_/g, "-")} --pause-until-reset` : ""}`);
+          delete d.guard.holds[key];
+          const others = holdsFor(d.guard, group, this.now()).map((h) => this.#guardReason(h));
+          message = `Released the guard's hold on ${this.#groupName(group)} for its ${windowLabel(type)} limit.${others.length ? ` Still held: ${others.join("; ")}.` : ""}`;
+          guardChanges = [{ kind: "end", why: "released", key, hold }];
+          break;
+        }
+        case "guard-ok":
+          d.guard.notice = { pending: false, at: nowIso() };
+          message = "Noted. The usage guard stays as it is; `toryo guard` shows it.";
+          break;
+        case "groups":
+          try {
+            d.groups = normalizeGroups(args.groups, { strict: true });
+          } catch (error) {
+            throw new UserError(error.message);
+          }
+          message = "Allowances updated.";
+          break;
+        case "save":
+          message = "Desk controls saved.";
+          break;
+        case "reset":
+          return this.#resetDesk();
+        default:
+          throw new UserError(`Unknown desk action: ${action}`);
       }
-      case "groups":
-        try {
-          d.groups = normalizeGroups(args.groups, { strict: true });
-        } catch (error) {
-          throw new UserError(error.message);
-        }
-        message = "Allowances updated.";
-        break;
-      case "save":
-        message = "Desk controls saved.";
-        break;
-      case "reset":
-        return this.#resetDesk();
-      default:
-        throw new UserError(`Unknown desk action: ${action}`);
+    } catch (error) {
+      this.desk = before;
+      throw error;
     }
     try {
       this.store.writeJson(this.store.path("desk.json"), this.desk);
@@ -343,9 +448,193 @@ export class Engine extends EventEmitter {
       throw new UserError(`Toryo couldn't save that (${why}). ${restrictive ? "It applies anyway, and nothing new starts until Toryo can save it." : "Nothing changed."}`, 500);
     }
     this.usage.groups = normalizeGroups(this.desk.groups);
+    // What you changed in the guard goes in the desk's journal (no notifications: you did it).
+    for (const c of guardChanges) this.#journal({ kind: `guard-${c.kind}`, key: c.key, text: this.#guardChangeText(c).title, by: "you" });
     this.emit("state");
     this.#pumpAll();
-    return { message, desk: this.deskView() };
+    return { message, ...extra, desk: this.deskView() };
+  }
+
+  // ---------------------------------------------------------------- usage guard (src/guard.mjs)
+
+  /** Look at the guard's resets now: holds whose window has reset end, and the work they held goes on. */
+  checkGuards() {
+    this.#expireGuards();
+    this.#schedule();
+  }
+
+  /** Holds whose window has reset end (or wait for you), and exceptions whose reset has passed end; said once. */
+  #expireGuards() {
+    if (this.deskProblem?.kind === "unreadable") return;
+    const changes = expireGuard(this.desk.guard, this.now());
+    if (changes.length) this.#guardChanged(changes);
+  }
+
+  /**
+   * The guard looks at every allowance's latest readings: when Toryo starts, and when the controls are reset. A hold
+   * a reading called for is there, saved or not; one that ended (a reset, a lower reading, a rule you changed) isn't
+   * brought back, since the same readings and rules end it again.
+   */
+  #guardAllReadings() {
+    const changes = [];
+    const groups = this.usage.groupView(this.now()).groups;
+    for (const group of this.#guardGroups()) changes.push(...evaluateGuard(this.desk.guard, group, groups[group]?.windows ?? [], this.now()));
+    if (changes.length) this.#guardChanged(changes);
+  }
+
+  /** A fresh reading of some of an allowance's windows (`types`): the guard looks at its best reading of each. */
+  #guardReading(group, types) {
+    if (this.deskProblem?.kind === "unreadable") return;
+    const windows = this.usage.groupView(this.now()).groups[group]?.windows ?? [];
+    const changes = evaluateGuard(this.desk.guard, group, windows, this.now(), { types });
+    if (!changes.length) return;
+    this.#guardChanged(changes);
+    this.#schedule();
+  }
+
+  /**
+   * The guard changed by itself (a reading, a reset): saved, written in the desk's journal, and notified once per
+   * change, not once per room it holds up. If it can't be saved, it applies anyway, and nothing new starts until it
+   * can be (a hold isn't lost, and a release doesn't let work through unsaved).
+   */
+  #guardChanged(changes) {
+    try {
+      this.store.writeJson(this.store.path("desk.json"), this.desk);
+      if (this.deskProblem?.kind === "unsaved") this.deskProblem = null;
+    } catch (error) {
+      this.deskProblem = { kind: "unsaved", text: `Toryo couldn't save the usage guard's state (${error.code ?? error.message}).`, at: nowIso() };
+    }
+    for (const c of changes) {
+      const t = this.#guardChangeText(c);
+      if (!t) continue;
+      this.#journal({ kind: `guard-${c.kind}`, key: c.key, text: t.title });
+      if (t.notify) this.#notify(t.title, t.body);
+    }
+    this.emit("state");
+  }
+
+  /** A change in words: a title (also the journal's line), what it means, and whether it's worth a notification. */
+  #guardChangeText(c) {
+    const h = c.hold ?? this.desk.guard.holds[c.key];
+    const [group, type] = c.key.split(":");
+    const name = this.#groupName(h?.group ?? group);
+    const win = windowLabel(h?.type ?? type);
+    const target = this.#groupTarget(h?.group ?? group);
+    const flag = (h?.type ?? type).replace(/_/g, "-");
+    switch (c.kind) {
+      case "hold":
+        return { notify: true, title: `Holding ${name}: its ${win} limit is at ${h.used}%`, body: `The usage guard holds ${name} at ${h.at}% of its ${win} limit. Turns running now finish; nothing new starts ${h.resetsAt ? `until it resets ${when(h.resetsAt)}` : "until a new reading shows it under that (its reset time isn't known)"}.` };
+      case "update":
+        return { notify: false, title: `${name}'s ${win} limit is at ${h.used}%; still held` };
+      case "ready":
+        return { notify: true, title: `${name}'s ${win} limit has reset`, body: `Automatic release is off, so ${name} stays held until you release it: toryo guard ${target} --window ${flag} --release-expired-hold` };
+      case "end": {
+        const why = { reset: `its ${win} limit has reset`, fell: `its ${win} limit is back under ${h.at}%`, released: "you released it", off: `you turned the ${win} rule off`, raised: `its ${win} limit is under the new threshold` }[c.why] ?? "it ended";
+        return { notify: c.why === "reset" || c.why === "fell", title: `The guard released ${name}: ${why}`, body: `${name}'s work carries on, unless something else holds it.` };
+      }
+      case "exception":
+        return { notify: false, title: `The guard lets ${name} run until its ${win} limit resets ${when(c.until)}` };
+      case "exception-end":
+        return { notify: false, title: `${name}'s ${win} limit has reset: the guard watches it again` };
+      default:
+        return null;
+    }
+  }
+
+  /** Why the guard keeps an agent's turn from starting, in the room's words. */
+  #guardReason(h) {
+    const name = this.#groupName(h.group);
+    const win = windowLabel(h.type);
+    if (h.state === "ready") return `${name}'s ${win} limit has reset, and the usage guard waits for you to release it (automatic release is off)`;
+    return `${name}'s ${win} limit is at ${h.used}% (the usage guard holds at ${h.at}%) ${h.resetsAt ? `until it resets ${when(h.resetsAt)}` : "until a new reading shows it under that"}`;
+  }
+
+  /** The ways past the guard's holds on these agents: pause a window's guard until it resets, or release one that has. */
+  #guardOffers(agents) {
+    const groups = new Set(agents.map((a) => groupOf(a, this.desk.groups)));
+    const out = [];
+    for (const h of holdsFor(this.desk.guard, null, this.now())) {
+      if (!groups.has(h.group)) continue;
+      const target = this.#groupTarget(h.group);
+      const window = h.type.replace(/_/g, "-");
+      const name = this.#groupName(h.group);
+      const win = windowLabel(h.type);
+      const offer = (action, text) => ({ key: h.key, action, text, command: `toryo guard ${target} --window ${window} --${action}`, mcp: { tool: "toryo_guard", arguments: { target, window, action } } });
+      if (h.state === "ready") out.push(offer("release-expired-hold", `${name}'s ${win} limit has reset; the guard waits for you to release it`));
+      else if (h.resetsAt) out.push(offer("pause-until-reset", `The usage guard still holds ${name}: its ${win} limit is at ${h.used}% (guard at ${h.at}%) until it resets ${when(h.resetsAt)}. To let it run anyway until then`));
+      else out.push({ key: h.key, action: null, text: `The usage guard still holds ${name}: its ${win} limit is at ${h.used}%, and its reset time isn't known, so it can't be paused until then. To stop it holding, turn that rule off`, command: this.#ruleOffCommand(h.group, h.type), mcp: { tool: "toryo_guard", arguments: { target, rules: { [window]: { enabled: false } } } } });
+    }
+    return out;
+  }
+
+  #guardView() {
+    const g = this.desk.guard;
+    const now = this.now();
+    return {
+      notice: g.notice,
+      policies: this.#guardGroups().map((group) => {
+        const p = policyFor(g, group);
+        const agents = this.#groupAgents(group);
+        // Its name with the agents drawing on it, when there are several: "Codex (headless and the Codex app)".
+        const label = agents.length > 1 ? (agents.includes("codex") && agents.includes("codexapp") && agents.length === 2 ? "Codex (headless and the Codex app)" : `${this.#groupName(group)} (${agents.map((a) => this.label(a)).join(" and ")})`) : this.#groupName(group);
+        return { group, name: this.#groupName(group), label, target: this.#groupTarget(group), agents, autoRelease: p.autoRelease, saved: p.saved, rules: Object.entries(p.rules).map(([type, r]) => ({ type, label: windowLabel(type), enabled: r.enabled, at: r.at })) };
+      }),
+      holds: Object.entries(g.holds).map(([key, h]) => ({ key, ...h, name: this.#groupName(h.group), label: windowLabel(h.type), excepted: excepted(g, key, now), exceptionUntil: g.exceptions[key]?.until ?? null, reason: this.#guardReason(h) })),
+      exceptions: Object.entries(g.exceptions).map(([key, e]) => ({ key, ...e })),
+    };
+  }
+
+  /** One allowance's rules in a sentence. */
+  #policyText(group) {
+    const p = policyFor(this.desk.guard, group);
+    const on = Object.entries(p.rules).filter(([, r]) => r.enabled);
+    if (!on.length) return `The usage guard is off for ${this.#groupName(group)}.`;
+    return `The usage guard holds ${this.#groupName(group)} at ${on.map(([type, r]) => `${r.at}% of its ${windowLabel(type)} limit`).join(" or ")}, and ${p.autoRelease ? "releases it at reset" : "waits for you to release it after the reset"}.`;
+  }
+
+  /** The allowances the desk's agents draw on. */
+  #guardGroups() {
+    return [...new Set(Object.keys(this.adapters).map((a) => groupOf(a, this.desk.groups)))];
+  }
+
+  #groupAgents(group) {
+    return Object.keys(this.adapters).filter((a) => groupOf(a, this.desk.groups) === group);
+  }
+
+  /** An allowance by name: Codex's (headless and the Codex app share it), Claude's… */
+  #groupName(group) {
+    const agents = this.#groupAgents(group);
+    if (agents.includes("codex")) return "Codex";
+    return agents.length ? agents.map((a) => this.label(a)).join(" and ") : group;
+  }
+
+  /** The command that turns one window's rule off, in a form `toryo guard` takes for any window. */
+  #ruleOffCommand(group, type) {
+    const flag = { five_hour: "--five-hour off", weekly: "--weekly off" }[type] ?? `--window ${type.replace(/_/g, "-")} --at off`;
+    return `toryo guard ${this.#groupTarget(group)} ${flag}`;
+  }
+
+  /** The name to give `toryo guard` for an allowance. */
+  #groupTarget(group) {
+    const agents = this.#groupAgents(group);
+    return agents.includes("codex") ? "codex" : (agents[0] ?? group);
+  }
+
+  /** The allowance a request names: an agent ("codex", "codex app") or an allowance ("openai"). */
+  #guardGroup(target) {
+    const t = String(target ?? "").trim().toLowerCase().replace(/^codex app$/, "codexapp");
+    if (this.adapters[t]) return groupOf(t, this.desk.groups);
+    if (this.#guardGroups().includes(t)) return t;
+    throw new UserError(`There's no agent or allowance called “${target ?? ""}”.`);
+  }
+
+  /** The desk's journal: what the guard and the controls did, for Home's Recent later. Best effort. */
+  #journal(entry) {
+    try {
+      this.store.appendLine("desk-events.jsonl", { at: new Date(this.now()).toISOString(), ...entry });
+    } catch {
+      /* the journal explains; it doesn't decide anything */
+    }
   }
 
   /**
@@ -377,9 +666,10 @@ export class Engine extends EventEmitter {
     this.desk = fresh;
     this.deskProblem = null;
     this.usage.groups = normalizeGroups(this.desk.groups);
+    this.#guardAllReadings();
     this.emit("state");
     this.#pumpAll();
-    return { message: unreadable ? `Desk controls reset; the old file is at ${aside}.` : "Desk controls reset: nothing paused or held.", desk: this.deskView() };
+    return { message: `${unreadable ? `Desk controls reset; the old file is at ${aside}.` : "Desk controls reset: nothing paused or held."} The usage guard is on at its defaults.`, desk: this.deskView() };
   }
 
   /** What, desk-wide, keeps a queued request from starting. Following a turn the Codex app already has is never held up. */
@@ -389,8 +679,11 @@ export class Engine extends EventEmitter {
     if (this.deskProblem) out.push(this.deskProblem.kind === "unreadable" ? "Toryo can't read its desk controls" : "Toryo couldn't save your desk controls");
     if (this.desk.paused) out.push("everything is paused");
     // Holds are on agents: Toryo's own checks aren't held, only paused with everything else.
-    if (req.agent !== "toryo")
+    if (req.agent !== "toryo") {
       for (const [key, h] of Object.entries(this.desk.holds)) if (h.agents.includes(req.agent)) out.push(`you hold ${holdLabel(key, (a) => this.label(a))}`);
+      // The usage guard holds an allowance: every agent drawing on it.
+      for (const h of holdsFor(this.desk.guard, groupOf(req.agent, this.desk.groups), this.now())) out.push(this.#guardReason(h));
+    }
     return out;
   }
 
@@ -414,6 +707,8 @@ export class Engine extends EventEmitter {
       do {
         this.scheduleAgain = false;
         if (this.shuttingDown) break;
+        // A window that has reset since the last look (a desk that slept through it, say) is decided before anything starts.
+        this.#expireGuards();
         for (const room of this.rooms.values()) {
           if (room.archived) continue;
           // A turn the Codex app has accepted is followed even in a paused or stopped room: it runs in the app anyway.
@@ -2940,6 +3235,15 @@ function recommendationIn(text, detail = "") {
 /** A question as the agent asked it, without the recommendation wrapped into it ("Do X (Recommended: Y)?" → "Do X?"). */
 function questionIn(detail, text) {
   return (detail ? splitRecommendation(detail).question : "") || firstLine(text);
+}
+
+/** A window named in a request ("weekly", "5-hour"), or a refusal saying how to name one. */
+function guardWindow(name) {
+  try {
+    return parseGuardWindow(name);
+  } catch (error) {
+    throw new UserError(error.message);
+  }
 }
 
 function sanitizeSettings(s) {

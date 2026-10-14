@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { defaultGuard, parseGuard } from "./guard.mjs";
 import { normalizeGroups } from "./usage.mjs";
 
 /**
@@ -6,19 +7,21 @@ import { normalizeGroups } from "./usage.mjs";
  * allowance each agent draws on. They sit apart from each room's own Pause and Stop, so resuming the desk never
  * resumes a room you paused yourself. All of them let current turns finish; they only stop new ones starting.
  *
- *   { version: 1, paused: null | { at }, holds: { <key>: { agents: [...], at } }, groups: { <agent>: <allowance> } }
+ *   { version: 2, paused: null | { at }, holds: { <key>: { agents: [...], at } }, groups: { <agent>: <allowance> },
+ *     guard: { … } }   (the usage guard: src/guard.mjs)
  *
- * A file Toryo can't read, or one from a newer Toryo, is never overwritten: nothing new starts until it's fixed
- * or you reset the controls (see Engine.deskControl).
+ * Version 1 had no guard: read, it gets the guard as the owner chose it for existing desks (on, at 90% of the 5-hour
+ * and weekly windows, released at reset), with its one-time notice. A file Toryo can't read, or one from a newer
+ * Toryo, is never overwritten: nothing new starts until it's fixed or you reset the controls (see Engine.deskControl).
  */
 
-export const DESK_VERSION = 1;
+export const DESK_VERSION = 2;
 
 /** "Hold Codex" covers both headless Codex and the Codex app; each can also be held on its own. */
 const FAMILIES = { codex: ["codex", "codexapp"] };
 
 export function defaultDesk() {
-  return { version: DESK_VERSION, paused: null, holds: {}, groups: normalizeGroups(null) };
+  return { version: DESK_VERSION, paused: null, holds: {}, groups: normalizeGroups(null), guard: defaultGuard() };
 }
 
 /**
@@ -63,7 +66,7 @@ export function parseDesk(raw, path, agents) {
   const bad = (why) => ({ problem: `Toryo can't use ${path}: ${why}.` });
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return bad("it isn't a JSON object");
   if (typeof raw.version === "number" && raw.version > DESK_VERSION) return bad(`a newer Toryo wrote it (version ${raw.version})`);
-  if (raw.version !== DESK_VERSION) return bad("it has no version Toryo knows");
+  if (raw.version !== DESK_VERSION && raw.version !== 1) return bad("it has no version Toryo knows");
   const iso = (v) => typeof v === "string" && Number.isFinite(Date.parse(v));
   if (raw.paused != null && !(typeof raw.paused === "object" && iso(raw.paused.at))) return bad("“paused” isn't valid");
   const holds = {};
@@ -79,5 +82,12 @@ export function parseDesk(raw, path, agents) {
   } catch (error) {
     return bad(error.message.replace(/\.$/, ""));
   }
-  return { desk: { version: DESK_VERSION, paused: raw.paused ? { at: raw.paused.at } : null, holds, groups } };
+  // Version 1 had no guard: it starts with the default one, and its notice (`migrated` says to save it so).
+  let guard;
+  try {
+    guard = raw.version === 1 ? defaultGuard() : parseGuard(raw.guard);
+  } catch (error) {
+    return bad(error.message);
+  }
+  return { desk: { version: DESK_VERSION, paused: raw.paused ? { at: raw.paused.at } : null, holds, groups, guard }, migrated: raw.version === 1 };
 }

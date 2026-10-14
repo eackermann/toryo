@@ -8,6 +8,47 @@ const name = (a) => NAMES[a] ?? a;
 /** One open question as text, with the id that answers it. */
 const asked = (q) => `${q.from ? `${name(q.from)} asks: ` : ""}${q.question}${q.recommendation ? ` (recommended: ${q.recommendation})` : ""}${q.id ? ` [id ${q.id}]` : ""}`;
 
+const OLD_DESK = "Toryo was started before this update, so it can't do that yet. Restart it first: toryo quit && toryo";
+
+/** The desk's state, first in `toryo status`: the guard's notice, Pause everything, your holds, the guard's holds. */
+function deskLines(desk) {
+  if (!desk) return [];
+  const lines = [];
+  const guard = desk.guard;
+  if (guard?.notice?.pending)
+    lines.push(
+      "New: the usage guard is on. When an agent's 5-hour or weekly usage reaches 90%, Toryo lets its running turns finish and starts no new ones until that limit resets, then carries on by itself. See it with: toryo guard. Turn it off with: toryo guard --off. Hide this note: toryo guard ok",
+    );
+  if (desk.problem) lines.push(`Desk controls: ${desk.problem.text} Nothing new starts until that's sorted.`);
+  if (desk.paused) lines.push("Everything is paused: running turns finish, nothing new starts. Resume with: toryo resume --all");
+  if (desk.holds?.length) lines.push(`You hold: ${desk.holds.map((h) => h.label).join(", ")}. Release with: toryo release <agent>`);
+  for (const h of guard?.holds ?? []) lines.push(h.excepted ? `The usage guard is paused for ${h.name}'s ${h.label} limit until it resets.` : `Held by the usage guard: ${h.reason}.`);
+  if (lines.length) lines.push("");
+  return lines;
+}
+
+/** `toryo guard` with nothing to change: what the guard does for each agent, and what it holds now. */
+function guardText(guard) {
+  const lines = ["The usage guard:"];
+  for (const p of guard.policies) {
+    const on = p.rules.filter((r) => r.enabled);
+    lines.push(`  ${p.label ?? p.name}: ${on.length ? `holds at ${on.map((r) => `${r.at}% of the ${r.label} limit`).join(" or ")}, ${p.autoRelease ? "and lets go at reset" : "and waits for you after the reset"}` : "off"}.`);
+  }
+  const held = guard.holds.filter((h) => !h.excepted);
+  const paused = guard.holds.filter((h) => h.excepted);
+  lines.push(held.length ? "Holding now:" : "Holding nothing now.");
+  for (const h of held) {
+    lines.push(`  ${h.reason}.`);
+    const flag = h.type.replace(/_/g, "-");
+    const target = guard.policies.find((p) => p.group === h.group)?.target ?? h.group;
+    if (h.state === "ready") lines.push(`    Release it: toryo guard ${target} --window ${flag} --release-expired-hold`);
+    else if (h.resetsAt) lines.push(`    To let it run anyway until then: toryo guard ${target} --window ${flag} --pause-until-reset`);
+  }
+  for (const h of paused) lines.push(`Paused until its reset: ${h.name}'s ${h.label} limit (${h.used}%).`);
+  lines.push("Change it: toryo guard <agent> --five-hour 90 --weekly 90 [--auto-release | --no-auto-release], --weekly off, or --off for every rule.");
+  return lines.join("\n");
+}
+
 /** Talks to a running Toryo over its local HTTP API (found through server.json). */
 export class ToryoClient {
   constructor(home = toryoHome()) {
@@ -58,8 +99,8 @@ export class ToryoClient {
   }
 
   async statusText() {
-    const { rooms, agents } = await this.state();
-    const lines = [];
+    const { rooms, agents, desk } = await this.state();
+    const lines = deskLines(desk);
     if (!rooms.length) lines.push("No rooms yet.");
     for (const r of rooms.slice(0, 12)) {
       const who = r.running.length ? ` · ${r.running.map(name).join(" and ")} working` : "";
@@ -168,6 +209,57 @@ export class ToryoClient {
     if (!agent) throw new Error(`Say whose discussion to forward: --from ${others.join(" or --from ")}.`);
     await act({ action: "forward-discussion", questionId: q.id, agent });
     return `Sent your discussion with ${name(agent)} to ${name(author)} as a change request, in “${r.title}”.`;
+  }
+
+  /**
+   * Desk-wide controls: Pause everything and Resume (`pause`, `resume`), and holding or releasing an agent (`hold`,
+   * `release`, with `target` and `headless`). A release that leaves the usage guard holding the agent says so, with
+   * the command (and MCP arguments) to pause that guard until its reset.
+   */
+  async desk(action, args = {}) {
+    const res = await this.deskCall({ action, ...args });
+    return res.message;
+  }
+
+  /**
+   * The usage guard. With nothing to change, it says what the guard does and holds. Otherwise: `ok` (the notice
+   * is read), `pauseUntilReset` or `releaseExpired` for one window, or the rules: `fiveHour` and `weekly` (a
+   * percentage, or "off"), `window` with `at` for any other window, `autoRelease`, and `enabled` (all on or off).
+   * `target` is an agent (codex, claude…); left out, the change is for every agent.
+   */
+  async guard({ target, ok, pauseUntilReset, releaseExpired, window, at, fiveHour, weekly, rules, autoRelease, enabled } = {}) {
+    if (ok) return (await this.deskCall({ action: "guard-ok" })).message;
+    if (pauseUntilReset || releaseExpired) {
+      if (!target || !window) throw new Error("Say which agent and which window: toryo guard codex --window weekly --pause-until-reset");
+      return (await this.deskCall({ action: pauseUntilReset ? "guard-pause" : "guard-release", target, window })).message;
+    }
+    const rule = (v) => (v === "off" || v === false ? { enabled: false } : { enabled: true, at: Number(v) });
+    const all = { ...(rules ?? {}) };
+    if (fiveHour != null) all.five_hour = rule(fiveHour);
+    if (weekly != null) all.weekly = rule(weekly);
+    if (window != null) {
+      if (at == null) throw new Error("Say the threshold for that window: --window weekly --at 85");
+      // As typed ("5-hour", "weekly-opus"): the desk reads it as the window it names.
+      all[window] = rule(at);
+    }
+    for (const [type, r] of Object.entries(all)) if (r && "at" in r && !Number.isFinite(r.at)) throw new Error(`The ${type.replace(/_/g, "-")} threshold should be a percentage, or off.`);
+    if (!Object.keys(all).length && autoRelease == null && enabled == null) return guardText((await this.deskState()).guard);
+    return (await this.deskCall({ action: "guard", target, rules: all, autoRelease, enabled })).message;
+  }
+
+  async deskState() {
+    const desk = await this.call("GET", "/api/desk");
+    if (!desk?.guard) throw new Error(OLD_DESK);
+    return desk;
+  }
+
+  /** A desk action, refused in plain words by a desk started before this update. */
+  async deskCall(body) {
+    try {
+      return await this.call("POST", "/api/desk", body);
+    } catch (error) {
+      throw /^Unknown desk action|^Not found|Unknown route/i.test(error.message) ? new Error(OLD_DESK) : error;
+    }
   }
 
   async control(ref, action) {
