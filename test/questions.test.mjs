@@ -74,6 +74,8 @@ test("two clients answer the same question: one answer counts, every other clien
       await waitFor(() => engine.rooms.get(room.id).waiting, { label: "first question" });
       const [first] = open(engine, room.id);
       assert.equal(first.question, "Tabs or spaces?");
+      // When it was asked, so a client can go to the oldest question first.
+      assert.equal(first.at, engine.roomView(room.id).events.find((e) => e.id === first.id).at);
 
       // Over HTTP an answer must say which question it answers.
       const unnamed = await post(`/api/rooms/${room.id}/answer`, { accept: true });

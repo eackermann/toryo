@@ -183,7 +183,12 @@ test("a page with a missing file stops the desk from starting", async () => {
   const web = join(base, "web");
   cpSync(join(root, "web"), web, { recursive: true });
   try {
-    assert.deepEqual(loadPage(web).names, ["/app.js", "/favicon.svg", "/index.html", "/intent.js", "/md.js", "/meters.js", "/status.js", "/styles.css"]);
+    const names = loadPage(web).names;
+    for (const f of ["/app.js", "/favicon.svg", "/index.html", "/intent.js", "/md.js", "/meters.js", "/status.js", "/styles.css", "/tokens.css", "/fonts/lexend-latin.woff2", "/fonts/OFL-Lexend.txt"]) assert.ok(names.includes(f), f);
+    // A font a stylesheet uses counts too.
+    rmSync(join(web, "fonts", "figtree-latin.woff2"));
+    assert.throws(() => loadPage(web), /Missing in .*: fonts\/figtree-latin\.woff2 \(used by tokens\.css\)/);
+    cpSync(join(root, "web", "fonts", "figtree-latin.woff2"), join(web, "fonts", "figtree-latin.woff2"));
     rmSync(join(web, "status.js"));
     assert.throws(() => loadPage(web), /Missing in .*: status\.js \(used by app\.js\)/);
     // The desk itself refuses, before it touches any room.
@@ -215,6 +220,16 @@ test("the startup check reads every usual way of referring to a page file", asyn
       assert.throws(() => loadPage(web), /Missing in .*: x\.js \(used by index\.html\)/, tag);
       write(join(web, "x.js"), "export {};\n");
       assert.deepEqual(loadPage(web).names, ["/index.html", "/x.js"], tag);
+    }
+    // In a stylesheet: url() with any quoting, and @import; remote and data: URLs and comments aren't followed.
+    for (const [i, rule] of [`@font-face { src: url("/f/a.woff2") format("woff2"); }`, `b { background: url(f/a.woff2) }`, `@import "./f/a.woff2";`, `a { background: url( 'f/a.woff2?x' ) }`].entries()) {
+      const web = join(base, `css${i}`);
+      mkdirSync(join(web, "f"), { recursive: true });
+      write(join(web, "index.html"), `<link rel="stylesheet" href="/s.css">`);
+      write(join(web, "s.css"), `/* url(gone.woff2) */ a { background: url(https://example.com/x.png) url("data:image/png;base64,AA==") } ${rule}`);
+      assert.throws(() => loadPage(web), /Missing in .*: f\/a\.woff2 \(used by s\.css\)/, rule);
+      write(join(web, "f", "a.woff2"), "x");
+      assert.deepEqual(loadPage(web).names, ["/f/a.woff2", "/index.html", "/s.css"], rule);
     }
   } finally {
     rmSync(base, { recursive: true, force: true });

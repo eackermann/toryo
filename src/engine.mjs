@@ -1226,9 +1226,14 @@ export class Engine extends EventEmitter {
     return q ? { id: q.id, from: q.from, question: q.question, kind: q.kind } : null;
   }
 
-  /** Every open question with its id: the ones the room waits on, in order, then questions agents asked in chat. */
+  /** Every open question with its id and when it was asked: the ones the room waits on, in order, then chat questions. */
   #openQuestions(room) {
-    const one = (id, x) => ({ id, kind: x.kind, from: x.from ?? null, question: x.question, recommendation: x.recommendation ?? "", ...(x.questions ? { questions: x.questions } : {}) });
+    const events = this.events.get(room.id) ?? [];
+    const askedAt = (id) => {
+      for (let i = events.length - 1; i >= 0; i--) if (events[i].id === id) return events[i].at ?? null;
+      return null;
+    };
+    const one = (id, x) => ({ id, kind: x.kind, from: x.from ?? null, question: x.question, recommendation: x.recommendation ?? "", at: askedAt(id), ...(x.questions ? { questions: x.questions } : {}) });
     return [...this.#allWaiting(room).map((w) => one(w.eventId, w)), ...this.#openChatQuestions(room).map((q) => one(q.id, q))];
   }
 

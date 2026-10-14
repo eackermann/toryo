@@ -50,6 +50,8 @@ try {
     { agent: "claude", match: "step 1 of 4", reply: "Claude proposal.\n- Q: Ship a CLI too? (Recommended: no)\nTORYO: PROPOSAL" },
     { match: "step 2 of 4", reply: "Critique.\nTORYO: CRITIQUE" },
     { agent: "claude", match: "Both of you", reply: "TORYO: OWNER Which host?" },
+    { agent: "codex", match: "Slow build of the parser", delayMs: 6000, reply: "Built the parser.\nTORYO: OWNER Ship it?" },
+    { agent: "codex", match: "Slow review of the (lexer|docs)", delayMs: 6000, reply: "Built it.\nTORYO: REVIEW Slice 1: It | h.md" },
     { agent: "claude", hang: true },
     { agent: "codex", reply: "Which one? I recommend SQLite.\nTORYO: OWNER SQLite or Postgres?" },
   ];
@@ -190,21 +192,25 @@ try {
   await note.locator("[data-note-cancel]").click();
   await page.waitForFunction((id) => /withdrawn/.test(document.querySelector(`.owner[data-id="${id}"][data-cancelled=true]`)?.innerText ?? ""), noteId);
 
-  // 4. The room list says who is doing what.
-  await page.waitForFunction(() => document.querySelector(".roomlink .mini.avatar"));
-  const row = await page.$eval(".roomlink[aria-current=true]", (b) => ({ title: b.title, text: b.querySelector(".m").textContent }));
+  // 4. The rail says who is doing what, in one line under the room's name.
+  await page.waitForFunction(() => /Codex app building/.test(document.querySelector(".roomlink[aria-current=true] .ri-state")?.textContent ?? ""));
+  const row = await page.$eval(".roomlink[aria-current=true]", (b) => ({ title: b.title, text: b.querySelector(".ri-state").textContent, k: b.querySelector(".ri-state").dataset.k, mono: b.querySelector(".tile").textContent }));
   assert.match(row.title, /Codex app is building/);
-  assert.match(row.text, /CA🔨/);
+  assert.equal(row.text, "Codex app building");
+  assert.equal(row.k, "work");
+  assert.equal(row.mono, "AR");
 
   // 5. A question asked in chat: "needs you" comes first in the room list.
   const asked = await (await fetch(`${url}api/rooms`, { method: "POST", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify({ projectId: "ui", mode: "chat", members: ["codex"], text: "Ask me something.", to: "codex", title: "Asking room" }) })).json();
   await page.waitForFunction((id) => document.querySelector(`.roomlink[data-room="${id}"]`)?.dataset.state === "waiting", asked.id);
-  const ask = await page.$eval(`.roomlink[data-room="${asked.id}"]`, (b) => ({ title: b.title, first: b.querySelector(".m").firstElementChild.className }));
-  assert.equal(ask.first, "needs");
+  const ask = await page.$eval(`.roomlink[data-room="${asked.id}"]`, (b) => ({ title: b.title, state: b.querySelector(".ri-state").textContent, k: b.querySelector(".ri-state").dataset.k }));
+  assert.equal(ask.k, "you");
+  assert.match(ask.state, /^Needs you/);
   assert.match(ask.title, /Codex is waiting for your answer/);
 
   // 5b. An agent with a session in a room can be started fresh there.
   await page.click(`.roomlink[data-room="${asked.id}"]`);
+  await page.click("[data-sidetab=crew]");
   await page.waitForSelector("[data-fresh=codex]");
   await page.click("[data-fresh=codex]");
   await page.waitForFunction(() => /Starts fresh on its next turn/.test(document.querySelector("#crewPane")?.innerText ?? ""));
@@ -551,6 +557,158 @@ try {
     await until(async () => (await view(pending.id)).live.length === 0);
   }
   await page.unroute(`**/api/rooms/${pending.id}/messages`);
+
+  // 5l. A queued note you're changing stays open, with your text and the focus, when a turn ends and the timeline
+  // is drawn again: here a note to the reviewer while the builder works.
+  const slowRoom = await post("api/rooms", { projectId: "ui", mode: "build", task: "Slow build of the parser", title: "Slow room", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  await openRoom(slowRoom.id, "Slow room");
+  await page.waitForSelector(".turn.live");
+  await page.click("#recipients [data-route=claude]");
+  await page.fill("#msg", "Please also check the docs.");
+  await page.press("#msg", "Enter");
+  const queuedId = await page.locator(".owner", { hasText: "Please also check the docs." }).last().getAttribute("data-id");
+  const queued = page.locator(`.owner[data-id="${queuedId}"]`);
+  await queued.locator("[data-note-edit]").click();
+  await queued.locator("textarea.noteedit").fill("Changed while Codex builds");
+  await page.evaluate((id) => document.querySelector(`.owner[data-id="${id}"] textarea.noteedit`).setSelectionRange(5, 5), queuedId);
+  await page.waitForSelector(".turn.live", { state: "detached", timeout: 15_000 });
+  await page.waitForFunction(() => /Ship it\?/.test(document.querySelector("#log").innerText));
+  const editing = await page.evaluate(() => {
+    const area = [...document.querySelectorAll(".owner textarea.noteedit")].at(-1);
+    return { value: area?.value, focused: document.activeElement === area, cursor: area?.selectionStart };
+  });
+  // The text, the focus, and the cursor where it was, though the timeline was drawn more than once before a frame.
+  assert.deepEqual(editing, { value: "Changed while Codex builds", focused: true, cursor: 5 });
+  // Another room, a reload, and back: the editor is still open, with your change.
+  await openRoom(asked.id, "Asking room");
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Asking room");
+  await openRoom(slowRoom.id, "Slow room");
+  assert.equal(await queued.locator("textarea.noteedit:not([readonly])").inputValue(), "Changed while Codex builds");
+  assert.equal(await queued.locator("[data-unsaved]").count(), 0);
+  await queued.locator("[data-note-save]").click();
+  await page.waitForFunction(() => [...document.querySelectorAll(".owner")].some((o) => /Changed while Codex builds/.test(o.innerText) && /edited/.test(o.querySelector(".to").innerText)));
+
+  // 5m. The side panel's tabs: choose Crew as a room tab on a narrower screen, widen the window, then choose Plan.
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await page.click("[data-roomtab=crew]");
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.click("[data-sidetab=plan]");
+  assert.deepEqual(await page.evaluate(() => [document.querySelector("#context").checkVisibility(), document.querySelector("#crewPane").checkVisibility()]), [true, false]);
+  await page.click("[data-sidetab=crew]");
+
+  // 5n. A note that goes to the crew while you're changing it: your change can't be saved, but it isn't lost. It
+  // stays under the note, whole, across a reload, until you send it as a new note (or dismiss it).
+  const longText = "Please also check the docs, the examples and the changelog, and say which of them still mention the old flag. ".repeat(3).trim();
+  const lexer = await post("api/rooms", { projectId: "ui", mode: "build", task: "Slow review of the lexer", title: "Lexer room", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  await openRoom(lexer.id, "Lexer room");
+  await page.waitForSelector(".turn.live");
+  await page.click("#recipients [data-route=claude]");
+  await page.fill("#msg", "Check the docs.");
+  await page.press("#msg", "Enter");
+  const lexNote = await page.locator(".owner", { hasText: "Check the docs." }).last().getAttribute("data-id");
+  await page.locator(`.owner[data-id="${lexNote}"] [data-note-edit]`).click();
+  await page.locator(`.owner[data-id="${lexNote}"] textarea.noteedit`).fill(longText);
+  // The builder hands off, and the reviewer starts with the note.
+  await page.waitForSelector(`.owner[data-id="${lexNote}"] [data-unsaved]`, { timeout: 20_000 });
+  assert.equal(await page.inputValue(`.owner[data-id="${lexNote}"] [data-unsaved] textarea`), longText);
+  await page.reload();
+  await page.waitForSelector(`.owner[data-id="${lexNote}"] [data-unsaved]`);
+  assert.equal(await page.inputValue(`.owner[data-id="${lexNote}"] [data-unsaved] textarea`), longText);
+  await page.click(`.owner[data-id="${lexNote}"] [data-unsaved-reuse]`);
+  assert.equal(await page.inputValue("#msg"), longText);
+  assert.equal(await page.getAttribute("#recipients [data-route=claude]", "aria-pressed"), "true");
+  assert.equal(await page.locator("[data-unsaved]").count(), 0);
+  await page.fill("#msg", "");
+
+  // 5o. Saving a change while the note goes to the crew: the desk refuses it (delivery came first), and your change
+  // stays under the note. Dismissed, it's gone for good.
+  const docs = await post("api/rooms", { projectId: "ui", mode: "build", task: "Slow review of the docs", title: "Docs room", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  await openRoom(docs.id, "Docs room");
+  await page.waitForSelector(".turn.live");
+  await page.click("#recipients [data-route=claude]");
+  await page.fill("#msg", "Check the examples.");
+  await page.press("#msg", "Enter");
+  const docsNote = await page.locator(".owner", { hasText: "Check the examples." }).last().getAttribute("data-id");
+  await page.locator(`.owner[data-id="${docsNote}"] [data-note-edit]`).click();
+  await page.locator(`.owner[data-id="${docsNote}"] textarea.noteedit`).fill("Check the examples and the README.");
+  // The save is slow to arrive: by then the reviewer has the note.
+  await page.route(`**/api/rooms/${docs.id}/notes/*`, async (route) => {
+    await until(async () => (await view(docs.id)).events.find((e) => e.id === docsNote)?.deliveredTo?.includes("claude"), "the note to reach the reviewer");
+    await route.continue();
+  });
+  await clearToasts();
+  const saveRefused = page.waitForResponse((res) => res.url().includes(`/api/rooms/${docs.id}/notes/`));
+  await page.locator(`.owner[data-id="${docsNote}"] [data-note-save]`).click();
+  // While the save is on its way you move to another room; the refusal arrives there; then you reload.
+  await openRoom(lexer.id, "Lexer room");
+  assert.equal((await saveRefused).status(), 409);
+  await toastSays(/already gone to the crew/);
+  dropRefusal();
+  await page.unroute(`**/api/rooms/${docs.id}/notes/*`);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Lexer room");
+  await openRoom(docs.id, "Docs room");
+  await page.waitForSelector(`.owner[data-id="${docsNote}"] [data-unsaved]`);
+  assert.equal(await page.inputValue(`.owner[data-id="${docsNote}"] [data-unsaved] textarea`), "Check the examples and the README.");
+  assert.equal((await view(docs.id)).events.find((e) => e.id === docsNote).text, "Check the examples.");
+  await page.click(`.owner[data-id="${docsNote}"] [data-unsaved-dismiss]`);
+  await page.reload();
+  await page.waitForSelector(`.owner[data-id="${docsNote}"]`);
+  assert.equal(await page.locator("[data-unsaved]").count(), 0);
+
+  // 5p. A save that's slow to come back never drops a newer change: one typed on in this tab, or made in another tab.
+  // The newer change stays in the editor, also after a reload. (The note to the reviewer in the slow room is queued.)
+  await openRoom(slowRoom.id, "Slow room");
+  let saveGate = Promise.resolve();
+  let releaseSave = () => {};
+  const holdSave = () => (saveGate = new Promise((r) => (releaseSave = r)));
+  await page.route(`**/api/rooms/${slowRoom.id}/notes/*`, async (route) => {
+    await saveGate;
+    await route.continue();
+  });
+  const editorOf = (p) => p.locator(`.owner[data-id="${queuedId}"] textarea.noteedit:not([readonly])`);
+  const noteText = async () => (await view(slowRoom.id)).events.find((e) => e.id === queuedId).text;
+  await queued.locator("[data-note-edit]").click();
+  await editorOf(page).fill("Version A");
+  holdSave();
+  let saved = page.waitForResponse((res) => res.url().includes(`/api/rooms/${slowRoom.id}/notes/`));
+  await queued.locator("[data-note-save]").click();
+  await editorOf(page).fill("Version A, and B");
+  releaseSave();
+  assert.equal((await saved).status(), 200);
+  await until(async () => (await noteText()) === "Version A", "the desk to save version A");
+  await page.waitForTimeout(300);
+  assert.equal(await editorOf(page).inputValue(), "Version A, and B", "typed on while saving: kept");
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Slow room");
+  assert.equal(await editorOf(page).inputValue(), "Version A, and B", "and after a reload");
+  // Another tab changes it while this tab's save is on its way.
+  await editorOf(page).fill("Version C");
+  holdSave();
+  saved = page.waitForResponse((res) => res.url().includes(`/api/rooms/${slowRoom.id}/notes/`));
+  await queued.locator("[data-note-save]").click();
+  const other2 = await page.context().newPage();
+  other2.on("pageerror", (e) => errors.push(String(e)));
+  await other2.goto(`${url}#/r/${slowRoom.id}`);
+  await editorOf(other2).waitFor();
+  assert.equal(await editorOf(other2).inputValue(), "Version C");
+  await editorOf(other2).fill("Version D");
+  releaseSave();
+  assert.equal((await saved).status(), 200);
+  await until(async () => (await noteText()) === "Version C", "the desk to save version C");
+  await page.waitForFunction((id) => document.querySelector(`.owner[data-id="${id}"] textarea.noteedit:not([readonly])`)?.value === "Version D", queuedId);
+  await other2.close();
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Slow room");
+  assert.equal(await editorOf(page).inputValue(), "Version D", "the other tab's change, after a reload");
+  await page.unroute(`**/api/rooms/${slowRoom.id}/notes/*`);
+  // Kept as it was: the change is dropped, and the note reads as last saved.
+  await queued.locator("[data-note-keep]").click();
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Slow room");
+  assert.equal(await editorOf(page).count(), 0);
+  assert.match(await queued.locator(".md").innerText(), /Version C/);
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");

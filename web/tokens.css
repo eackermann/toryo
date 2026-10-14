@@ -1,0 +1,91 @@
+/*
+ * Toryo's design tokens, light and dark (docs/design-system.md explains them).
+ * Color means activity, never identity: the logo's three blocks give the three kinds of work (purple plans,
+ * blue builds, mint reviews). Orange is only for "needs you", amber for usage limits getting close. The neutrals
+ * come from the wordmark's navy and the tagline's slate. Agents all wear the same neutral monogram.
+ */
+
+/* The fonts ship with the page (OFL, licences beside them): nothing is loaded from the internet. */
+@font-face { font-family: "Lexend"; font-style: normal; font-weight: 400 700; font-display: swap; src: url("/fonts/lexend-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Lexend"; font-style: normal; font-weight: 400 700; font-display: swap; src: url("/fonts/lexend-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Figtree"; font-style: normal; font-weight: 400 700; font-display: swap; src: url("/fonts/figtree-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Figtree"; font-style: normal; font-weight: 400 700; font-display: swap; src: url("/fonts/figtree-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400 500; font-display: swap; src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400 500; font-display: swap; src: url("/fonts/jetbrains-mono-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+
+:root {
+  /* Neutrals */
+  --paper: #f5f6fb;
+  --surface: #ffffff;
+  --sunk: #eef1f7;
+  --line: #e1e6ef;
+  --line-strong: #cdd4e2;
+  --ink: #14233a;
+  --ink-2: #46546d;
+  --muted: #5f6b83;
+  /* Activity: the ring color, an ink tone for text, a soft tone for fills */
+  --plan: #8a6cf0; --plan-ink: #6145d4; --plan-soft: #f1edfe;
+  --build: #2583f8; --build-ink: #1462cf; --build-soft: #e6f0fe;
+  --review: #2bbf9f; --review-ink: #0a745f; --review-soft: #ddf5ef;
+  --you: #ff7a1f; --you-ink: #b14a07; --you-soft: #ffeee1;
+  --check: #6c7b95;
+  --warn: #d99413; --warn-ink: #8f5e00; --warn-soft: #fbf2df;
+  --bad: #dd4349; --bad-ink: #bb2a31; --bad-soft: #fde8e8;
+  /* Tiles: rooms, and the one neutral monogram every agent wears */
+  --tile: #e9edf6;
+  --agent: #3a4963;
+  --agent-ink: #ffffff;
+  --on-you: #1d1206;
+  /* Your notes: dark bubbles (light in the dark theme), with their own tones for code, quotes and links */
+  --note: #14233a; --note-ink: #f5f6fb; --note-sunk: #253652; --note-line: #56678a;
+  --shadow-1: 0 1px 2px rgb(20 35 58 / 0.06);
+  --shadow-2: 0 1px 2px rgb(20 35 58 / 0.05), 0 10px 28px rgb(20 35 58 / 0.08);
+  --scrim: rgb(20 35 58 / 0.34);
+  /* Type: Lexend for names and numbers that matter, Figtree to read, JetBrains Mono for what the machine said. */
+  --f-display: "Lexend", "Segoe UI", system-ui, sans-serif;
+  --f-body: "Figtree", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --f-mono: "JetBrains Mono", "Cascadia Mono", ui-monospace, Menlo, Consolas, monospace;
+  /* Shape and motion */
+  --r-control: 8px; --r-card: 12px; --r-sheet: 18px;
+  --m-quick: 160ms; --m-settle: 320ms; --m-run: 2.8s; --m-breathe: 3.2s; --m-beacon: 1.7s; --m-march: 2.4s;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+}
+
+/* Dark: the system's choice, unless you pick light; or dark when you pick it. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0b1220; --surface: #121b2c; --sunk: #0e1626; --line: #22304a; --line-strong: #31436a;
+    --ink: #e8eef8; --ink-2: #b5c1d7; --muted: #8392ac;
+    --plan: #a68bff; --plan-ink: #c3b0ff; --plan-soft: #221c43;
+    --build: #4a9bff; --build-ink: #92c1ff; --build-soft: #12284a;
+    --review: #3ed8b4; --review-ink: #7fe8cd; --review-soft: #0f302b;
+    --you: #ff8f3d; --you-ink: #ffb27a; --you-soft: #3a2414;
+    --check: #93a1ba; --warn: #f2b544; --warn-ink: #f2c46a; --warn-soft: #362a12; --bad: #ff6b70; --bad-ink: #ff8a8e; --bad-soft: #3a1a1d;
+    --tile: #1b2740; --agent: #31436a; --agent-ink: #e8eef8;
+    --note: #e8eef8; --note-ink: #0b1220; --note-sunk: #cfd8e8; --note-line: #7d8ba6;
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.35); --shadow-2: 0 1px 2px rgb(0 0 0 / 0.3), 0 12px 32px rgb(0 0 0 / 0.35);
+    --scrim: rgb(3 8 18 / 0.6);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0b1220; --surface: #121b2c; --sunk: #0e1626; --line: #22304a; --line-strong: #31436a;
+  --ink: #e8eef8; --ink-2: #b5c1d7; --muted: #8392ac;
+  --plan: #a68bff; --plan-ink: #c3b0ff; --plan-soft: #221c43;
+  --build: #4a9bff; --build-ink: #92c1ff; --build-soft: #12284a;
+  --review: #3ed8b4; --review-ink: #7fe8cd; --review-soft: #0f302b;
+  --you: #ff8f3d; --you-ink: #ffb27a; --you-soft: #3a2414;
+  --check: #93a1ba; --warn: #f2b544; --warn-ink: #f2c46a; --warn-soft: #362a12; --bad: #ff6b70; --bad-ink: #ff8a8e; --bad-soft: #3a1a1d;
+  --tile: #1b2740; --agent: #31436a; --agent-ink: #e8eef8;
+  --note: #e8eef8; --note-ink: #0b1220; --note-sunk: #cfd8e8; --note-line: #7d8ba6;
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.35); --shadow-2: 0 1px 2px rgb(0 0 0 / 0.3), 0 12px 32px rgb(0 0 0 / 0.35);
+  --scrim: rgb(3 8 18 / 0.6);
+  color-scheme: dark;
+}
+:root[data-theme="light"] { color-scheme: light; }

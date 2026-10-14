@@ -44,8 +44,9 @@ function fingerprint(files) {
 
 /**
  * The local files a page file refers to: scripts, stylesheets, icons and images in HTML (any attribute
- * quoting: double, single or none), and the modules a script imports. A query string or fragment is
- * dropped, as the server ignores it too; remote addresses and in-page links aren't followed.
+ * quoting: double, single or none), the modules a script imports, and the fonts, images and stylesheets a
+ * stylesheet uses (url() and @import). A query string or fragment is dropped, as the server ignores it
+ * too; remote addresses, data: URLs and in-page links aren't followed.
  */
 function references(name, content) {
   const text = content.toString("utf8");
@@ -54,6 +55,10 @@ function references(name, content) {
     for (const m of text.matchAll(/\s(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi)) found.push(m[1] ?? m[2] ?? m[3]);
   if (/\.m?js$/.test(name))
     for (const m of text.matchAll(/(?:^|[\s;])(?:import|export)\b[^;'"]*?\bfrom\s*["']([^"']+)["']|(?:^|[\s;])import\s*\(?\s*["']([^"']+)["']/gm)) found.push(m[1] ?? m[2]);
+  if (name.endsWith(".css")) {
+    const css = text.replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const m of css.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)|@import\s+["']([^"']+)["']/gi)) found.push(m[1] ?? m[2] ?? m[3] ?? m[4]);
+  }
   return found
     .map((ref) => ref.trim().split(/[?#]/)[0])
     .filter((ref) => ref && !/^[a-z][\w+.-]*:|^\/\//i.test(ref))

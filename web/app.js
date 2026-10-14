@@ -6,7 +6,8 @@ import { stripStatus } from "./status.js";
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor", grok: "Grok", codexapp: "Codex app", toryo: "Toryo" };
-const INITIALS = { codex: "CX", claude: "CL", cursor: "CU", grok: "GK", codexapp: "CA", toryo: "FM" };
+// Agents are told apart by name and monogram, never by color: every monogram wears the same neutral tone.
+const MONOGRAM = { codex: "Cx", claude: "Cl", cursor: "Cu", grok: "Gk", codexapp: "Cx" };
 /** Found but waiting for a choice (the Codex app needs a thread) reads differently from absent. */
 const missing = (a) => (a.needsSetup ? "not set up" : "not installed");
 const KIND = {
@@ -21,6 +22,48 @@ const STATUS = {
   PROPOSAL: "Proposal", CRITIQUE: "Critique", AGREE: "Agrees", DISAGREE: "Disagrees", REPLY: "Replied",
 };
 const name = (a) => NAMES[a] ?? a;
+
+// Icons, drawn on a 24-pixel grid with the text's color.
+const ICONS = {
+  home: '<path d="M4 11.2 12 4.5l8 6.7V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/>',
+  plan: '<path d="M12 3.5 19.5 8v8L12 20.5 4.5 16V8z"/><path d="M12 12.2 19.5 8M12 12.2V20.5M12 12.2 4.5 8"/>',
+  build: '<path d="M12 4 20 8.2 12 12.4 4 8.2z"/><path d="M4 12.2l8 4.2 8-4.2"/><path d="M4 16l8 4.2 8-4.2"/>',
+  review: '<path d="M12 20.5v-8"/><path d="M12 12.5c0-4.2-2.8-6.7-7-6.7 0 4.2 2.8 6.7 7 6.7z"/><path d="M12 10.5c0-3.7 2.6-6 6.6-6 0 3.7-2.6 6-6.6 6z"/>',
+  chat: '<path d="M4.5 5.5h15v10.5H10l-5.5 4z"/>',
+  checks: '<path d="M9.5 3.5h5M10.5 3.5v5.8L5.6 17.6A2 2 0 0 0 7.4 20.5h9.2a2 2 0 0 0 1.8-2.9l-4.9-8.3V3.5"/><path d="M7.6 14.5h8.8"/>',
+  pause: '<path d="M9 5.5v13M15 5.5v13"/>',
+  play: '<path d="M8 5.5v13l10.5-6.5z"/>',
+  stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="2"/>',
+  check: '<path d="M5.5 12.5 10 17l8.5-9.5"/>',
+  x: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
+  clock: '<circle cx="12" cy="12" r="8"/><path d="M12 7.8V12l2.8 1.8"/>',
+  lock: '<rect x="5.5" y="10.5" width="13" height="9.5" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>',
+  sun: '<circle cx="12" cy="12" r="3.6"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/>',
+  moon: '<path d="M19.5 14.6A7.6 7.6 0 0 1 9.4 4.5a7.6 7.6 0 1 0 10.1 10.1z"/>',
+  system: '<rect x="3.5" y="5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16.5V20"/>',
+  sliders: '<path d="M4 7.5h9M17 7.5h3M4 16.5h3M11 16.5h9"/><circle cx="15" cy="7.5" r="2"/><circle cx="9" cy="16.5" r="2"/>',
+  plus: '<path d="M12 5.5v13M5.5 12h13"/>',
+  file: '<path d="M7 3.5h7l4.5 4.5v12.5H7z"/><path d="M14 3.5V8h4.5"/>',
+  chev: '<path d="M6.5 9.5 12 15l5.5-5.5"/>',
+  dots: '<circle cx="6" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="18" cy="12" r="1.1"/>',
+  rooms: '<rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/>',
+  bell: '<path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 2H5z"/><path d="M10 20.5h4"/>',
+  hand: '<path d="M8.5 12.5V6.8a1.5 1.5 0 0 1 3 0V11M11.5 11V5.3a1.5 1.5 0 0 1 3 0V11M14.5 11V6.8a1.5 1.5 0 0 1 3 0v6.7a7 7 0 0 1-7 7 6 6 0 0 1-5-2.7l-2.3-3.6a1.5 1.5 0 0 1 2.4-1.8l1.4 1.7"/>',
+  sparkle: '<path d="M12 4.5l1.7 4.8 4.8 1.7-4.8 1.7L12 17.5l-1.7-4.8L5.5 11l4.8-1.7z"/>',
+  alert: '<path d="M12 4 21 19.5H3z"/><path d="M12 10v4.5M12 17.2v.3"/>',
+};
+const ic = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] ?? ""}</svg>`;
+const markSvg = () => `<svg viewBox="0 0 512 512" aria-hidden="true"><use href="#mark"/></svg>`;
+/** An agent's monogram: the same neutral tile for every agent; the Codex app's has a window corner. */
+function avatar(agent, size = 30, cls = "") {
+  if (agent === "toryo" || !agent) return `<span class="avatar ${cls}" data-agent="toryo" style="--size:${size}px" title="Toryo">${markSvg()}</span>`;
+  return `<span class="avatar ${cls}" data-agent="${esc(agent)}" style="--size:${size}px" title="${esc(name(agent))}" aria-hidden="true">${esc(MONOGRAM[agent] ?? String(agent).slice(0, 2))}${agent === "codexapp" ? '<span class="app"></span>' : ""}</span>`;
+}
+/** A room's monogram: the first letters of its first two words. */
+const roomMono = (title) => String(title ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => [...w][0]).join("").toUpperCase() || "·";
+/** What kind of work a turn is: building, reviewing, planning, or anything else. */
+const activityOf = (kind) =>
+  /^build|^gates/.test(kind ?? "") ? "build" : /^review|^plan-check/.test(kind ?? "") ? "review" : /^plan-/.test(kind ?? "") ? "plan" : "chat";
 
 const S = {
   state: null,
@@ -44,6 +87,18 @@ const S = {
   intent: null,
   rendered: new Map(),
   expanded: new Set(),
+  // Folded rounds you've opened, so drawing the timeline again keeps them open.
+  openFolds: new Set(),
+  // Queued notes you're changing: what you've typed, the box you're typing in, and whether it has the focus (see
+  // openEditor). What you type is also kept in the browser (see noteChanges).
+  editing: new Map(),
+  // Notes whose change is being saved right now, and the revision of the change sent.
+  saving: new Map(),
+  // The side panel's tab (wide screens), and the room's tab (narrower screens: the relay or one of the panels).
+  sideTab: "plan",
+  roomTab: "relay",
+  // On a phone: the rooms list or the room.
+  pane: "room",
   seen: readSeen(),
   connected: false,
 };
@@ -152,6 +207,7 @@ function connect() {
   const es = new EventSource("/api/events");
   es.addEventListener("open", () => {
     S.connected = true;
+    renderDesk();
     if (S.roomId) loadRoom(S.roomId, { keepScroll: true });
   });
   es.addEventListener("error", () => {
@@ -170,6 +226,7 @@ function connect() {
       if (i >= 0) S.state.rooms[i] = sum;
       else S.state.rooms.unshift(sum);
       renderRooms();
+      renderDesk();
     }
     if (sum.id === S.roomId) refreshRoomSoon();
   });
@@ -245,7 +302,7 @@ async function loadRoom(id, { keepScroll = false } = {}) {
     renderCrew();
     renderComposer();
     loadPlan();
-    if (switching) setTab("relay");
+    if (switching) setRoomTab("relay");
   } catch (error) {
     if (/Unknown room/.test(error.message)) {
       // Forget it locally too, or onState would pick the same room again before the server's update arrives.
@@ -265,8 +322,18 @@ async function loadPlan() {
     return;
   }
   try {
+    const before = currentSlice(r);
     S.plan = await api("GET", `/api/rooms/${r.id}/plan`);
     renderContext();
+    // The slice in progress may take its name from the plan: the header and the slice's marker say it.
+    if (currentSlice(r) !== before && room()?.id === r.id) {
+      renderTop();
+      const log = $("#log");
+      const top = log.scrollTop;
+      const stick = S.toEnd || log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+      renderTimeline(stick);
+      if (!stick) scrollLog(top);
+    }
   } catch {
     S.plan = null;
   }
@@ -275,49 +342,81 @@ async function loadPlan() {
 // ------------------------------------------------------------------ header
 
 function renderTop() {
+  renderDesk();
   const r = room();
   const p = project();
-  $("#roomTitle").hidden = !r;
-  $("#modes").hidden = !r;
-  $("#runPill").hidden = !r;
-  $("#pauseBtn").hidden = !r;
-  $("#stopBtn").hidden = !r;
-  $("#roomBtn").hidden = !r;
+  $("#roomhead").hidden = !r;
+  $("#roomtabs").hidden = !r;
   if (!r) {
-    $("#roomWhere").textContent = "";
     document.title = "Toryo";
     return;
   }
+  $("#roomTile").textContent = roomMono(r.title);
   $("#roomTitle").textContent = r.title;
   $("#roomWhere").textContent = p ? `${p.name} · ${p.path}` : "";
   for (const b of $$("#modes button")) b.setAttribute("aria-pressed", String(b.dataset.mode === r.mode));
-  const status = S.connected ? r.status : "offline";
-  const running = [...S.live.values()].map((l) => name(l.agent));
-  const text = {
-    running: running.length ? `${running.join(" and ")} working` : "Running",
-    pausing: "Pausing after this turn",
-    stopping: "Stopping…",
-    waiting: `Waiting for you`,
-    paused: "Paused",
-    stopped: "Stopped",
-    done: "Done",
-    queued: "Starting…",
-    // Desk-wide controls hold its work up: say which.
-    held: `Waiting: ${[...new Set((S.state?.rooms.find((x) => x.id === r.id)?.blocked ?? []).flatMap((b) => b.reasons))].join("; ") || "held"}`,
-    idle: "Idle",
-    offline: "Reconnecting…",
-  }[status] ?? status;
-  $("#runPill").dataset.state = status;
-  $("#runText").textContent = text;
+  $("#rhState").innerHTML = stateSentence(r);
   const resumable = ["paused", "stopped", "pausing", "stopping"].includes(r.status);
-  $("#pauseBtn").textContent = resumable ? "Resume" : "Pause";
+  if (!$("#stopBtn").dataset.armed) $("#stopBtn").innerHTML = `${ic("stop")}<span class="lbl">Stop</span>`;
+  $("#pauseBtn").innerHTML = `${ic(resumable ? "play" : "pause")}<span class="lbl">${resumable ? "Resume" : "Pause"}</span>`;
+  $("#pauseBtn").setAttribute("aria-label", resumable ? "Resume" : "Pause");
   $("#pauseBtn").disabled = r.status === "done" || (r.status === "idle" && !r.queue?.length);
   if (resumable) $("#pauseBtn").disabled = false;
   $("#stopBtn").disabled = ["stopped", "done", "idle"].includes(r.status);
+  $("#tabbar [data-view=room]").innerHTML = `${ic(r.mode === "plan" ? "plan" : r.mode === "build" ? "build" : "chat")}<span>${esc(r.title)}</span>`;
   document.title = `${r.status === "waiting" ? "● " : ""}${r.title} · Toryo`;
 }
 
-// ------------------------------------------------------------------ rooms list & context
+/**
+ * The slice the build is on. Its name comes with the builder's handoff, so right after an approval it's still
+ * the approved one's: until then, the plan's next unfinished slice is the one being built.
+ */
+function currentSlice(r) {
+  const b = r?.build;
+  if (!b) return "";
+  if (b.slice && !b.approved.includes(b.slice)) return b.slice;
+  const next = (S.plan?.slices ?? []).find((x) => !x.approved);
+  return next ? `${next.kind ?? "Slice"} ${next.number}: ${next.name}` : b.slice ? "the next slice" : "";
+}
+
+/** The top bar's counts: rooms working, and questions waiting for you, across the desk. */
+function renderDesk() {
+  if (!S.state) return;
+  const working = S.state.rooms.filter((r) => r.running?.length).length;
+  const asks = S.state.rooms.reduce((n, r) => n + (r.questions?.length ?? (r.waiting ? 1 : 0)), 0);
+  $("#deskchips").innerHTML = [
+    S.connected ? "" : `<span class="chip" data-k="offline"><span class="dot"></span>Reconnecting…</span>`,
+    working ? `<span class="chip" data-k="work" title="Rooms where an agent or the checks are working"><span class="dot"></span>${working} working</span>` : "",
+    asks ? `<button type="button" class="chip" data-k="you" data-next-ask title="Go to the oldest question waiting for you"><span class="dot"></span>${asks} need${asks === 1 ? "s" : ""} you</button>` : "",
+  ].join("");
+}
+
+/** What the room is doing, in a sentence: who is working on what and for how long, and whether it needs you. */
+function stateSentence(r) {
+  if (!S.connected) return `${ic("alert")}<span>Reconnecting to the desk…</span>`;
+  const sum = S.state?.rooms.find((x) => x.id === r.id);
+  const asks = sum?.questions?.length ?? (r.waiting ? 1 : 0);
+  const parts = [];
+  if (r.status === "done") return `<span class="act-k" data-k="review">${ic("check")}Done</span><span>${r.mode === "build" ? `The build is finished: ${r.build?.approved?.length ?? 0} slice${r.build?.approved?.length === 1 ? "" : "s"} approved, then the final review.` : "Finished."}</span>`;
+  if (r.status === "paused" || r.status === "stopped") parts.push(`<span class="act-k">${ic("pause")}${r.status === "paused" ? "Paused" : "Stopped"}</span><span>${r.status === "paused" ? "Paused by you. Nothing new starts until you resume." : "Stopped. Write to the crew, or resume, to carry on."}</span>`);
+  if (r.status === "pausing") parts.push(`<span class="act-k">${ic("pause")}Pausing</span><span>The turn running now finishes; nothing new starts.</span>`);
+  if (r.status === "stopping") parts.push(`<span class="act-k">${ic("stop")}Stopping</span>`);
+  const live = [...S.live.values()];
+  if (live.length) {
+    const kind = activityOf(live[0].kind);
+    const verb = { build: "building", review: "reviewing", plan: "planning", chat: "replying" }[kind];
+    const who = live.map((l) => name(l.agent)).join(" and ");
+    const what = r.mode === "build" && currentSlice(r) ? ` · ${esc(currentSlice(r))}${r.build.round > 1 ? `, round ${r.build.round}` : ""}` : "";
+    parts.push(`<span class="act-k" data-k="${kind === "chat" ? "" : kind}">${ic(kind === "chat" ? "chat" : kind)}${verb[0].toUpperCase() + verb.slice(1)}</span><span>${esc(who)} ${live.length > 1 ? "are" : "is"} ${verb}${what} · <span class="timer" data-since="${esc(live[0].startedAt)}">${since(live[0].startedAt)}</span></span>`);
+  } else if (r.activeGate || r.status === "checking") parts.push(`<span class="act-k">${ic("checks")}Checks</span><span>The project's checks are running.</span>`);
+  if (asks) parts.push(`<span class="act-k" data-k="you">${ic("hand")}Needs you</span><span>${asks === 1 ? `${r.waiting?.from ? `${esc(name(r.waiting.from))} asks you something` : "A question is waiting"}` : `${asks} questions are waiting`}</span>`);
+  if (r.status === "held") parts.push(`<span class="act-k">${ic("lock")}Held</span><span>Waiting: ${esc([...new Set((sum?.blocked ?? []).flatMap((b) => b.reasons))].join("; ") || "held")}</span>`);
+  if (r.status === "queued" && !live.length) parts.push(`<span>Starting…</span>`);
+  if (!parts.length) parts.push(`<span>Idle. Write to the crew to start.</span>`);
+  return parts.join("");
+}
+
+// ------------------------------------------------------------------ rail: rooms by project
 
 function renderRooms() {
   const box = $("#rooms");
@@ -327,69 +426,60 @@ function renderRooms() {
     if (!byProject.has(r.projectId)) byProject.set(r.projectId, []);
     byProject.get(r.projectId).push(r);
   }
-  let html = "";
-  for (const p of S.state.config.projects) {
-    const rooms = byProject.get(p.id) ?? [];
-    html += `<div class="proj">${esc(p.name)}</div>`;
-    if (!rooms.length) html += `<div class="hint" style="padding:0 8px">No rooms yet.</div>`;
-    for (const r of rooms) {
-      const { icons, says } = roomIndicator(r);
-      html += `<button type="button" class="roomlink" data-room="${r.id}" data-state="${r.status}" aria-current="${r.id === S.roomId}" title="${esc(`${r.title}: ${says}`)}">
-        <span class="dot"></span><span class="t">${esc(r.title)}</span><span class="m">${icons}<span class="sr">${esc(says)}</span></span></button>`;
-    }
-  }
-  box.innerHTML = html;
+  box.innerHTML = S.state.config.projects
+    .map((p) => {
+      const rooms = byProject.get(p.id) ?? [];
+      return `<div class="railgroup"><p class="eyebrow">${esc(p.name)}</p>${rooms.length ? "" : `<div class="hint none">No rooms yet.</div>`}${rooms
+        .map((r) => {
+          const st = railState(r);
+          return `<button type="button" class="roomlink" data-room="${r.id}" data-state="${r.status}" aria-current="${r.id === S.roomId}" title="${esc(`${r.title}: ${st.says}`)}">
+            <span class="tile" aria-hidden="true">${esc(roomMono(r.title))}</span><span class="ri-text"><span class="ri-name">${esc(r.title)}</span><span class="ri-state" ${st.k ? `data-k="${st.k}"` : ""}>${esc(st.text)}</span></span></button>`;
+        })
+        .join("")}</div>`;
+    })
+    .join("");
 }
 
-// What a room is doing, at a glance. What needs you comes first and loudest; then who is working on what;
-// otherwise the room's state.
+// What a room is doing, in one line. What needs you comes first; then who is working on what; otherwise its state.
 const TASK = (kind) =>
-  /^build/.test(kind ?? "") ? ["🔨", "building"]
-  : /^review/.test(kind ?? "") ? ["👓", "reviewing"]
-  : kind === "plan-check" ? ["👓", "checking the plan"]
-  : kind === "plan-proposal" ? ["📝", "writing a proposal"]
-  : kind === "plan-critique" ? ["🔍", "critiquing the proposals"]
-  : kind === "plan-synthesis" || kind === "plan-revise" ? ["📝", "writing the plan"]
-  : kind === "gates" ? ["🧪", "running the checks"]
-  : kind === "note-reply" || kind === "note-answer" ? ["💬", "answering your question"]
-  : kind === "discuss" ? ["💬", "discussing"]
-  : kind === "opinion" ? ["💬", "giving a second opinion"]
-  : ["💬", "replying"];
-const ROOM_STATE = {
-  paused: ["⏸", "Paused"],
-  pausing: ["⏸", "Pausing after this turn"],
-  stopping: ["⏹", "Stopping"],
-  stopped: ["⏹", "Stopped"],
-  done: ["✓", "Done"],
-  queued: ["⏳", "Starting"],
-  held: ["⏸", "Held"],
-  idle: ["Zzz", "Idle"],
-};
-function roomIndicator(r) {
+  /^build/.test(kind ?? "") ? "building"
+  : /^review/.test(kind ?? "") ? "reviewing"
+  : kind === "plan-check" ? "checking the plan"
+  : kind === "plan-proposal" ? "writing a proposal"
+  : kind === "plan-critique" ? "critiquing the proposals"
+  : kind === "plan-synthesis" || kind === "plan-revise" ? "writing the plan"
+  : kind === "gates" ? "running the checks"
+  : kind === "note-reply" || kind === "note-answer" ? "answering your question"
+  : kind === "discuss" ? "discussing"
+  : kind === "opinion" ? "giving a second opinion"
+  : "replying";
+const ROOM_STATE = { paused: "Paused", pausing: "Pausing after this turn", stopping: "Stopping", stopped: "Stopped", done: "Done", queued: "Starting", held: "Held", idle: "Idle" };
+function railState(r) {
   const working = r.working ?? [];
-  const parts = [];
+  const asks = r.questions?.length ?? (r.waiting ? 1 : 0);
+  const doing = working.slice(0, 2).map((w) => `${name(w.agent)} ${TASK(w.kind)}`);
   const says = [];
-  if (r.status === "waiting") {
-    parts.push(`<span class="needs">needs you</span>`);
-    says.push(r.waiting?.from ? `${name(r.waiting.from)} is waiting for your answer` : "Waiting for you");
-  }
-  for (const w of working.slice(0, 3)) {
-    const [icon, doing] = TASK(w.kind);
-    parts.push(`<span class="mini avatar" data-agent="${esc(w.agent)}" aria-hidden="true">${INITIALS[w.agent] ?? "??"}</span><span class="ico" aria-hidden="true">${icon}</span>`);
-    says.push(`${name(w.agent)} is ${doing}`);
-  }
-  const state = ROOM_STATE[r.status];
-  if (state && !(working.length && ["queued", "idle"].includes(r.status))) {
-    parts.push(`<span class="ico state" aria-hidden="true">${state[0]}</span>`);
-    says.push(r.status === "held" ? `Waiting: ${[...new Set((r.blocked ?? []).flatMap((b) => b.reasons))].join("; ")}` : state[1]);
-  }
+  if (asks) says.push(r.waiting?.from ? `${name(r.waiting.from)} is waiting for your answer` : "Waiting for you");
+  says.push(...doing.map((d) => d.replace(/ (building|reviewing|replying|discussing)/, " is $1")));
+  const held = r.status === "held" ? `Held: ${[...new Set((r.blocked ?? []).flatMap((b) => b.reasons))].join("; ")}` : "";
+  if (held) says.push(held);
+  if (!asks && !working.length && !held && ROOM_STATE[r.status]) says.push(ROOM_STATE[r.status]);
   says.push(`${r.mode} room`);
-  return { icons: parts.join(""), says: says.join(" · ") };
+  let text;
+  let k = "";
+  if (asks && doing.length) [text, k] = [`${doing[0]} · needs you`, "you"];
+  else if (asks) [text, k] = [asks > 1 ? `Needs you · ${asks} questions` : r.waiting?.from ? `Needs you · ${name(r.waiting.from)} asks` : "Needs you", "you"];
+  else if (doing.length) [text, k] = [doing.join(", "), "work"];
+  else if (held) text = held;
+  else text = ROOM_STATE[r.status] ?? r.status;
+  if (r.status === "stopped" && !doing.length && !asks) k = "";
+  return { text, k, says: says.join(" · ") };
 }
 
 function renderContext() {
   const box = $("#context");
   const r = room();
+  renderLedger();
   if (!r) {
     box.innerHTML = "";
     return;
@@ -397,49 +487,43 @@ function renderContext() {
   let html = "";
   if (r.mode === "build" && r.build) {
     const plan = S.plan;
-    html += `<div class="ctx"><p class="eyebrow">Plan</p>`;
-    if (r.build.planPath) html += `<a href="#" class="file mono" data-file="${esc(r.build.planPath)}">${esc(r.build.planPath)}</a>`;
-    if (plan?.slices?.length) {
-      html += `<ul class="slices">${plan.slices
-        .map((s) => {
-          const st = s.approved ? "done" : s.current ? "current" : "todo";
-          const took = s.approved && s.took ? `<span class="took" title="${esc(`${shortDuration(s.took.active)} of agent and check time over ${s.took.rounds} review round${s.took.rounds === 1 ? "" : "s"}; ${shortDuration(s.took.wall)} from start to approval, including pauses and waiting`)}">(${shortDuration(s.took.active)})</span>` : "";
-          return `<li class="slice" data-state="${st}"><span class="mark">${s.approved ? "✓" : esc(s.number)}</span><span class="name">${esc(s.name)} ${took}</span><span class="n">${s.checks ? `${s.checked}/${s.checks}` : ""}</span></li>`;
+    const slices = plan?.slices ?? [];
+    const done = slices.filter((x) => x.approved).length;
+    // The slice being built: the one named in the last handoff, or (right after an approval) the next unfinished one.
+    const now = r.status === "done" ? -1 : slices.findIndex((x) => x.current && !x.approved) >= 0 ? slices.findIndex((x) => x.current && !x.approved) : slices.findIndex((x) => !x.approved);
+    const worked = (plan?.times ?? []).reduce((t, x) => t + (x.active ?? 0), 0);
+    html += `<div class="progress"><div class="ph"><strong>${r.build.planPath ? `<a href="#" class="file" data-file="${esc(r.build.planPath)}">${esc(r.build.planPath.split("/").pop())}</a>` : "No plan file"}</strong>${slices.length ? `<span class="muted num">${done} of ${slices.length}</span>` : ""}</div>
+      ${slices.length ? `<div class="segbar" aria-hidden="true">${slices.map((x, i) => `<i data-s="${x.approved ? "done" : i === now ? "now" : "todo"}" title="${esc(`${x.kind ?? "Slice"} ${x.number}: ${x.name}`)}"></i>`).join("")}</div>` : ""}
+      ${worked ? `<span class="hint">${shortDuration(worked)} of approved work so far</span>` : ""}</div>`;
+    if (slices.length) {
+      html += `<ol class="slices">${slices
+        .map((x, i) => {
+          const st = x.approved ? "done" : i === now ? "current" : "todo";
+          const took = x.approved && x.took ? `<span class="took" title="${esc(`${shortDuration(x.took.active)} of agent and check time over ${x.took.rounds} review round${x.took.rounds === 1 ? "" : "s"}; ${shortDuration(x.took.wall)} from start to approval, including pauses and waiting`)}">(${shortDuration(x.took.active)})</span>` : x.checks ? `<span class="n">${x.checked}/${x.checks}</span>` : "";
+          return `<li class="slice" data-state="${st}"><span class="mark">${x.approved ? ic("check") : esc(x.number)}</span><span class="name">${esc(x.name)}${st === "current" ? `<br><span class="hint">${r.build.round && x.current ? `Round ${r.build.round} of at most ${r.settings.maxRounds}` : [...S.live.values()].length ? "Being built" : "Up next"}</span>` : ""}</span>${took}</li>`;
         })
-        .join("")}</ul>`;
-    } else if (plan?.missing) html += `<div class="hint">The plan file doesn't exist yet.</div>`;
-    else if (!r.build.planPath) html += `<div class="hint">No plan file; the builder agrees slices as it goes.</div>`;
+        .join("")}</ol>`;
+    } else if (plan?.missing) html += `<p class="sideintro">The plan file doesn't exist yet.</p>`;
+    else if (!r.build.planPath) html += `<p class="sideintro">No plan file: the builder agrees slices as it goes.</p>`;
     html += `<div class="facts">
-      ${r.build.slice ? `<div>Current: <b>${esc(r.build.slice)}</b></div>` : ""}
+      ${currentSlice(r) ? `<div>Current: <b>${esc(currentSlice(r))}</b></div>` : ""}
       <div>Review rounds on this slice: <b>${r.build.round}</b> of ${r.settings.maxRounds}</div>
       <div>Approved: <b>${r.build.approved.length}</b>${r.build.approved.length ? ` (${r.build.approved.map((a) => { const t = [...(plan?.times ?? [])].reverse().find((x) => x.label === a); return esc(a) + (t ? ` · ${shortDuration(t.active)}` : ""); }).join(", ")})` : ""}</div>
       <div>After approval: <b>${r.settings.autoContinue ? "continue automatically" : "wait for you"}</b></div>
-      <div>Reviewer: <b>${r.settings.freshReviewer !== false ? "fresh for each new slice" : "one session throughout"}</b></div></div></div>`;
-    // The ledger a fresh reviewer gets: findings still open, and your decisions in this build.
-    const ledger = r.ledger ?? [];
-    const open = ledger.filter((e) => e.kind !== "decision" && e.state === "open");
-    const decisions = ledger.filter((e) => e.kind === "decision");
-    if (open.length || decisions.length)
-      html += `<div class="ctx"><p class="eyebrow">Ledger</p><div class="facts">${open
-        .map((f) => `<div title="${esc(f.text)}"><b>${esc(f.id)}</b> open · ${esc(f.slice || "no slice")} · ${esc(f.text.split("\n")[0].slice(0, 120))}</div>`)
-        .join("")}${decisions
-        .slice(-5)
-        .map((d) => `<div title="${esc(d.question)}"><b>${esc(d.id)}</b> you decided · ${esc(String(d.answer).slice(0, 120))}</div>`)
-        .join("")}<div class="hint">${ledger.length - open.length - decisions.length} finding${ledger.length - open.length - decisions.length === 1 ? "" : "s"} resolved</div></div></div>`;
+      <div>Reviewer: <b>${r.settings.freshReviewer !== false ? "fresh for each new slice" : "one session throughout"}</b></div></div>`;
   } else if (r.mode === "plan" && r.plan) {
     const order = ["proposals", "critiques", "checkpoint", "synthesis", "check", "ready"];
     const labels = ["Independent proposals", "Critiques", "Your call", "Plan written", "Plan check", "Ready to build"];
     const phase = r.plan.phase === "revision" ? "check" : r.plan.phase;
     const at = order.indexOf(phase);
-    html += `<div class="ctx"><p class="eyebrow">Planning</p><div style="font-weight:600">${esc(r.plan.topic)}</div><ol class="phases">${labels
+    html += `<div class="progress"><div class="ph"><strong>${esc(r.plan.topic)}</strong></div></div><ol class="phases">${labels
       .map((l, i) => `<li data-state="${i < at ? "done" : i === at ? "now" : "todo"}">${l}</li>`)
       .join("")}</ol>
       <div class="facts"><div>Plan file: <a href="#" class="file mono" data-file="${esc(r.plan.planPath)}">${esc(r.plan.planPath)}</a></div>
-      <div>Planners: <b>${r.plan.participants.map(name).join(", ")}</b></div></div></div>`;
+      <div>Planners: <b>${r.plan.participants.map(name).join(", ")}</b></div></div>`;
   } else {
-    html += `<div class="ctx"><p class="eyebrow">Conversation</p><div class="facts"><div>With <b>${r.crew.members.map(name).join(", ")}</b></div>
-      ${r.discuss ? `<div>Discussion: round <b>${r.discuss.round}</b> of ${r.discuss.rounds}</div>` : ""}
-      <div class="hint">Use Plan for a structured planning round, Build for the build-and-review relay.</div></div></div>`;
+    html += `<p class="sideintro">A conversation with <b>${r.crew.members.map(name).join(", ")}</b>. Use Plan for a structured planning round, Build for the build-and-review relay.</p>
+      ${r.discuss ? `<div class="facts"><div>Discussion: round <b>${r.discuss.round}</b> of ${r.discuss.rounds}</div></div>` : ""}`;
   }
 
   const events = S.view.events;
@@ -449,7 +533,7 @@ function renderContext() {
     html += `<div class="ctx"><p class="eyebrow">Questions for you</p><div class="qlist">${open
       .map((q) => `<button type="button" class="qitem" data-jump="${q.id}"><b>${q.from ? `${esc(name(q.from))} asks` : "Your call"}</b>${esc(q.question)}</button>`)
       .join("")}${closed
-      .map((q) => `<div class="qitem closed"><b>Answered</b>${esc(q.question)}<br><span class="hint">→ ${esc(q.answer ?? "")}</span></div>`)
+      .map((q) => `<div class="qitem closed"><b>Answered</b>${esc(q.question)}<span class="hint">→ ${esc(q.answer ?? "")}</span></div>`)
       .join("")}</div></div>`;
   }
 
@@ -468,10 +552,111 @@ function renderContext() {
   box.innerHTML = html;
 }
 
+/** The ledger a fresh reviewer reads first: findings still open from earlier slices, and your decisions. */
+function renderLedger() {
+  const box = $("#ledger");
+  const r = room();
+  if (!r) {
+    box.innerHTML = "";
+    return;
+  }
+  const ledger = r.ledger ?? [];
+  const open = ledger.filter((e) => e.kind !== "decision" && e.state === "open");
+  const decisions = ledger.filter((e) => e.kind === "decision");
+  const resolved = ledger.length - open.length - decisions.length;
+  if (!open.length && !decisions.length) {
+    box.innerHTML = `<p class="sideintro">No open findings or decisions in this room yet. The ledger fills from reviews and your answers, and a reviewer starting fresh reads it first.</p>${resolved ? `<p class="hint">${resolved} finding${resolved === 1 ? "" : "s"} resolved.</p>` : ""}`;
+    return;
+  }
+  box.innerHTML = `<p class="sideintro">What a reviewer starting fresh reads first: findings still open from earlier slices, and your answers.</p>
+    <ul class="ledger">${open
+      .map((f) => `<li title="${esc(f.text)}"><b>${esc(f.id)} · open</b><span>${esc(f.text.split("\n")[0].slice(0, 200))}</span><small>${esc(f.slice || "No slice")}</small></li>`)
+      .join("")}${decisions
+      .slice(-8)
+      .map((d) => `<li title="${esc(d.question)}"><b>${esc(d.id)} · you decided</b><span>${esc(String(d.answer).slice(0, 200))}</span><small>${esc(d.slice || "")}${d.question ? ` · ${esc(String(d.question).slice(0, 120))}` : ""}</small></li>`)
+      .join("")}</ul>${resolved ? `<p class="hint">${resolved} finding${resolved === 1 ? "" : "s"} resolved.</p>` : ""}`;
+}
+
 // ------------------------------------------------------------------ timeline
+
+/**
+ * Put the timeline at `top`, or at its end. At once: the timeline scrolls smoothly for your own jumps, and a smooth
+ * scroll cut short by drawing the timeline again would stop wherever it had got to.
+ */
+function scrollLog(top) {
+  const log = $("#log");
+  log.scrollTo({ top: top ?? log.scrollHeight, behavior: "instant" });
+}
+
+const BUILDER_KINDS = new Set(["build", "build-fix", "build-next", "build-nudge", "build-answer", "build-gate", "build-note", "build-notes"]);
+
+/**
+ * A build's timeline in slices and review rounds. A round runs from a building turn to the reviewer's verdict
+ * (anything after the verdict, until the next building turn, stays with it); a slice runs from its first round to
+ * its approval. Events before the first building turn stand on their own.
+ */
+function sliceStructure(events) {
+  const slices = [];
+  const where = new Map();
+  let slice = null;
+  let round = null;
+  for (const e of events) {
+    const building = e.type === "turn" && BUILDER_KINDS.has(e.kind);
+    if (building && (!slice || slice.approved)) {
+      slice = { label: "", rounds: [], approved: false };
+      slices.push(slice);
+      round = null;
+    }
+    if (!slice) continue;
+    if (building && (!round || round.verdict)) {
+      round = { events: [], verdict: null };
+      slice.rounds.push(round);
+    }
+    round.events.push(e);
+    where.set(e.id, { slice, round });
+    if (building && e.status === "REVIEW" && e.detail) slice.label = e.detail.split("|")[0].trim();
+    if (e.type === "turn" && /^review/.test(e.kind) && e.state === "done" && (e.status === "CHANGES" || e.status === "APPROVED")) {
+      round.verdict = e.status;
+      if (e.status === "APPROVED") slice.approved = true;
+    }
+  }
+  return { slices, where };
+}
+
+/** The earlier rounds of a slice, folded into one line: those before the last, while nothing in them is open. */
+function foldedRounds(slice) {
+  const fold = [];
+  for (const rd of slice.rounds.slice(0, -1)) {
+    if (rd.events.some((e) => (e.type === "question" && e.open) || (e.type === "turn" && e.state === "running"))) break;
+    fold.push(rd);
+  }
+  return fold;
+}
+
+function sliceMarker(slice, current) {
+  const label = slice.label || current || "";
+  const no = label.match(/\b(?:slice|step|task|phase|stage|milestone)\s*#?([0-9]+[a-z]?)\b/i)?.[1] ?? "·";
+  const rounds = slice.rounds.length;
+  const first = slice.rounds[0]?.events[0];
+  const note = slice.approved ? `Approved after ${rounds} round${rounds === 1 ? "" : "s"}` : `Round ${rounds}${first ? ` · started at ${clock(first.startedAt ?? first.at)}` : ""}`;
+  return el(`<div class="slicemark"><span class="no" aria-hidden="true">${esc(no)}</span><strong>${esc(label || "A new slice")}</strong><span class="muted">${esc(note)}</span></div>`);
+}
+
+function foldEl(rounds, key) {
+  const evs = rounds.flatMap((rd) => rd.events);
+  const changes = rounds.filter((rd) => rd.verdict === "CHANGES").length;
+  const answers = evs.filter((e) => e.type === "owner" && e.kind === "answer").length;
+  const from = evs[0];
+  const to = [...evs].reverse().find((e) => e.endedAt || e.at);
+  const took = from && to ? duration(from.startedAt ?? from.at, to.endedAt ?? to.at) : "";
+  const label = rounds.length === 1 ? "Round 1" : `Rounds 1 to ${rounds.length}`;
+  const box = el(`<details class="rounds" data-fold="${esc(key)}" ${S.openFolds.has(key) ? "open" : ""}><summary>${ic("dots")}<b>${label}</b><span class="muted">${[took, `${changes} review${changes === 1 ? "" : "s"} asked for changes`, answers ? `you answered ${answers} question${answers === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")}</span>${ic("chev", "i chev")}</summary><div class="inner"></div></details>`);
+  return box;
+}
 
 function renderTimeline(scroll = true) {
   const log = $("#log");
+  rememberEditors();
   log.innerHTML = "";
   S.rendered = new Map();
   const r = room();
@@ -486,22 +671,59 @@ function renderTimeline(scroll = true) {
     const asks = events.filter((e) => e.type === "question" && e.open).length;
     const firstId = fresh[0]?.id;
     log.appendChild(
-      el(`<div class="away"><span>While you were away: <b>${freshTurns.length}</b> turns${approved ? `, <b>${approved}</b> approval${approved > 1 ? "s" : ""}` : ""}${asks ? `, <b>${asks}</b> question${asks > 1 ? "s" : ""} waiting for you` : ""}.</span>
-        <button type="button" class="btn small" data-jump="${firstId}">Jump to the first new message</button><button type="button" class="btn small quiet" data-dismiss>Dismiss</button></div>`),
+      el(`<div class="away">${ic("sparkle")}<span><b>While you were away:</b> ${freshTurns.length} turns${approved ? `, ${approved} approval${approved > 1 ? "s" : ""}` : ""}${asks ? `, ${asks} question${asks > 1 ? "s" : ""} waiting for you` : ""}.</span>
+        <button type="button" class="btn small" data-jump="${firstId}">Jump to the first new message</button><button type="button" class="iconbtn" data-dismiss title="Dismiss" aria-label="Dismiss">${ic("x")}</button></div>`),
     );
   }
+  // In a build, each slice gets a marker, and its earlier rounds fold into one line.
+  const { slices, where } = r.mode === "build" ? sliceStructure(events) : { slices: [], where: new Map() };
+  const foldOf = new Map();
+  slices.forEach((sl, n) => {
+    const rounds = foldedRounds(sl);
+    const fold = { rounds, key: `${n}:${rounds.length}`, box: null };
+    for (const rd of rounds) for (const e of rd.events) foldOf.set(e.id, fold);
+  });
+  const marked = new Set();
   for (const ev of events) {
+    const at = where.get(ev.id);
+    if (at && !marked.has(at.slice)) {
+      marked.add(at.slice);
+      log.appendChild(sliceMarker(at.slice, at.slice === slices.at(-1) ? currentSlice(r) : ""));
+    }
+    const fold = foldOf.get(ev.id);
+    if (fold && !fold.box) log.appendChild((fold.box = foldEl(fold.rounds, fold.key)));
     const node = renderEvent(ev);
-    if (node) log.appendChild(node);
+    if (node) (fold ? $(".inner", fold.box) : log).appendChild(node);
     S.rendered.set(ev.id, JSON.stringify(ev));
   }
-  if (scroll) requestAnimationFrame(() => (log.scrollTop = log.scrollHeight));
+  if (scroll && S.focusOn) {
+    // Opened to show one message (the oldest question waiting for you): that one, not the end.
+    const id = S.focusOn;
+    requestAnimationFrame(() => {
+      const card = $(`#log [data-id="${CSS.escape(id)}"]`);
+      const fold = card?.closest("details.rounds");
+      if (fold) fold.open = true;
+      const at = card?.getBoundingClientRect();
+      const box = log.getBoundingClientRect();
+      if (card) scrollLog(Math.max(0, log.scrollTop + at.top - box.top - (log.clientHeight - at.height) / 2));
+      else scrollLog();
+      if (S.focusOn === id) S.focusOn = null;
+    });
+  } else if (scroll) {
+    // Until the scroll happens, a timeline drawn again in the meantime goes to the end too.
+    S.toEnd = true;
+    requestAnimationFrame(() => {
+      scrollLog();
+      S.toEnd = false;
+    });
+  }
   markSeenSoon();
 }
 
 function upsertEvent(ev, { quiet = false } = {}) {
   const events = S.view.events;
   const i = events.findIndex((e) => e.id === ev.id);
+  const before = i >= 0 ? events[i] : null;
   if (i >= 0) events[i] = ev;
   else events.push(ev);
   if (ev.type === "turn") {
@@ -514,13 +736,27 @@ function upsertEvent(ev, { quiet = false } = {}) {
   S.rendered.set(ev.id, json);
   const log = $("#log");
   const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+  // In a build, a turn starting or ending can open a slice or a round, or fold the one before: draw it all again.
+  if (room()?.mode === "build" && ev.type === "turn" && (!before || before.state !== ev.state)) {
+    const top = log.scrollTop;
+    renderTimeline(false);
+    requestAnimationFrame(() => scrollLog(stick ? undefined : top));
+    if (!quiet) {
+      renderContext();
+      renderCrew();
+      renderTop();
+      if (ev.state !== "running") loadPlan();
+    }
+    return;
+  }
+  rememberEditors();
   const node = renderEvent(ev);
   const old = log.querySelector(`[data-id="${CSS.escape(ev.id)}"]`);
   if (old) {
     if (node) old.replaceWith(node);
     else old.remove();
   } else if (node) log.appendChild(node);
-  if (stick) requestAnimationFrame(() => (log.scrollTop = log.scrollHeight));
+  if (stick) requestAnimationFrame(() => scrollLog());
   if (!quiet) {
     renderContext();
     renderCrew();
@@ -552,10 +788,66 @@ function ownerEl(ev) {
   const label = { topic: "Planning topic", decisions: "Your decisions", answer: "Your answer" }[ev.kind] ?? "";
   // A note no agent has yet can still be changed or withdrawn, unless it answered a question (it stays as sent).
   const queued = !ev.kind && !ev.answers?.length && !ev.cancelled && !ev.deliveredTo?.length && !Object.keys(ev.readBy ?? {}).length;
-  return el(`<div class="owner" data-id="${ev.id}" data-cancelled="${Boolean(ev.cancelled)}">
+  const node = el(`<div class="owner" data-id="${ev.id}" data-cancelled="${Boolean(ev.cancelled)}">
     <div class="to">${label ? `${label} · ` : ""}${!ev.kind && ev.intent ? `<span class="intent" data-intent="${esc(ev.intent)}">${ev.intent === "ask" ? "Ask" : "Tell"}</span> · ` : ""}You → <b>${esc(to.join(", "))}</b> · ${clock(ev.at)}${ev.delivery === "now" ? " · sent now" : ""}${ev.editedAt ? " · edited" : ""}${(ev.answers ?? []).map((a) => ` · answers “${esc(a.question.length > 80 ? `${a.question.slice(0, 80)}…` : a.question)}”`).join("")}</div>
     <div class="md">${renderMarkdown(ev.text)}</div>
     <div class="notestate">${ev.cancelled ? "<span>withdrawn</span>" : noteStates(ev)}${queued ? ` · <button type="button" class="linkbtn" data-note-edit>Edit</button> · <button type="button" class="linkbtn" data-note-cancel>Cancel note</button>` : ""}</div></div>`);
+  // A change you're making to it (kept in this browser as you type, under its room): while the note is still
+  // queued, the editor comes back as you left it, also after a reload. If the note has gone to the crew meanwhile,
+  // the change can't be saved, but it isn't lost: it stays under the note until you send it as a new note or
+  // dismiss it. Not while a save of it is on its way: the note's own update shows what was saved.
+  const kept = noteChanges(S.roomId)[ev.id];
+  const change = kept && S.saving.get(ev.id) === kept.rev ? null : kept;
+  if (change && !S.editing.has(ev.id) && change.text.trim() === ev.text.trim()) setNoteChange(S.roomId, ev.id, null);
+  else if (change && queued) {
+    const draft = S.editing.get(ev.id) ?? { roomId: S.roomId, text: change.text, focused: false };
+    // Changed meanwhile in another tab (each tab keeps what you type in the browser): the latest wins.
+    if (draft.text !== change.text) {
+      draft.text = change.text;
+      if (draft.area) draft.area.value = change.text;
+    }
+    S.editing.set(ev.id, draft);
+    openEditor(node, ev, draft);
+  } else if (change) {
+    S.editing.delete(ev.id);
+    node.appendChild(unsavedEl(ev, change.text));
+  }
+  return node;
+}
+
+/**
+ * Changes to notes not saved yet, per room, kept in this browser: what you've typed in a note's editor, or a change
+ * that couldn't be saved because the note went to the crew first. Each is dropped when it's saved, or when you
+ * keep the note as it was, send the change as a new note, or dismiss it. Always written under the room the note is
+ * in, whichever room is on screen.
+ */
+function noteChanges(roomId) {
+  try {
+    return JSON.parse(localStorage.getItem(`toryo.notechanges.${roomId}`) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+/** Keep (or drop) a change. Each one kept gets a revision of its own, which a save checks before dropping it. */
+function setNoteChange(roomId, noteId, change) {
+  const all = noteChanges(roomId);
+  const rev = change ? `${Date.now().toString(36)}.${Math.random().toString(36).slice(2)}` : null;
+  if (change) all[noteId] = { ...change, rev };
+  else delete all[noteId];
+  try {
+    if (Object.keys(all).length) localStorage.setItem(`toryo.notechanges.${roomId}`, JSON.stringify(all));
+    else localStorage.removeItem(`toryo.notechanges.${roomId}`);
+  } catch {
+    /* ignore */
+  }
+  return rev;
+}
+
+function unsavedEl(ev, text) {
+  const to = (ev.to ?? []).map(name).join(" and ");
+  return el(`<div class="unsaved" data-unsaved="${ev.id}"><b>Your change wasn't saved: the note went to ${esc(to)} first.</b>
+    <textarea class="noteedit" readonly rows="3" aria-label="Your unsaved version">${esc(text)}</textarea>
+    <div class="actions"><button type="button" class="btn small" data-unsaved-reuse>Send it as a new note</button><button type="button" class="btn small quiet" data-unsaved-dismiss>Dismiss</button></div></div>`);
 }
 
 /** Ask or Tell, as chosen, or as the text suggests until you choose. */
@@ -568,21 +860,80 @@ function renderIntent() {
 function editNote(box) {
   const ev = S.view?.events.find((e) => e.id === box.dataset.id);
   if (!ev) return;
+  const draft = { roomId: S.roomId, text: ev.text, focused: true };
+  S.editing.set(ev.id, draft);
+  setNoteChange(draft.roomId, ev.id, { text: draft.text, to: ev.to ?? [] });
+  openEditor(box, ev, draft);
+}
+
+/**
+ * The editor for a queued note. Drawing the timeline again (a turn starting or ending, an update to the note) doesn't
+ * make a new one: the box you're typing in moves into the note as it's drawn, with its text, cursor and selection,
+ * and gets the focus back if it had it.
+ */
+function openEditor(box, ev, draft) {
   const md = box.querySelector(".md");
-  md.innerHTML = `<textarea rows="3" class="noteedit"></textarea><div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="btn small primary" data-note-save>Save</button><button type="button" class="btn small" data-note-keep>Keep as it was</button></div>`;
-  const area = md.querySelector("textarea");
-  area.value = ev.text;
-  area.focus();
-  const restore = () => box.replaceWith(ownerEl(ev));
-  md.querySelector("[data-note-keep]").addEventListener("click", restore);
+  md.innerHTML = `<div style="display:flex;gap:6px;margin-top:6px"><button type="button" class="btn small primary" data-note-save>Save</button><button type="button" class="btn small" data-note-keep>Keep as it was</button></div>`;
+  let area = draft.area;
+  if (!area) {
+    area = document.createElement("textarea");
+    area.rows = 3;
+    area.className = "noteedit";
+    area.setAttribute("aria-label", "Your note");
+    area.value = draft.text;
+    area.addEventListener("input", () => {
+      draft.text = area.value;
+      setNoteChange(draft.roomId, ev.id, { text: draft.text, to: ev.to ?? [] });
+    });
+    draft.area = area;
+  }
+  md.prepend(area);
+  // Once the note is on the page (it's drawn first, then put in place).
+  if (draft.focused) queueMicrotask(() => area.isConnected && area.focus({ preventScroll: true }));
+  md.querySelector("[data-note-keep]").addEventListener("click", () => {
+    S.editing.delete(ev.id);
+    setNoteChange(draft.roomId, ev.id, null);
+    box.replaceWith(ownerEl(ev));
+  });
   md.querySelector("[data-note-save]").addEventListener("click", async () => {
+    // While the save is on its way, the note's update (which can arrive before the reply) shows the note, not the
+    // editor. The change stays kept, under the note's room, until the desk has it: you may have moved on to
+    // another room, or reloaded, by then. Refused because the note went first: it shows as the change that
+    // couldn't be saved. Failed for another reason: the editor comes back.
+    // You can go on typing (here, or in another tab) while it's on its way: that makes a newer change, which the
+    // save's reply never drops.
+    const roomId = draft.roomId;
+    draft.text = area.value;
+    const rev = setNoteChange(roomId, ev.id, { text: draft.text, to: ev.to ?? [] });
+    S.saving.set(ev.id, rev);
     try {
-      await api("PATCH", `/api/rooms/${S.roomId}/notes/${ev.id}`, { text: area.value });
-      refreshRoomSoon();
+      await api("PATCH", `/api/rooms/${roomId}/notes/${ev.id}`, { text: draft.text });
+      if (noteChanges(roomId)[ev.id]?.rev === rev) {
+        setNoteChange(roomId, ev.id, null);
+        S.editing.delete(ev.id);
+      }
+      if (S.roomId === roomId) refreshRoomSoon();
     } catch (error) {
+      if (error.status === 409) S.editing.delete(ev.id);
       fail(error);
+    } finally {
+      if (S.saving.get(ev.id) === rev) S.saving.delete(ev.id);
+      const shown = S.roomId === roomId && $(`#log .owner[data-id="${CSS.escape(ev.id)}"]`);
+      if (shown) shown.replaceWith(ownerEl(S.view.events.find((e) => e.id === ev.id) ?? ev));
     }
   });
+}
+
+/** Before the timeline is drawn again: what each open editor holds, and whether it has the focus. */
+function rememberEditors() {
+  for (const area of $$("#log textarea.noteedit:not([readonly])")) {
+    const draft = S.editing.get(area.closest(".owner")?.dataset.id);
+    if (!draft) continue;
+    draft.text = area.value;
+    // Focus that went nowhere (the box was just moved, and gets it back in a moment) isn't focus moved away.
+    const active = document.activeElement;
+    if (active && active !== document.body) draft.focused = active === area;
+  }
 }
 
 /** Where a note is for each agent it went to: waiting, being read, or answered (with a link to the answer). */
@@ -604,27 +955,28 @@ function noteStates(ev) {
 
 function turnEl(ev) {
   const live = ev.state === "running";
-  const role = ev.role ? `<span class="role" data-role="${esc(ev.role)}">${esc(ev.role)}</span>` : "";
+  const kind = activityOf(ev.kind);
+  const role = ev.role ? `<span class="role" data-role="${esc(ev.role)}">${esc(ev.role[0].toUpperCase() + ev.role.slice(1))}</span>` : "";
   const meta = [
-    ev.slice ? `“${esc(ev.slice)}”` : "",
     ev.round && ev.kind && /^(build|review)/.test(ev.kind) ? `round ${ev.round}` : "",
-    live ? `working <span class="timer" data-since="${ev.startedAt}">${since(ev.startedAt)}</span>` : duration(ev.startedAt, ev.endedAt),
+    live ? `<span class="timer" data-since="${ev.startedAt}">${since(ev.startedAt)}</span>` : duration(ev.startedAt, ev.endedAt),
     clock(ev.endedAt ?? ev.startedAt),
   ]
     .filter(Boolean)
     .join(" · ");
   let chip = "";
-  if (ev.state === "failed") chip = `<span class="status" data-s="failed">Failed</span>`;
+  if (live) chip = `<span class="status" data-s="working" data-k="${kind}"><span class="pulse"></span>${{ build: "Building", review: "Reviewing", plan: "Planning", chat: "Working" }[kind]}</span>`;
+  else if (ev.state === "failed") chip = `<span class="status" data-s="failed">${ic("x")}Failed</span>`;
   else if (ev.state === "interrupted") chip = `<span class="status">Interrupted</span>`;
   // Held while it was being prepared: it went back to the queue, unsent (the reason is below).
   else if (ev.state === "deferred") chip = `<span class="status">Not sent yet</span>`;
-  else if (ev.status && STATUS[ev.status]) chip = `<span class="status" data-s="${ev.status}" title="${esc(`TORYO: ${ev.status} ${ev.detail ?? ""}`)}">${STATUS[ev.status]}</span>`;
-  const head = `<header><span class="who"><span class="avatar" data-agent="${ev.agent}">${INITIALS[ev.agent] ?? "??"}</span>${esc(name(ev.agent))}${role}</span><span class="kind">${esc(KIND[ev.kind] ?? ev.kind ?? "")}</span><span class="meta">${meta}</span>${chip}</header>`;
+  else if (ev.status && STATUS[ev.status]) chip = `<span class="status" data-s="${ev.status}" title="${esc(`TORYO: ${ev.status} ${ev.detail ?? ""}`)}">${ev.status === "APPROVED" || ev.status === "DONE" ? ic("check") : ""}${STATUS[ev.status]}</span>`;
+  const head = `<header><span class="who">${avatar(ev.agent, 30)}${esc(name(ev.agent))}</span>${role}<span class="kind">${esc(KIND[ev.kind] ?? ev.kind ?? "")}</span><span class="meta">${meta}</span>${chip}</header>`;
   if (live) {
     const activity = S.live.get(ev.id)?.activity ?? [];
-    return el(`<article class="turn live" data-id="${ev.id}">${head}
+    return el(`<article class="turn live" data-k="${kind}" data-id="${ev.id}">${head}
       <ul class="feed" data-feed="${ev.id}">${feedItems(activity, 6)}</ul>
-      <footer><button type="button" class="btn small" data-note-now="${ev.agent}">${ev.agent === "codexapp" ? "Add a note for its next turn" : "Interrupt with a note"}</button><span class="sep"></span><button type="button" class="btn small quiet" data-prompt="${ev.id}">What was it asked?</button></footer></article>`);
+      <footer><span>Working for <span class="timer" data-since="${ev.startedAt}">${since(ev.startedAt)}</span></span><span class="sep"></span><button type="button" class="btn small quiet" data-note-now="${ev.agent}">${ev.agent === "codexapp" ? "Add a note for its next turn" : "Interrupt with a note"}</button><button type="button" class="btn small quiet" data-prompt="${ev.id}">What was it asked?</button></footer></article>`);
   }
   const text = stripStatus(ev.text ?? "");
   const long = text.length > 2200 || text.split("\n").length > 34;
@@ -635,18 +987,18 @@ function turnEl(ev) {
     .map(([id]) => `<option value="${id}">${name(id)}</option>`)
     .join("");
   const usage = ev.usage ? `${tokens((ev.usage.input ?? 0) + (ev.usage.cached ?? 0))} in · ${tokens(ev.usage.output)} out${ev.cost ? ` · $${ev.cost.toFixed(2)} at API rates` : ""}` : "";
-  return el(`<article class="turn ${ev.state === "failed" ? "failed" : ""}" data-id="${ev.id}">${head}
+  return el(`<article class="turn ${ev.state === "failed" ? "failed" : ""}" data-k="${kind}" data-id="${ev.id}">${head}
     ${text.trim() ? `<div class="body md ${long && !expanded ? "clamped" : ""}">${renderMarkdown(text)}</div>` : ev.state === "deferred" ? "" : `<div class="hint">(no message)</div>`}
     ${long ? `<div><button type="button" class="btn small quiet" data-expand="${ev.id}">${expanded ? "Show less" : "Show the whole message"}</button></div>` : ""}
     ${ev.error ? `<div class="error">${esc(ev.error)}</div>` : ""}
     <footer>
-      ${ev.files?.length ? `<button type="button" class="btn small" data-diff="${ev.id}">${ev.files.length} file${ev.files.length > 1 ? "s" : ""} changed</button>` : ev.snapAfter ? `<span>no file changes</span>` : ""}
-      ${handoff ? `<span>Handoff: <a href="#" class="file mono" data-file="${esc(handoff)}">${esc(handoff)}</a></span>` : ""}
-      <span class="sep"></span>
+      ${ev.files?.length ? `<button type="button" class="linkbtn" data-diff="${ev.id}">${ev.files.length} file${ev.files.length > 1 ? "s" : ""} changed</button>` : ev.snapAfter ? `<span>No file changes</span>` : ""}
+      ${handoff ? `<span class="handoff">${ic("file")}<a href="#" class="file mono" data-file="${esc(handoff)}">${esc(handoff)}</a></span>` : ""}
       ${usage ? `<span title="Tokens for this turn">${usage}</span>` : ""}
+      <span class="sep"></span>
       <button type="button" class="btn small quiet" data-copy-turn="${ev.id}" title="Copy the whole message, for example to paste into the Codex app">Copy</button>
       ${ev.imported ? `<span title="Written before this room started; the room began by reviewing it">handed over</span>` : `<button type="button" class="btn small quiet" data-prompt="${ev.id}">Prompt</button>`}
-      ${others ? `<select class="btn small quiet" data-opinion="${ev.id}" aria-label="Ask another agent for a second opinion"><option value="">Second opinion…</option>${others}</select>` : ""}
+      ${others ? `<select data-opinion="${ev.id}" aria-label="Ask another agent for a second opinion"><option value="">Second opinion…</option>${others}</select>` : ""}
     </footer></article>`);
 }
 
@@ -657,47 +1009,49 @@ function feedItems(activity, n) {
 }
 
 function questionEl(ev) {
-  const who = ev.from ? `${esc(name(ev.from))} asks` : "Your call";
+  const asker = ev.from ? `${esc(name(ev.from))} asks` : "Your call";
+  const who = `<div class="who">${avatar(ev.from || "toryo", 26)}<span>${asker}${ev.open ? " · the room waits for your answer" : ""}</span></div>`;
   if (!ev.open)
-    return el(`<div class="decision closed" data-id="${ev.id}"><div class="q">${who}: ${esc(ev.question)}</div><div class="answer">You answered: ${esc(ev.answer ?? "")}</div></div>`);
+    return el(`<div class="decision closed" data-id="${ev.id}"><p class="q">${esc(ev.question)}</p><p class="answer">${ic("check")}<span>You answered: ${esc(ev.answer ?? "")}</span></p></div>`);
+  const rec = (text) => (text ? `<div class="rec"><span class="eyebrow">Recommended</span><span>${esc(text)}</span></div>` : "");
   if (ev.kind === "plan-checkpoint") {
     const r = room();
     const participants = r?.plan?.participants ?? r?.crew.members ?? [];
     const qs = ev.questions ?? [];
     return el(`<form class="decision" data-id="${ev.id}" data-checkpoint>
-      <div class="q">Your call: settle the open questions, then choose who writes the plan.</div>
+      ${who}<p class="q">Settle the open questions, then choose who writes the plan.</p>
       <div class="qform">
         ${qs.length ? qs.map((q, i) => `<div class="qrow"><label for="cq${i}">${esc(q.question)} <span class="from">(${esc(name(q.from))})</span></label><input type="text" id="cq${i}" data-q="${esc(q.question)}" value="${esc(q.recommendation)}" placeholder="Your answer"></div>`).join("") : `<div class="hint">No explicit questions were raised. Add anything you've decided below.</div>`}
         <div class="qrow"><label for="cqExtra">Anything else you've decided</label><textarea id="cqExtra" rows="2" placeholder="Constraints, scope cuts, priorities…"></textarea></div>
         <div class="pair"><div class="qrow"><label for="cqWho">Who writes the plan</label><select id="cqWho">${participants.map((p) => `<option value="${p}" ${p === r?.crew.builder ? "selected" : ""}>${name(p)}</option>`).join("")}</select></div>
         <div class="qrow"><label for="cqPath">Plan file</label><input type="text" id="cqPath" value="${esc(r?.plan?.planPath ?? "")}"></div></div>
       </div>
-      <div class="actions"><button class="btn primary" type="submit">Write the plan</button>${qs.length && qs.every((q) => q.recommendation?.trim()) ? `<button class="btn" type="button" data-accept-checkpoint title="Every question answered with its recommendation, as shown">Accept all recommendations</button>` : ""}<button class="btn" type="button" data-focus-everyone>Discuss more first</button></div></form>`);
+      <div class="actions"><button class="btn you" type="submit">${ic("check")}Write the plan</button>${qs.length && qs.every((q) => q.recommendation?.trim()) ? `<button class="btn" type="button" data-accept-checkpoint title="Every question answered with its recommendation, as shown">Accept all recommendations</button>` : ""}<button class="btn quiet" type="button" data-focus-everyone>Discuss more first</button></div></form>`);
   }
   if (ev.kind === "plan-ready")
-    return el(`<div class="decision" data-id="${ev.id}"><div class="q">${esc(ev.question)}</div>
-      <div class="actions"><button class="btn primary" type="button" data-start-build="${esc(ev.planPath ?? "")}">Start building with this plan</button>
+    return el(`<div class="decision" data-id="${ev.id}">${who}<p class="q">${esc(ev.question)}</p>
+      <div class="actions"><button class="btn you" type="button" data-start-build="${esc(ev.planPath ?? "")}">${ic("build")}Start building with this plan</button>
       <button class="btn" type="button" data-file="${esc(ev.planPath ?? "")}">Read the plan</button>
-      <button class="btn" type="button" data-answer-focus="${esc(ev.from ?? "")}">Ask for changes</button></div></div>`);
+      <button class="btn quiet" type="button" data-answer-focus="${esc(ev.from ?? "")}">Ask for changes</button></div></div>`);
   if (ev.kind === "app-lost")
-    return el(`<div class="decision" data-id="${ev.id}"><div class="q">${esc(ev.question)}</div>
-      <div class="actions"><button class="btn primary" type="button" data-accept>Follow it again</button><button class="btn" type="button" data-app-release>Stop waiting for it</button></div></div>`);
+    return el(`<div class="decision" data-id="${ev.id}">${who}<p class="q">${esc(ev.question)}</p>
+      <div class="actions"><button class="btn you" type="button" data-accept>Follow it again</button><button class="btn" type="button" data-app-release>Stop waiting for it</button></div></div>`);
   if (ev.kind === "error")
-    return el(`<div class="decision" data-id="${ev.id}"><div class="q">${esc(ev.question)}</div>
-      <div class="actions"><button class="btn primary" type="button" data-accept>Retry</button><button class="btn" type="button" data-answer-focus="${esc(ev.from ?? "")}">Retry with a note</button></div></div>`);
+    return el(`<div class="decision" data-id="${ev.id}">${who}<p class="q">${esc(ev.question)}</p>
+      <div class="actions"><button class="btn you" type="button" data-accept>Retry</button><button class="btn" type="button" data-answer-focus="${esc(ev.from ?? "")}">Retry with a note</button></div></div>`);
   const chat = ev.kind === "chat-owner";
-  return el(`<div class="decision" data-id="${ev.id}"><div class="q">${who}: ${esc(ev.question)}</div>
-    ${ev.recommendation ? `<div class="rec"><b>Recommended:</b> ${esc(ev.recommendation)}</div>` : ""}
-    <div class="actions">${ev.recommendation ? `<button class="btn primary" type="button" ${chat ? "data-chat-accept" : "data-accept"}>Use the recommendation</button>` : ""}
+  return el(`<div class="decision" data-id="${ev.id}">${who}<p class="q">${esc(ev.question)}</p>${rec(ev.recommendation)}
+    <div class="actions">${ev.recommendation ? `<button class="btn you" type="button" ${chat ? "data-chat-accept" : "data-accept"}>${ic("check")}Use the recommendation</button>` : ""}
     <button class="btn" type="button" data-answer-focus="${esc(ev.from ?? "")}">Write my own answer</button></div></div>`);
 }
 
 function gateEl(ev) {
-  return el(`<div class="gate" data-id="${ev.id}"><p class="eyebrow">Checks before review</p>${ev.results
-    .map(
-      (r) => `<div class="row"><span class="${r.ok ? "ok" : "bad"}">${r.ok ? "✓" : "✗"}</span><span>${esc(r.name)} <span class="hint">(${r.seconds}s)</span></span></div>
-      ${r.ok ? "" : `<details><summary class="hint">Output</summary><pre class="mono" style="white-space:pre-wrap">${esc(r.output)}</pre></details>`}`,
-    )
+  const ok = ev.results.every((x) => x.ok);
+  return el(`<div class="gate" data-id="${ev.id}"><div class="rowline"><span class="ttl"><span class="tile" aria-hidden="true">${ic("checks")}</span>${ok ? "Checks passed" : "Checks failed"}</span>${ev.results
+    .map((x) => `<span class="chk" data-ok="${x.ok}">${ic(x.ok ? "check" : "x")}${esc(x.name)} <span class="muted">${x.seconds}s</span></span>`)
+    .join("")}</div>${ev.results
+    .filter((x) => !x.ok)
+    .map((x) => `<details><summary class="hint">${esc(x.name)}: what it printed</summary><pre>${esc(x.output)}</pre></details>`)
     .join("")}</div>`);
 }
 
@@ -741,7 +1095,7 @@ function renderCrew() {
   const cfg = S.state.config;
   const proj = project();
   const liveBy = new Map([...S.live.values()].map((l) => [l.agent, l]));
-  let html = `<div><p class="eyebrow">Crew</p><h2>Who is doing what</h2></div>`;
+  let html = "";
   for (const a of r.crew.members) {
     const role = r.mode === "build" ? (a === r.crew.builder ? "builder" : a === r.crew.reviewer ? "reviewer" : "advisor") : r.mode === "plan" ? (r.plan?.synthesizer === a ? "plan author" : "planner") : "";
     const live = liveBy.get(a);
@@ -760,7 +1114,7 @@ function renderCrew() {
     const session = r.sessions?.[a];
     const resume = session ? (a === "codex" ? `codex resume ${session}` : a === "claude" ? `claude --resume ${session}` : a === "cursor" ? `agent --resume ${session}` : a === "codexapp" ? "" : `grok -r ${session}`) : "";
     html += `<section class="agent" data-active="${Boolean(live)}">
-      <div class="agent-head"><span class="avatar" data-agent="${a}">${INITIALS[a]}</span><span class="name">${name(a)}</span>${role ? `<span class="role" data-role="${role}">${role}</span>` : ""}<span class="state">${state}</span></div>
+      <div class="agent-head">${avatar(a, 34)}<span class="name">${name(a)}</span>${role ? `<span class="role" data-role="${role}">${role[0].toUpperCase() + role.slice(1)}</span>` : ""}<span class="state">${state}</span></div>
       ${a === "codexapp" ? `<div class="model"><span>Thread <span data-thread-name="${esc(session ?? "")}">${esc(threadLabel(S.appThreadList ?? [], session))}</span> · the app's own model and permissions · experimental</span></div>` : ""}
       <div class="model" ${a === "codexapp" ? "hidden" : ""}><span>${esc(ac.model || "default model")}${ac.effort ? ` · ${esc(ac.effort)} effort` : ""}</span>${a === "codex" ? `<span>${esc(ac.permissions ?? "sandboxed")}</span>` : a === "claude" ? `<span>${esc(ac.permissionMode ?? "auto")} permissions</span>` : ""}${det && !det.installed ? `<span style="color:var(--bad)">${missing(det)}</span>` : det?.tested === false ? `<span>adapter untested</span>` : ""}</div>
       ${live ? `<ul class="feed" data-feed="${live.turnId}" data-n="8">${feedItems(live.activity, 8)}</ul>` : ""}
@@ -811,8 +1165,8 @@ function appThreadActions(r, thread, busy) {
 
 function agentsOverview() {
   if (!S.state) return "";
-  return `<div><p class="eyebrow">Agents</p><h2>On this machine</h2></div>${Object.entries(S.state.agents ?? {})
-    .map(([id, a]) => `<section class="agent"><div class="agent-head"><span class="avatar" data-agent="${id}">${INITIALS[id]}</span><span class="name">${name(id)}</span><span class="state">${a.installed ? esc(a.version ?? "installed") : missing(a)}</span></div>${a.installed ? limitMeters(S.state.limits?.[id], id) || (id === "claude" ? `<div class="hint">Claude's usage shows once it has worked in a room.</div>` : "") : `<div class="hint">${esc(a.hint ?? "")}</div>`}</section>`)
+  return `<p class="eyebrow">Agents on this machine</p>${Object.entries(S.state.agents ?? {})
+    .map(([id, a]) => `<section class="agent"><div class="agent-head">${avatar(id, 34)}<span class="name">${name(id)}</span><span class="state">${a.installed ? esc(a.version ?? "installed") : missing(a)}</span></div>${a.installed ? limitMeters(S.state.limits?.[id], id) || (id === "claude" ? `<div class="hint">Claude's usage shows once it has worked in a room.</div>` : "") : `<div class="hint">${esc(a.hint ?? "")}</div>`}</section>`)
     .join("")}`;
 }
 
@@ -1176,9 +1530,9 @@ function newRoomSheet(mode = "chat") {
     <div class="field"><label for="nrProject">Project</label><select id="nrProject">${projects.map((p) => `<option value="${p.id}" ${p.id === current ? "selected" : ""}>${esc(p.name)} · ${esc(p.path)}</option>`).join("")}<option value="__add">Add a project…</option></select></div>
     <div class="field" id="nrAdd" hidden><label for="nrPath">Project folder (absolute path)</label><input type="text" id="nrPath" placeholder="/home/you/project"></div>
     <div class="field"><span class="lbl">What kind of room</span><div class="modecards">
-      <button type="button" class="modecard" data-mode="chat" aria-pressed="${mode === "chat"}"><b>Chat</b><span>Ask one agent or several. Let them discuss.</span></button>
-      <button type="button" class="modecard" data-mode="plan" aria-pressed="${mode === "plan"}"><b>Plan</b><span>Independent proposals, critiques, your call, a written plan.</span></button>
-      <button type="button" class="modecard" data-mode="build" aria-pressed="${mode === "build"}"><b>Build</b><span>One builds, the other reviews, slice by slice.</span></button>
+      <button type="button" class="modecard" data-mode="chat" aria-pressed="${mode === "chat"}">${ic("chat")}<b>Chat</b><span>Ask one agent or several. Let them discuss.</span></button>
+      <button type="button" class="modecard" data-mode="plan" aria-pressed="${mode === "plan"}">${ic("plan")}<b>Plan</b><span>Independent proposals, critiques, your call, a written plan.</span></button>
+      <button type="button" class="modecard" data-mode="build" aria-pressed="${mode === "build"}">${ic("build")}<b>Build</b><span>One builds, the other reviews, slice by slice.</span></button>
     </div></div>
     <div class="field"><span class="lbl">Crew</span>${crewChecks(members, "nrCrew")}</div>
     <div class="field" id="nrAppBox" hidden><label for="nrThread">Codex app thread for this room</label><select id="nrThread"><option value="">Loading your app threads…</option></select>
@@ -1669,6 +2023,7 @@ function renderWelcome() {
     }
   });
   $("#crewPane").innerHTML = agentsOverview();
+  setSideTab("crew");
 }
 
 function renderNoRooms() {
@@ -1676,17 +2031,52 @@ function renderNoRooms() {
   $("#log").innerHTML = `<div class="empty"><p class="eyebrow">${esc(S.state.config.projects.map((p) => p.name).join(", "))}</p><h2>Start a room</h2>
     <p>A room is one conversation with your crew. It can switch between chatting, planning and building, and everyone keeps their memory of the room.</p>
     <div class="modecards">
-      <button type="button" class="modecard" data-new="chat"><b>Chat</b><span>Ask one agent or several, and let them discuss.</span></button>
-      <button type="button" class="modecard" data-new="plan"><b>Plan</b><span>Independent proposals, critiques, your call, a written plan.</span></button>
-      <button type="button" class="modecard" data-new="build"><b>Build</b><span>One builds, the other reviews, slice by slice.</span></button></div></div>`;
+      <button type="button" class="modecard" data-new="chat">${ic("chat")}<b>Chat</b><span>Ask one agent or several, and let them discuss.</span></button>
+      <button type="button" class="modecard" data-new="plan">${ic("plan")}<b>Plan</b><span>Independent proposals, critiques, your call, a written plan.</span></button>
+      <button type="button" class="modecard" data-new="build">${ic("build")}<b>Build</b><span>One builds, the other reviews, slice by slice.</span></button></div></div>`;
   $("#crewPane").innerHTML = agentsOverview();
+  setSideTab("crew");
 }
 
 // ------------------------------------------------------------------ wiring
 
-function setTab(tab) {
-  $("#main").dataset.tab = tab;
-  for (const b of $$(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
+/**
+ * The side panel's tab: Plan, Crew or Ledger. A panel chosen as the room's tab on a narrower screen follows too,
+ * so after widening the window the panel shown is always the one you chose last.
+ */
+function setSideTab(tab) {
+  S.sideTab = tab;
+  if (S.roomTab !== "relay") S.roomTab = tab;
+  applyTabs();
+}
+/** The room's tab on narrower screens: the relay, or one of the side panels in its place. */
+function setRoomTab(tab) {
+  S.roomTab = tab;
+  if (tab !== "relay") S.sideTab = tab;
+  applyTabs();
+}
+/** On a phone: the rooms list, or the room. */
+function setPane(pane) {
+  S.pane = pane;
+  applyTabs();
+}
+function applyTabs() {
+  $("#main").dataset.tab = S.roomTab;
+  $("#side").dataset.panel = S.roomTab !== "relay" ? S.roomTab : S.sideTab;
+  $("#app").dataset.view = S.pane;
+  for (const b of $$("[data-sidetab]")) b.setAttribute("aria-selected", String(b.dataset.sidetab === S.sideTab));
+  for (const b of $$("[data-roomtab]")) b.setAttribute("aria-selected", String(b.dataset.roomtab === S.roomTab));
+  for (const b of $$("#tabbar [data-view]")) b.toggleAttribute("aria-current", b.dataset.view === S.pane), b.dataset.view === S.pane && b.setAttribute("aria-current", "page");
+}
+
+/** Light, dark, or as the system says: your choice, kept in this browser. */
+function applyTheme() {
+  const theme = localStorage.getItem("toryo.theme") ?? "system";
+  if (theme === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", theme);
+  $("#themeBtn").innerHTML = ic(theme === "dark" ? "moon" : theme === "light" ? "sun" : "system");
+  $("#themeBtn").title = `Theme: ${theme === "system" ? "as the system" : theme}. Click to change.`;
+  $("#themeBtn").setAttribute("aria-label", $("#themeBtn").title);
 }
 
 document.addEventListener("click", async (e) => {
@@ -1695,7 +2085,25 @@ document.addEventListener("click", async (e) => {
   const hit = (sel) => t.closest(sel);
   try {
     if (hit("[data-close]") || t.id === "sheet") return closeSheet();
-    if (hit(".roomlink")) return loadRoom(hit(".roomlink").dataset.room);
+    if (hit(".roomlink")) {
+      setPane("room");
+      return loadRoom(hit(".roomlink").dataset.room);
+    }
+    if (hit("[data-sidetab]")) return setSideTab(hit("[data-sidetab]").dataset.sidetab);
+    if (hit("[data-roomtab]")) return setRoomTab(hit("[data-roomtab]").dataset.roomtab);
+    if (hit("#tabbar [data-view]")) return setPane(hit("#tabbar [data-view]").dataset.view);
+    if (hit("[data-next-ask]")) {
+      // The oldest question waiting for you, in any room: open its room and show it.
+      const asks = (S.state?.rooms ?? []).flatMap((x) => (x.questions ?? []).map((q) => ({ room: x.id, id: q.id, at: q.at ?? "" })));
+      const next = asks.sort((a, b) => a.at.localeCompare(b.at))[0];
+      if (!next) return;
+      setPane("room");
+      setRoomTab("relay");
+      S.focusOn = next.id;
+      if (next.room === S.roomId) renderTimeline();
+      else await loadRoom(next.room);
+      return;
+    }
     if (hit("[data-new]")) return newRoomSheet(hit("[data-new]").dataset.new);
     if (hit("a.file, button[data-file]")) {
       e.preventDefault();
@@ -1724,8 +2132,11 @@ document.addEventListener("click", async (e) => {
     if (hit("[data-room-settings]")) return roomSheet();
     if (hit("[data-jump]")) {
       const target = $(`[data-id="${CSS.escape(hit("[data-jump]").dataset.jump)}"]`);
+      // In a folded round: open it first.
+      const fold = target?.closest("details.rounds");
+      if (fold) fold.open = true;
       target?.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
-      if (matchMedia("(max-width: 920px)").matches) setTab("relay");
+      if (matchMedia("(max-width: 1180px)").matches) setRoomTab("relay");
       return;
     }
     if (hit("[data-dismiss]")) {
@@ -1761,6 +2172,23 @@ document.addEventListener("click", async (e) => {
     if (hit("[data-action=swap]")) return api("POST", `/api/rooms/${r.id}/control`, { action: "swap" }).catch(fail);
     if (hit("[data-fresh]")) return api("POST", `/api/rooms/${r.id}/control`, { action: "fresh", agent: hit("[data-fresh]").dataset.fresh }).catch(fail);
     if (hit("[data-note-edit]")) return editNote(hit("[data-note-edit]").closest("[data-id]"));
+    if (hit("[data-unsaved-dismiss]") || hit("[data-unsaved-reuse]")) {
+      const id = hit("[data-unsaved]").dataset.unsaved;
+      const lost = noteChanges(r.id)[id];
+      setNoteChange(r.id, id, null);
+      hit("[data-unsaved]").remove();
+      if (hit("[data-unsaved-reuse]") && lost) {
+        // Into the composer, to the same agents, as a note of its own (it answers nothing).
+        const box = $("#msg");
+        box.value = box.value.trim() ? `${box.value.trimEnd()}\n\n${lost.text}` : lost.text;
+        setRoute(lost.to.length === 1 && isMember(lost.to[0]) ? lost.to[0] : lost.to.length > 1 ? "everyone" : "auto");
+        keepAnswer(r.id, { roomId: r.id, asker: null, byAgent: {}, chosen: false, route: S.route });
+        box.dispatchEvent(new Event("input"));
+        renderComposer();
+        box.focus();
+      }
+      return;
+    }
     if (hit("[data-note-cancel]")) {
       const id = hit("[data-note-cancel]").closest("[data-id]").dataset.id;
       return api("DELETE", `/api/rooms/${r.id}/notes/${id}`).then(() => refreshRoomSoon()).catch(fail);
@@ -1873,16 +2301,17 @@ $("#pauseBtn").addEventListener("click", () => {
 });
 $("#stopBtn").addEventListener("click", () => {
   const b = $("#stopBtn");
+  const label = (text) => (b.innerHTML = `${ic("stop")}<span class="lbl">${text}</span>`);
   if (b.dataset.armed) {
     delete b.dataset.armed;
-    b.textContent = "Stop";
+    label("Stop");
     return api("POST", `/api/rooms/${room().id}/control`, { action: "stop" }).catch(fail);
   }
   b.dataset.armed = "1";
-  b.textContent = "Stop everything?";
+  label("Stop everything?");
   setTimeout(() => {
     delete b.dataset.armed;
-    b.textContent = "Stop";
+    label("Stop");
   }, 4000);
 });
 $("#bellBtn").addEventListener("click", async () => {
@@ -1890,7 +2319,33 @@ $("#bellBtn").addEventListener("click", async () => {
   const p = await Notification.requestPermission();
   toast(p === "granted" ? "Browser notifications on" : "Browser notifications off", p === "granted" ? "You'll be told when someone needs you while this tab is in the background." : "Allow them in the browser's site settings.");
 });
-for (const b of $$(".tabs button")) b.addEventListener("click", () => setTab(b.dataset.tab));
+$("#themeBtn").addEventListener("click", () => {
+  const order = ["system", "light", "dark"];
+  const now = localStorage.getItem("toryo.theme") ?? "system";
+  localStorage.setItem("toryo.theme", order[(order.indexOf(now) + 1) % order.length]);
+  applyTheme();
+});
+// A folded round you open stays open when the timeline is drawn again.
+document.addEventListener("toggle", (e) => {
+  const key = e.target.dataset?.fold;
+  if (key) e.target.open ? S.openFolds.add(key) : S.openFolds.delete(key);
+}, true);
+// Icons and labels that never change.
+for (const b of $$("#modes button")) {
+  b.innerHTML = `${ic(b.dataset.mode)}<span class="lbl">${b.dataset.mode[0].toUpperCase() + b.dataset.mode.slice(1)}</span>`;
+  b.setAttribute("aria-label", b.dataset.mode[0].toUpperCase() + b.dataset.mode.slice(1));
+}
+$("#stopBtn").setAttribute("aria-label", "Stop");
+$("#roomBtn").setAttribute("aria-label", "Room settings, rename or delete");
+$("#bellBtn").innerHTML = ic("bell");
+$("#bellBtn").setAttribute("aria-label", "Browser notifications");
+$("#settingsBtn").innerHTML = ic("sliders");
+$("#roomBtn").innerHTML = `${ic("dots")}<span class="lbl">Room</span>`;
+$("#newRoomBtn").innerHTML = `${ic("plus")}New room`;
+$("#tabbar [data-view=rooms]").innerHTML = `${ic("rooms")}<span>Rooms</span>`;
+$("#tabbar [data-view=room]").innerHTML = `${ic("chat")}<span>Room</span>`;
+applyTheme();
+applyTabs();
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("#sheet").hidden) closeSheet();
 });

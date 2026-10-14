@@ -1,0 +1,254 @@
+#!/usr/bin/env node
+/**
+ * Screenshots of the page at the widths and themes the design covers, plus a check that nothing scrolls sideways
+ * on a phone. Like the browser check, it starts its own desk on a free port with a temporary data folder and the
+ * fake agents, and needs Playwright, which Toryo doesn't depend on:
+ *
+ *   PLAYWRIGHT_CORE=/path/to/node_modules/playwright-core node test/ui-shots.mjs [folder]
+ *
+ * The pictures go to the folder given (a temporary one otherwise): a build in its second slice, with the first
+ * slice's earlier round folded; a question asked in chat; and a planning round waiting for your call.
+ */
+import { spawn, execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import assert from "node:assert/strict";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const FAKE = join(root, "test", "fake-agent.mjs");
+const pw = process.env.PLAYWRIGHT_CORE ?? (() => {
+  try {
+    return dirname(createRequire(join(root, "package.json")).resolve("playwright-core/package.json"));
+  } catch {
+    return null;
+  }
+})();
+if (!pw || !existsSync(pw)) {
+  console.log("Skipped: set PLAYWRIGHT_CORE to a playwright-core folder.");
+  process.exit(0);
+}
+const { chromium } = createRequire(join(pw, "package.json"))("playwright-core");
+const out = process.argv[2] ?? mkdtempSync(join(tmpdir(), "toryo-shots-"));
+mkdirSync(out, { recursive: true });
+
+const base = mkdtempSync(join(tmpdir(), "toryo-shots-desk-"));
+const home = join(base, "home");
+const repo = join(base, "repo");
+let desk;
+try {
+  execFileSync("git", ["init", "-q", repo]);
+  mkdirSync(join(repo, "docs", "plans"), { recursive: true });
+  writeFileSync(join(repo, "README.md"), "# demo\n");
+  writeFileSync(join(repo, "docs", "plans", "demo.md"), "# Demo\n\n### Slice 1: Schema\n\n### Slice 2: The API\n\n### Slice 3: Docs\n");
+  const rules = [
+    { agent: "codex", match: "continue straight into the next unfinished slice", hang: true },
+    { agent: "codex", match: "reviewed your last round", reply: "Fixed: the index now covers both columns, and a test checks it.\nTORYO: REVIEW Slice 1: Schema | docs/reviews/slice-1.md" },
+    { agent: "codex", match: "Your role: builder", reply: "Built the schema: three tables and their migrations, with tests.\n\n- `users`, `projects` and `runs`\n- One migration per table\n\nTORYO: REVIEW Slice 1: Schema | docs/reviews/slice-1.md" },
+    { agent: "claude", match: "round 2 on this slice", reply: "The index is right now. Approved.\nTORYO: APPROVED" },
+    { agent: "claude", match: "Your role: reviewer", reply: "One finding: the index on `runs` misses the project column, so the history page scans the table.\nTORYO: CHANGES" },
+    { agent: "codex", match: "Pick a database", reply: "Which one should the history use? I recommend SQLite: one file, nothing to run.\nTORYO: OWNER SQLite or Postgres?" },
+    { agent: "codex", match: "step 1 of 4", reply: "Codex proposal: three slices.\n- Q: Keep the old API working? (Recommended: yes, for one release)\nTORYO: PROPOSAL" },
+    { agent: "claude", match: "step 1 of 4", reply: "Claude proposal: two slices.\n- Q: Ship a command line too? (Recommended: no, later)\nTORYO: PROPOSAL" },
+    { match: "step 2 of 4", reply: "Critique: the other proposal covers migrations better.\nTORYO: CRITIQUE" },
+    { reply: "Noted.\nTORYO: REPLY" },
+  ];
+  writeFileSync(join(base, "script.json"), JSON.stringify({ rules, log: join(base, "calls.jsonl") }));
+  mkdirSync(home, { recursive: true });
+  const node = process.execPath;
+  writeFileSync(
+    join(home, "config.json"),
+    JSON.stringify({
+      version: 1,
+      notify: { windows: false },
+      agents: { codex: { command: [node, FAKE, "codex"] }, claude: { command: [node, FAKE, "claude"] }, codexapp: { exe: join(base, "none") } },
+      projects: [{ id: "demo", name: "Demo", path: repo, rules: "", decisions: "", agents: {}, gates: [{ name: "Tests", command: "true" }] }],
+    }),
+  );
+  const now = Date.now();
+  const w = (type, label, minutes, used, inMin) => ({ type, label, minutes, used, resetsAt: new Date(now + inMin * 60_000).toISOString(), sourceAt: new Date(now - 60_000).toISOString(), receivedAt: new Date(now - 60_000).toISOString(), source: "log" });
+  writeFileSync(join(home, "limits.json"), JSON.stringify({ version: 2, agents: { codex: { status: "allowed", windows: { five_hour: w("five_hour", "5-hour", 300, 46, 112), weekly: w("weekly", "weekly", 10080, 84, 3900) } } } }));
+
+  const port = await new Promise((resolve) => {
+    const s = createServer().listen(0, "127.0.0.1", () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+  });
+  desk = spawn(node, [join(root, "bin", "toryo.mjs"), "--port", String(port)], {
+    env: { ...process.env, TORYO_HOME: home, FAKE_SCRIPT: join(base, "script.json"), CODEX_HOME: join(base, "codex") },
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  await new Promise((resolve) => desk.stdout.on("data", (d) => /Toryo is running/.test(d) && resolve()));
+  const url = `http://localhost:${port}/`;
+  const post = async (path, body) => (await fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify(body) })).json();
+  const view = async (id) => (await fetch(`${url}api/rooms/${id}`)).json();
+  const until = async (fn, what) => {
+    for (let i = 0; i < 300; i++) {
+      if (await fn()) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`Timed out waiting for ${what}`);
+  };
+
+  const build = await post("api/rooms", { projectId: "demo", mode: "build", task: "Build the history.", planPath: "docs/plans/demo.md", title: "History build", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  const chat = await post("api/rooms", { projectId: "demo", mode: "chat", members: ["codex"], text: "Pick a database for the history.", to: "codex", title: "Database chat" });
+  const plan = await post("api/rooms", { projectId: "demo", mode: "plan", topic: "The public API", members: ["codex", "claude"], title: "API plan" });
+  await until(async () => (await view(build.id)).live.length === 1 && (await view(build.id)).room.build?.approved?.length === 1, "the build's second slice");
+  await until(async () => (await view(chat.id)).questions.length === 1, "the chat question");
+  // A note with code and a quotation, which the bubble must keep readable.
+  await post(`api/rooms/${chat.id}/messages`, { text: "Use `sqlite3` for now:\n\n```\nCREATE TABLE runs (id INTEGER);\n```\n\n> Keep it in one file.", to: "codex", answering: false });
+  await until(async () => (await view(chat.id)).live.length === 0 && (await view(chat.id)).events.some((e) => e.type === "turn" && /Noted/.test(e.text ?? "")), "the reply to the note");
+  // The planning room is now the latest active, though its question is newer than the chat's.
+  await post(`api/rooms/${plan.id}/messages`, { text: "Thinking it over.", to: "everyone", answering: false });
+  await until(async () => (await view(plan.id)).live.length === 0 && (await view(plan.id)).events.filter((e) => e.type === "turn" && /Noted/.test(e.text ?? "")).length === 2, "the planners' replies");
+  await until(async () => (await view(plan.id)).questions.some((q) => q.kind === "plan-checkpoint"), "the planning checkpoint");
+
+  const browser = await chromium.launch();
+  const errors = [];
+  const shoot = async ({ width, height = 900, theme, motion = "no-preference", room, pane = "room", tab, sheet, file }) => {
+    const ctx = await browser.newContext({ viewport: { width, height }, colorScheme: theme, reducedMotion: motion });
+    const page = await ctx.newPage();
+    page.on("pageerror", (e) => errors.push(String(e)));
+    page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    await page.goto(`${url}#/r/${room}`);
+    await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent);
+    await page.evaluate(() => document.fonts.ready);
+    if (pane === "rooms") await page.click("#tabbar [data-view=rooms]");
+    if (tab) await page.click(width > 1180 ? `[data-sidetab=${tab}]` : `[data-roomtab=${tab}]`);
+    if (sheet) {
+      if (width <= 760 && sheet === "#newRoomBtn") await page.click("#tabbar [data-view=rooms]");
+      await page.click(sheet);
+      await page.waitForSelector("#sheet:not([hidden])");
+    }
+    await page.waitForTimeout(400);
+    // The composer stays in view below the timeline, however long it is.
+    if (pane === "room" && !sheet && !(tab && width <= 1180)) {
+      const box = await page.evaluate(() => { const r = document.querySelector("#composer").getBoundingClientRect(); return { top: r.top, bottom: r.bottom, h: innerHeight }; });
+      assert.ok(box.bottom <= box.h + 1 && box.bottom - box.top > 40, `${file}: the composer is in view (${JSON.stringify(box)})`);
+    }
+    // A message's text flows across its card, in one column.
+    const squeezed = await page.evaluate(() => [...document.querySelectorAll(".turn .body")].filter((b) => b.checkVisibility() && (getComputedStyle(b).display === "grid" || b.clientWidth < b.closest(".turn").clientWidth * 0.8)).length);
+    assert.equal(squeezed, 0, `${file}: message text squeezed`);
+    // Every text that's on the screen, as drawn (backgrounds and opacity composited), passes WCAG AA.
+    assert.deepEqual(await page.evaluate(contrastProblems, Boolean(sheet)), [], `${file}: contrast`);
+    // Nothing scrolls sideways: the page, and every scrolling area in it.
+    const wide = await page.evaluate(() => {
+      const over = [document.documentElement, ...document.querySelectorAll(".log, .side, .rail, .sheet")].filter((n) => n.scrollWidth > n.clientWidth + 1 && getComputedStyle(n).overflowX !== "hidden");
+      return over.map((n) => `${n.className || n.tagName}: ${n.scrollWidth} > ${n.clientWidth}`);
+    });
+    assert.deepEqual(wide, [], `${file}: sideways scrolling`);
+    await page.screenshot({ path: join(out, `${file}.png`) });
+    await ctx.close();
+  };
+  // The top bar's count opens the room with the oldest question (the chat's; the planning room's came later).
+  {
+    const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
+    await page.goto(`${url}#/r/${build.id}`);
+    await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "History build");
+    await page.click("[data-next-ask]");
+    await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Database chat");
+    // It shows the question, and still does once the room has settled (with messages below it).
+    const question = (await view(chat.id)).questions[0].id;
+    await page.waitForTimeout(1000);
+    const seen = await page.evaluate((id) => {
+      const card = document.querySelector(`#log [data-id="${id}"]`).getBoundingClientRect();
+      const log = document.querySelector("#log").getBoundingClientRect();
+      return card.top >= log.top - 1 && card.bottom <= log.bottom + 1;
+    }, question);
+    assert.ok(seen, "the oldest question is in view");
+    await page.close();
+  }
+  for (const theme of ["light", "dark"]) {
+    await shoot({ width: 1440, theme, room: build.id, file: `build-1440-${theme}` });
+    await shoot({ width: 1440, theme, room: build.id, tab: "crew", file: `crew-1440-${theme}` });
+    await shoot({ width: 1440, theme, room: chat.id, file: `chat-1440-${theme}` });
+    await shoot({ width: 1440, theme, room: plan.id, file: `plan-1440-${theme}` });
+    await shoot({ width: 1024, theme, room: build.id, file: `build-1024-${theme}` });
+    await shoot({ width: 1024, theme, room: build.id, tab: "plan", file: `plan-tab-1024-${theme}` });
+    await shoot({ width: 390, height: 844, theme, room: build.id, file: `build-390-${theme}` });
+    await shoot({ width: 390, height: 844, theme, room: chat.id, file: `chat-390-${theme}` });
+    await shoot({ width: 390, height: 844, theme, room: build.id, pane: "rooms", file: `rooms-390-${theme}` });
+  }
+  await shoot({ width: 1440, theme: "light", motion: "reduce", room: build.id, file: "build-1440-reduced-motion" });
+  // Sheets: a new room, and the settings.
+  for (const [width, theme] of [[1440, "light"], [1440, "dark"], [390, "light"], [320, "dark"]]) {
+    await shoot({ width, height: width > 400 ? 900 : 700, theme, room: build.id, sheet: "#newRoomBtn", file: `sheet-new-room-${width}-${theme}` });
+    await shoot({ width, height: width > 400 ? 900 : 700, theme, room: build.id, sheet: "#settingsBtn", file: `sheet-settings-${width}-${theme}` });
+  }
+  for (const width of [320, 390]) {
+    await shoot({ width, height: 700, theme: "light", room: build.id, tab: "crew", file: `crew-${width}` });
+    await shoot({ width, height: 700, theme: "light", room: plan.id, file: `plan-${width}` });
+  }
+  await browser.close();
+  assert.deepEqual(errors, []);
+  console.log(`Screenshots in ${out}`);
+} finally {
+  desk?.kill("SIGTERM");
+  await new Promise((r) => (desk ? desk.once("exit", r) : r()));
+  rmSync(base, { recursive: true, force: true });
+}
+
+/** In the page: every visible text whose contrast with what's behind it, as drawn, is below WCAG AA. */
+function contrastProblems(inSheet) {
+  const parse = (c) => {
+    let m = c.match(/^rgba?\(([^)]+)\)/);
+    if (m) {
+      const p = m[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+      return [p[0], p[1], p[2], p[3] ?? 1];
+    }
+    m = c.match(/^color\(srgb ([^)]+)\)/);
+    if (m) {
+      const p = m[1].split(/[\s/]+/).filter(Boolean).map(Number);
+      return [p[0] * 255, p[1] * 255, p[2] * 255, p[3] ?? 1];
+    }
+    return null;
+  };
+  const over = (top, under) => [0, 1, 2].map((i) => top[i] * top[3] + under[i] * (1 - top[3])).concat(1);
+  const behind = (el) => {
+    const layers = [];
+    for (let n = el; n; n = n.parentElement) {
+      const c = parse(getComputedStyle(n).backgroundColor);
+      if (c && c[3] > 0) {
+        layers.push(c);
+        if (c[3] >= 1) break;
+      }
+    }
+    return layers.reverse().reduce((bg, layer) => over(layer, bg), [255, 255, 255, 1]);
+  };
+  const lum = (c) => {
+    const f = (v) => ((v /= 255) <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+  };
+  const ratio = (a, b) => {
+    const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+    return (x + 0.05) / (y + 0.05);
+  };
+  const problems = [];
+  const seen = new Set();
+  const walk = document.createTreeWalker(inSheet ? document.querySelector("#sheet") : document.body, NodeFilter.SHOW_TEXT);
+  while (walk.nextNode()) {
+    const text = walk.currentNode;
+    const el = text.parentElement;
+    if (!text.textContent.trim() || seen.has(el)) continue;
+    seen.add(el);
+    if (!el.checkVisibility({ opacityProperty: true, visibilityProperty: true }) || el.closest("[disabled], option, script, style, .sr")) continue;
+    const box = el.getBoundingClientRect();
+    if (!box.width || box.bottom < 0 || box.top > innerHeight || box.right < 0 || box.left > innerWidth) continue;
+    const cs = getComputedStyle(el);
+    const color = parse(cs.color);
+    if (!color) continue;
+    let opacity = 1;
+    for (let n = el; n; n = n.parentElement) opacity *= Number(getComputedStyle(n).opacity);
+    const bg = behind(el);
+    const fg = over([color[0], color[1], color[2], color[3] * opacity], bg);
+    const size = parseFloat(cs.fontSize);
+    const large = size >= 24 || (Number(cs.fontWeight) >= 700 && size >= 18.66);
+    const r = ratio(fg, bg);
+    if (r < (large ? 3 : 4.5)) problems.push(`${el.tagName.toLowerCase()}${el.className ? `.${String(el.className).replace(/\s+/g, ".")}` : ""} “${text.textContent.trim().slice(0, 40)}” ${r.toFixed(2)}:1`);
+  }
+  return problems;
+}

@@ -82,12 +82,16 @@ Every turn ends with one line, and that line is the only thing Toryo reads. It h
 
 ## What you see
 
-- **The room list.** A room that needs you says **needs you** first, in a bold pill: a question it waits on, or one an agent asked in chat. Then who is working on what: CX 🔨 is Codex building, CL 👓 is Claude reviewing, 📝 a proposal or the plan being written, 🧪 the checks. Otherwise the room's state: ⏸ paused, ⏹ stopped or stopping, ✓ done, Zzz idle. Hover over a room for the same in words.
-- **The timeline.** Every message in full (Markdown), with its status, the files it changed, and its tokens. *Prompt* shows exactly what Toryo sent to that agent.
+The page follows Toryo's design system ([docs/design-system.md](docs/design-system.md)). Color means what's happening, never who: the logo's purple plans, its blue builds and its mint reviews, and orange is only for what needs you. Agents are told apart by name and a neutral monogram. Light and dark follow your system, or the theme button in the top bar. The fonts ship with the page, so it still loads nothing from the internet.
+
+- **The top bar.** How many rooms are working, and how many questions need you; that count opens the room with the oldest question and shows it to you.
+- **The rooms.** Grouped by project. Each room shows one line about what it's doing: what needs you comes first (*Needs you · Codex asks*), then who is working on what (*Claude building*), otherwise its state (*Paused*, *Stopped*, *Done*, *Idle*). Hover over a room for the same in words.
+- **The room's header.** A sentence about what the room is doing: who is building, reviewing or planning, on which slice, and for how long; and whether a question waits for you. Next to it: the mode, *Pause*, *Stop* and *Room*.
+- **The timeline.** Every message in full (Markdown), with its status, the files it changed, and its tokens. A status takes the color of what happens next: *Ready for review* is mint, because review is next. *Prompt* shows exactly what Toryo sent to that agent. In a build, each slice starts with its marker, and a slice's earlier review rounds fold into one line you can open. Your notes are the dark bubbles on the right.
 - **Live activity.** Commands, edits and remarks stream in while an agent works. *Interrupt with a note* delivers a message mid-turn.
 - **Decision cards.** Each question comes with the agent's recommendation and a one-click *Use the recommendation*. Every answer, *Retry* and planning call names the question it was given for. A note is tied to a question when you begin writing it: to the question the composer shows, or to the card whose *Write my own answer* you pressed. Each room keeps its own draft, with that tie and the recipient you chose, when you switch rooms or reload the page. If that question was answered meanwhile (in another tab, a terminal or your phone), Toryo refuses it and says so, and your text stays in the box. It never lands on a newer question. Sent again, it goes as a note and answers nothing.
 - **Snapshots and diffs.** Toryo snapshots the tree before and after every turn in a shadow git store in `~/.toryo/shadow`; your repository's `.git` is only read. *N files changed* shows that turn's exact diff. Reviewers are told which snapshot they're reviewing, and the command to diff it against their last review.
-- **The plan panel.** Slices are read from the plan file, and approved ones are ticked.
+- **Plan, Crew and Ledger.** Beside the timeline, or as tabs in the room on a narrower screen. *Plan* shows the plan file's slices, with a bar of how far the build has got and how long each approved slice took. *Crew* shows each agent, what it's doing, its usage and its settings. *Ledger* shows what a reviewer starting fresh reads first. On a phone, the rooms and the room are two tabs at the bottom.
 - **Shared docs.** The plans, decisions and handoffs the agents touched in the room, one click away.
 - **While you were away.** A summary when you come back to a room, with *Jump to the first new message*.
 - **Second opinion.** Ask any other agent to look at any message.
@@ -96,7 +100,7 @@ Every turn ends with one line, and that line is the only thing Toryo reads. It h
   - **To the builder while it works.** Its next turn is a building turn, *Building: your notes*. It acts on your notes there, and answers any Ask in the same turn. Then the relay carries on as it would have: checks, then review.
   - **The outcome of each note.** That turn opens with one line per note: *done*, *scheduled* (for which slice) or *declined* (and why). The note shows that outcome, so you can see every note landed.
   - **To a reviewer, or in a room that isn't building.** Only an Ask gets a turn: a short, read-only *Answering your question*. Then the room goes back to exactly what it was doing; answering doesn't change a verdict. A Tell goes with that agent's next turn.
-  - **Where a note is.** Under each note you see where it is: waiting for that agent's turn to end, being read, then its outcome or *replied*, with a link. Until an agent has it, you can *Edit* the note or *Cancel* it; once it has gone, it stays as sent. A note that answered a question stays as sent from the start, so the question never ends up answered by text you've since changed or withdrawn.
+  - **Where a note is.** Under each note you see where it is: waiting for that agent's turn to end, being read, then its outcome or *replied*, with a link. Until an agent has it, you can *Edit* the note or *Cancel* it; once it has gone, it stays as sent. If it goes while you're changing it, your change isn't lost: it stays under the note until you *Send it as a new note* or *Dismiss* it. A note that answered a question stays as sent from the start, so the question never ends up answered by text you've since changed or withdrawn.
 - **Writing.** Enter sends; Shift+Enter starts a new line.
 
 ## Keeping Codex in its app (experimental)
@@ -186,7 +190,7 @@ Later retains one-turn overrides, usage forecasts and advance warnings, further 
 cd ~/toryo && node --test --test-concurrency=1 test/*.test.mjs
 ```
 
-The tests drive the whole engine through `test/fake-agent.mjs`, which speaks the Codex and Claude output formats. Toryo has no dependencies. `node test/ui-check.mjs` also checks the page in a real browser, against a desk of its own with fake agents and a fake Codex app; it needs a `playwright-core` folder (`PLAYWRIGHT_CORE=…`) and skips itself without one.
+The tests drive the whole engine through `test/fake-agent.mjs`, which speaks the Codex and Claude output formats. Toryo has no dependencies. `node test/ui-check.mjs` also checks the page in a real browser, against a desk of its own with fake agents and a fake Codex app; it needs a `playwright-core` folder (`PLAYWRIGHT_CORE=…`) and skips itself without one. `node test/ui-shots.mjs [folder]` takes screenshots of the page at three widths, in both themes, and fails if anything scrolls sideways on a phone.
 
 ## License
 
