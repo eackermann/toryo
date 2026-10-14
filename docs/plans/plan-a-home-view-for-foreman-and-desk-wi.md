@@ -134,6 +134,8 @@ A hold cannot retract an accepted message or stop the app. Keep following the ma
 
 Show Preparing, Waiting in the Codex app, and Working in the Codex app separately. Record app acceptance and pickup times where available; do not use restart time as a new work start. A timeout or explicit abandonment does not prove the app stopped. Keep that thread unavailable to new automatic submissions until passive reconciliation establishes completion or the owner explicitly resolves the uncertain submission. Do not silently resend to learn whether the first send succeeded.
 
+**A turn the app ends with an error (14 Oct, the owner's decision; [the record](../decisions.md#2026-10-14-following-a-codex-app-turn-that-ended-with-an-error-and-a-fuller-session-timeline)).** The app can end a turn with a `task_complete` whose `last_agent_message` is null and whose `error` names the cause (*Selected model is at capacity*, `codex_error_info: server_overloaded`), then pick the same work up later as a new turn in the same thread with no new user message (`task_started`, developer messages, the work, and a `task_complete` with the reply). Report such an ending as the app's error, never as an empty message. Following the turn (and *Follow it again*) goes past a failed ending: a turn the app starts in the same thread with no new user message after the failed one is the same work resumed, and its reply is the turn's result. A new user message without Toryo's marker first means the thread has moved on to someone else's message: say so, and don't take that reply. With nothing after the error yet, keep following (the app may be resumed later) and say so in the activity. The question when Toryo loses track names the app's error and says that resuming the turn in the app, then *Follow it again*, picks the resumed turn up. A capacity error isn't a usage limit: this stays apart from *Recognized provider exhaustion* under Later.
+
 ## Plan checks, revisions, and chat feedback
 
 Reuse the existing planning round and its `plan-check` / `plan-revise` turns. When a plan is Ready, offer **Ask Claude to check the plan** (or the other non-author planners), alongside **Start building**, **Read**, and **Ask for changes**. Checks are read-only. Deliver every result to the author's catch-up and automatically queue the author when findings request changes; after the author addresses them, return the plan to Ready. With no findings requiring changes, return directly to Ready. If there is no other planner, explain that instead of assigning the author to review their own plan.
@@ -272,6 +274,12 @@ On 13 October the owner asked for a timeline in the sticky bar at the top of the
 - **Live.** It updates as turns start and end, and the running segment grows once a minute on the page's shared clock. Nothing on it animates, with or without reduced motion.
 - **Phones.** One proportional bar of the phase totals with the totals in words; tapping it opens the full list. Nothing scrolls sideways at 320 and 390 pixels.
 
+**Earlier sessions, a time ruler, zoom and pan (14 Oct, the owner's decisions; [the record](../decisions.md#2026-10-14-following-a-codex-app-turn-that-ended-with-an-error-and-a-fuller-session-timeline)).**
+- **Earlier sessions on the strip.** Opening (selecting) an earlier session's fold in the transcript shows that session's timeline on the strip. Folding it again, or *Back to session N* (the current one), returns the strip to the current session. The list behind the totals keeps offering every session.
+- **Full width.** The strip takes the whole width of the middle column; the totals in words go on their own line under it.
+- **A time ruler.** Its x-axis is a real ruler: ticks with clock times, and dates where the session crosses days, getting finer as you zoom in. A compressed break shows on the ruler as a break marked with its length, so the ruler never suggests time is to scale where it isn't.
+- **Zoom and pan.** The scroll wheel over the strip zooms around the pointer; dragging pans; a double-click or *Fit* goes back to the whole session. Clicking a segment still goes to its turn, and a drag never counts as a click. The keyboard can zoom, pan and fit too, and the list stays for screen readers. The strip stays compact in the sticky header. Phones keep their single bar.
+
 **Where the times come from.** One shared function in `web/` (as `web/intent.js` is shared), used by the page, the summary, the command line, and MCP, so they agree. Turns have their start and end. Checks today record only their end and each check's seconds: record when the run starts. Pauses, holds, and resumes are today only sentences in the timeline: record them as structured events. Waiting for the owner runs from a question's arrival to its answer, and overlapping questions count once. For rooms from before this, derive what can be derived (a checks run's start from its end and seconds; pauses from the existing sentences) and leave the rest blank rather than guess. The room's summary carries the current session's totals, computed incrementally rather than rescanning the whole history on every event, for Home and for `toryo show` and `toryo_room` (*This session, 5 h 20: building 3 h 10, reviewing 1 h 05, checks 22 min, planning 40 min, waiting for you 1 h 30*).
 
 **Starting a new session.** *Start a new session* in the room's menu, with the same action through the API, `toryo session new [room]`, and MCP. It is the "reset" the owner asked for: it starts the room afresh for new work without deleting anything. Deleting a room remains the way to remove one.
@@ -284,9 +292,9 @@ On 13 October the owner asked for a timeline in the sticky bar at the top of the
 
 ## Reviewable slices
 
-Preserve the owner's delivery order and insert the newly requested small plan-review slice immediately after safe question targeting, so its buttons and re-check cycle use the same stale-question protection. The owner then added the design system and re-skin right after the app-thread boundary (13 Oct): the page takes its approved look before the Home slices build on it. Later the same day the owner asked for a timeline of each session's phases at the top of the room, and for a way to start a new session in a room, leaving where they go in the plan open. They come right after Home: Home completes the guard milestone the plan is built around, and the folder guard and worktrees after it are larger and don't depend on them. The sequence is usage observations; graceful holds and desk pause; the app-thread boundary; the design system and re-skin; safe question targeting; plan checks and changes; the usage guard with phone controls; Home overview; Home answers and buttons; the session timeline; new sessions; then the two shared-folder slices and worktrees.
+Preserve the owner's delivery order and insert the newly requested small plan-review slice immediately after safe question targeting, so its buttons and re-check cycle use the same stale-question protection. The owner then added the design system and re-skin right after the app-thread boundary (13 Oct): the page takes its approved look before the Home slices build on it. Later the same day the owner asked for a timeline of each session's phases at the top of the room, and for a way to start a new session in a room, leaving where they go in the plan open. They come right after Home: Home completes the guard milestone the plan is built around, and the folder guard and worktrees after it are larger and don't depend on them. The sequence is usage observations; graceful holds and desk pause; the app-thread boundary; the design system and re-skin; safe question targeting; plan checks and changes; the usage guard with phone controls; Home overview; Home answers and buttons; the session timeline; new sessions; then the two shared-folder slices and worktrees. On 14 October the owner added two slices right after the third worktree slice (copied files and setup), the fix first: the Codex app's folder check, following an app turn that ended with an error, and Claude runs with more than one result (in that order); then earlier sessions, a time ruler, and zoom and pan on the session timeline. The remaining worktree slices follow them.
 
-There are twenty executable slices. Slice 4 re-skins the page with the approved design system. Slice 6 delivers the plan-review improvement early. The desk-control milestone is Slice 7 and core Home finishes at Slice 9. The session timeline is Slice 10 and new sessions Slice 11. The cheap one-builder guard is Slice 12; coordinating plan/chat writes and reviews is a separate Slice 13. Worktree foundations and the full create/setup/review/return/delete workflow occupy Slices 14-20. Deferred features retain their reasoning in Later at the end, without numbered headings or completion gates for this release.
+There are twenty-two executable slices. Slice 4 re-skins the page with the approved design system. Slice 6 delivers the plan-review improvement early. The desk-control milestone is Slice 7 and core Home finishes at Slice 9. The session timeline is Slice 10 and new sessions Slice 11. The cheap one-builder guard is Slice 12; coordinating plan/chat writes and reviews is a separate Slice 13. Worktree foundations, the room's own worktree, and copied files and setup are Slices 14-16. Slice 17 is the owner's fix slice: the Codex app's folder check, following an app turn that ended with an error, and Claude runs with more than one result. Slice 18 adds earlier sessions, the time ruler, and zoom and pan to the session timeline. Project-wide check order, review, return, and cleanup of worktrees are Slices 19-22. Deferred features retain their reasoning in Later at the end, without numbered headings or completion gates for this release.
 
 Run appropriate targeted tests while developing each slice, then the repository's required syntax and full-suite checks before its handoff. Re-read concurrent changes before editing. Each slice updates README only for behavior that actually ships and writes a review handoff in `docs/reviews/`. The graceful-policy foundation and the preparation/send boundary remain separate reviews.
 
@@ -439,7 +447,40 @@ If it's too big for one review, it's reviewed in two parts: (a) tokens, type, co
 
 **Done when.** A first turn cannot outrun setup, the owner can see and retry failures, and private copied files never become part of a normal return operation.
 
-### Slice 17: Serialize project checks and expose room environment values
+### Slice 17: Fix the Codex app's folder check, a failed app turn, and Claude's later results
+
+The owner's fix slice (14 Oct; [the first note](../decisions.md#2026-10-14-following-a-codex-app-turn-that-ended-with-an-error-and-a-fuller-session-timeline), [the second](../decisions.md#2026-10-14-the-codex-app-threads-real-folder-and-every-claude-result-kept)), in this order: the folder check first, since it blocks a room completely; then following a failed app turn; then Claude's later results.
+
+**Scope.**
+- **The Codex app's folder check.** `localFolder` in `src/agents/codexapp.mjs` understands `\\?\C:\…` like `C:\…`. The owner can say once, for a thread, which folder it really works in: from the room's Codex app thread setting, and through the API, the command line and MCP. The check compares that folder, not the app's recorded one. It's set only by the owner and never guessed from the log. Rooms with their own worktree still refuse the app. A refusal says what the app recorded, what the room expects, and how to tell Toryo where the thread works.
+- **A Codex app turn that ended with an error.** Read `task_complete`'s `error` (its message and `codex_error_info`) and report it as the turn's error, never as an empty message. Following a turn, and following it again after Toryo lost track, goes past a failed ending: after it, a `task_started` in the same thread with no user message in between is the same work resumed, and that turn's `task_complete` reply is the result. A user message without Toryo's marker first means the thread moved on to someone else's message: the turn ends saying so, without taking that reply. With nothing after the failed ending yet, following keeps waiting and says so in the activity. The question when Toryo loses track names the app's error and says that resuming the turn in the app, then *Follow it again*, picks up the resumed turn. Not part of it: recognizing usage exhaustion (Later).
+- **Claude's later results.** `src/agents/claude.mjs` keeps every `result` of a run, in order: the main answer first, any follow-up after it, marked as a follow-up (a background command's notice can wake Claude again after its answer). The status comes from the last status line, and the ledger reads the whole text. The run's cost and token totals are checked across results and counted once (in the owner's sample `total_cost_usd` is cumulative and `usage` isn't). Optionally, the briefing asks agents to stop their own background commands before their final answer.
+
+**Verification.**
+- **Folder check:** `\\?\C:\…`, `\\?\UNC\…` and plain forms map alike. A thread whose recorded folder isn't the room's, with the owner's folder set to the room's, is sent to, and one set elsewhere is refused. The folder is set and cleared through the room's setting, API, command line and MCP, and survives a restart. Worktree rooms still refuse. The refusal's wording names the recorded folder, the expected one, and how to set it. Synthetic thread lists only.
+- **Failed app turn:** a fixture built from the owner's minimized sample (ids replaced; no real app files): a `task_complete` with a null `last_agent_message` and an `error`, then `thread_settings_applied`, `task_started`, developer messages, the resumed work and a `task_complete` with the handoff.
+  - The first ending reports the error and its `codex_error_info`.
+  - Following again from Toryo's marker takes the resumed turn's reply (its status line included) as the result, without failing on the earlier ending.
+  - With only the failed ending in the log, following keeps waiting, says so, and picks the reply up when the resumed turn is appended.
+  - With a user message without the marker after the error, it says the thread moved on and takes nothing.
+  - The lost-track question's wording.
+  - Existing app tests (markers, restarts, uncertain submissions, holds) still pass; no real app, queue or thread is used.
+- **Claude's results:** a fake run with the owner's minimized stream (a long result, a background task's notice, a one-line follow-up result) keeps both texts in order with the follow-up marked. The status is the last one, the ledger sees the review's `Resolved:` and `Open:` lines, and cost and tokens aren't double-counted. A run with one result is unchanged.
+
+**Done when.**
+- The owner's app threads pass the folder check once their real folder is set, and a refusal says how to fix it.
+- A Codex app turn that ends with an error shows that error, and a room whose app turn is resumed in the app picks up the resumed turn's result with *Follow it again*, without letting the turn go or restarting the build.
+- A Claude run with a follow-up keeps its whole answer.
+
+### Slice 18: Earlier sessions, a time ruler, and zoom and pan on the session timeline
+
+**Scope.** Opening an earlier session's fold in the transcript shows that session on the strip; folding it, or *Back to session N*, returns to the current session. The strip takes the whole width of the middle column, with the totals in words on their own line. A time ruler as its x-axis: clock-time ticks (dates across days) that get finer with zoom, and compressed breaks drawn on the ruler as breaks with their length. Zoom with the scroll wheel around the pointer, pan by dragging, fit with a double-click or *Fit*; clicking a segment still goes to its turn, and a drag is never a click; keyboard zoom, pan and fit; the list stays for screen readers. Compact in the sticky header; phones keep their single bar. The shared calculation in `web/phases.js` provides the ruler's ticks and the breaks' places, so the page and its tests agree.
+
+**Verification.** Unit tests of the ruler: tick spacing at each zoom level, clock times and dates across midnight, breaks shown as breaks with their lengths, never an evenly spaced axis across a break. In the browser: opening and folding an earlier session switches the strip, and *Back to session N* returns; the wheel zooms around the pointer and dragging pans, without page scroll or a click on release; double-click and *Fit* restore the whole session; a click on a segment still opens its turn; keyboard zoom, pan and fit; the list for screen readers; the strip's height in the sticky header; light and dark; reduced motion; no sideways scrolling at 320 and 390 pixels, where phones keep the single bar.
+
+**Done when.** The owner can look at any session's timeline at the top of the room, read real times off its ruler, and zoom into and pan along it, by pointer or keyboard, without the strip taking more room in the header.
+
+### Slice 19: Serialize project checks and expose room environment values
 
 **Scope.** Run setup and checks one at a time per project across its rooms/worktrees, unless a project setting explicitly enables parallel execution. Show which room is using the slot and queue other steps. Supply TORYO_ROOM_ID, TORYO_WORKSPACE_PATH, and a stable persisted TORYO_PORT_OFFSET to room commands. The project chooses whether to use the offset; it is not a port reservation. Managed dev servers, general resource declarations, and test-database naming belong to Later.
 
@@ -447,7 +488,7 @@ If it's too big for one review, it's reviewed in two parts: (a) tokens, type, co
 
 **Done when.** Project setup/check concurrency follows the explicit setting and every command receives its room context. The UI states that ports/databases still need project-specific handling instead of promising service isolation.
 
-### Slice 18: Review the full room contribution and preview return conflicts
+### Slice 20: Review the full room contribution and preview return conflicts
 
 **Scope.** Add final snapshot R, full B → R review, current-main snapshot M, and a three-way return preview computed outside main. Display both the room's contribution and the proposed destination changes, with complete large-text/binary access. Add stale-review/preview identities, conflict presentation, and regeneration after explicit isolated resolution. Use the same preview through UI, CLI, and MCP; this slice has no Apply mutation.
 
@@ -455,7 +496,7 @@ If it's too big for one review, it's reviewed in two parts: (a) tokens, type, co
 
 **Done when.** The owner can inspect the full contribution and all conflicts from phone or desktop without any write to main, with honest handling of binaries and large diffs.
 
-### Slice 19: Apply an approved preview as uncommitted changes
+### Slice 21: Apply an approved preview as uncommitted changes
 
 **Scope.** Add the explicit preview-bound Apply operation, destination reservation, final checks, worktree-only writes, durable backups/journal, and interrupted-apply recovery. Preserve main staging/HEAD and reject stale approvals before writes. Record delivery and subsequent contribution baselines to prevent duplicate application. Add no commit action; returning files remains a complete no-commit workflow. Do not restart or deploy anything.
 
@@ -463,7 +504,7 @@ If it's too big for one review, it's reviewed in two parts: (a) tokens, type, co
 
 **Done when.** Only an explicitly approved, current preview can change main, no-commit projects need no exception, conflicts leave main untouched, and failures show a recoverable, truthful file state rather than silent partial success.
 
-### Slice 20: Measure and clean up room worktrees
+### Slice 22: Measure and clean up room worktrees
 
 **Scope.** Add bounded asynchronous disk measurements, measured-at/partial states, and the room-delete choice to keep or remove its worktree/branch. Show unapplied work and optional branch commits before discard. Verify ownership, drain Toryo-managed turns/setup/checks, preserve history/apply receipts, and retain cleanup recovery records. Complete the phone, CLI, and MCP cleanup flows and document the full worktree workflow.
 

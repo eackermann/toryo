@@ -234,3 +234,48 @@ The owner left it to the builder to work this into the plan "wherever and howeve
 - **Where in the plan.** Two new slices right after Home: *Slice 10: Session phase timeline at the top of the room* and *Slice 11: Start a new session in a room*. The later slices move up by two (10–18 become 12–20).
 - **Where on the page.** The strip sits in the room's sticky header, since a session belongs to one room.
 - **What a reset is.** It starts a new session and deletes nothing. Earlier sessions stay in the room, folded. Agents start fresh by default, and the ledger stays.
+
+## 2026-10-14: Following a Codex app turn that ended with an error, and a fuller session timeline
+
+The owner added two pieces of work to the [Home and controls plan](plans/plan-a-home-view-for-foreman-and-desk-wi.md), to come after Slice 16 (copied files and setup), the fix first. They are the owner's decisions.
+
+**1. A Codex app turn that ended with an error (a bug fix).** On 14 October a turn Toryo handed to the Codex app ended with a `task_complete` whose `last_agent_message` was null and whose `error` said *Selected model is at capacity* (`codex_error_info: server_overloaded`). Hours later the app picked the work up again as a new turn in the same thread, with no new user message, and finished it with a proper handoff. Toryo reported the first ending as an empty message, and *Follow it again* failed every time, because it always reached the failed ending first and never the resumed turn's reply. The room was blocked until the owner let the turn go and restarted the build.
+
+| Decision | Why |
+|---|---|
+| A `task_complete` that carries an `error` is reported as that error (its message and `codex_error_info`), never as an empty message. | The owner should see what the app said went wrong. |
+| Following again goes past a failed ending. A turn the app starts in the same thread with no new user message in between is the same work resumed: Toryo follows it and takes its reply as the turn's result. | That's how the app resumes work after an error. |
+| If a new user message without Toryo's marker comes first, the thread has moved on to someone else's message: Toryo says so plainly, and doesn't take that reply. | A reply to someone else isn't the room's result. |
+| If nothing has followed the error yet, Toryo keeps waiting (the app may be resumed later) and says so in the activity. | Following again shouldn't fail just because the app hasn't been resumed yet. |
+| The "lost track" question names the app's error, and says that resuming the turn in the app and then choosing *Follow it again* picks up the resumed turn. | The owner needs to know how to get the room going again. |
+| This is a capacity error, not a usage limit: it stays separate from the deferred *Recognized provider exhaustion* work. | Different causes, different handling. |
+
+**2. The session timeline (the strip at the top of the room).**
+
+| Decision | Why |
+|---|---|
+| Opening an earlier session in the transcript shows that session's timeline on the strip. Folding it again, or *Back to session N*, returns the strip to the current session. | Today an earlier session reaches the strip only through the list behind the totals. |
+| The strip uses the whole width of the middle column; the totals in words go on their own line. | More room for the timeline. |
+| A real time ruler as its x-axis: clock times (dates when the session crosses days), finer as you zoom in. A compressed break shows on the ruler as a break with its length, so the ruler never suggests time is to scale where it isn't. | To read when things happened, honestly. |
+| Zoom and pan: the scroll wheel over the strip zooms around the pointer, dragging pans, a double-click or *Fit* goes back to the whole session. Clicking a segment still goes to its turn, and a drag never counts as a click. Keyboard equivalents for zoom and pan; the list stays for screen readers. The strip stays compact in the sticky header, and phones keep their single bar. | Long sessions need a closer look without losing the whole. |
+
+## 2026-10-14: The Codex app thread's real folder, and every Claude result kept
+
+Later that day the owner added two more bugs to the same fix slice (Slice 17), still after Slice 16. The first comes first in the slice, since it blocks a room completely. These are the owner's decisions.
+
+**A. The Codex app's folder check (Slice 15's) can't pass for how the owner's app threads work.** The app records every thread's folder with Windows' long-path prefix (`\\?\C:\Users\you\project`), which Toryo didn't understand, so every app turn was refused before anything was sent. And the owner's threads are opened in a Windows folder of scratch files while they do their real work in the WSL project, running their commands through `wsl`: the recorded folder is never the room's.
+
+| Decision | Why |
+|---|---|
+| `\\?\C:\…` is understood like `C:\…`. | It's how the app records every thread's folder. |
+| The owner can say once, for a thread, which folder it really works in, from the room's Codex app thread setting (and through the API, the command line and MCP). The check then compares that folder, not the app's recorded one. It's set only by the owner, never guessed from the log. | The recorded folder isn't where these threads work, and only the owner knows where they do. |
+| Rooms with their own worktree still refuse the app. | The app can't work in a room's worktree. |
+| A refusal says what the app recorded, what the room expects, and how to tell Toryo where the thread works. | So the owner can unblock the room. |
+
+**B. A Claude run with more than one result keeps only the last.** Claude finished a long review; a background command it had left running was stopped about 7 minutes later, and the stop notice woke Claude for a one-line follow-up in the same run. Toryo kept only that line as the turn's message, so the review was lost from the room, the builder would have got only the line, and the ledger never saw the review's `Resolved:` and `Open:` lines.
+
+| Decision | Why |
+|---|---|
+| Every result's text is kept, in order: the main answer first, any follow-up after it, marked as a follow-up. The status comes from the last status line, and the ledger reads the whole text. | Nothing the agent answered is lost. |
+| Check how the totals add up across results: in the sample, `total_cost_usd` looks cumulative but `usage` doesn't. | So the run's cost and tokens are right, counted once. |
+| Optional: the briefing could ask agents to stop their own background commands before their final answer. | Waiting for one cost 7 minutes here. |
