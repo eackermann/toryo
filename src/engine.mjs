@@ -677,6 +677,10 @@ export class Engine extends EventEmitter {
       appThread: room.crew.members.includes("codexapp") ? room.sessions?.codexapp ?? null : null,
       // Queued work that desk-wide controls hold up, and why.
       blocked: [...this.#heldUp(room)].map(([q, reasons]) => ({ agent: q.agent, kind: q.kind, reasons })),
+      // Paused (or stopped) and held, apart from the status: a question waiting makes the status "waiting", and the
+      // page still shows the pause or the hold under it.
+      paused: Boolean(room.paused || room.stopped),
+      held: room.queue.length > 0 && room.queue.every((q) => this.#heldUp(room).has(q)),
       updatedAt: room.updatedAt,
       crew: room.crew,
     };

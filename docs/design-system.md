@@ -70,21 +70,35 @@ Numbers are tabular wherever they change. The three families are bundled as woff
 
 ## Activity rings
 
-Every room tile, and every agent's monogram while it works, wears a ring for what's happening. The rings and the live logo come with the second part of Slice 4.
+Every room tile wears a ring for what's happening, in the rooms list and in the room's header (and on Home, when it comes). An agent's monogram wears one while it works: on its live turn, and on its card in *Crew*. The state comes from the room's summary (`ringFor` in [`web/rings.js`](../web/rings.js)); the rings are CSS, and the sparkler is drawn on a canvas.
 
 | State | Ring |
 |---|---|
-| Building, reviewing, planning | A faint track with a sparkler running round it: a hot point with a turning glint, sparks thrown in every direction that sometimes fork, a fading trail that cools from white to the activity's color, and embers drifting off it |
+| Building, reviewing, planning | A faint track with a sparkler running round it: a hot point with a turning glint, sparks thrown in every direction that sometimes fork, a fading trail that cools from white to the activity's color, and embers drifting off it. A halo breathes underneath |
+| Replying in chat | The same, in slate: a reply isn't one of the three kinds of work, so it takes no activity color |
 | Checks | Four grey dashes marching round |
 | Needs you | An orange ring pulsing in place |
 | Working while a question waits | The sparkler inside, the orange pulse outside |
-| Paused | Dashed |
-| Held | Dotted, with a lock |
+| Paused (or stopped) | Dashed, with a pause badge; the orange pulse outside if a question waits |
+| Held | Dotted, with a lock; the orange pulse outside if a question waits |
 | Done | Solid mint, with a check |
 | Failed, needs a retry | Solid red |
 | Idle | No ring |
 
-All the sparklers run in one animation loop, on one clock (`performance.now()` modulo 2.8 s). Canvases off the screen are skipped, sparks are capped, and the pixel ratio is capped at 2. CSS animations take a negative delay from the same clock, so drawing a tile again never restarts its ring. The logo in the top bar is live: each block breathes while that kind of work runs anywhere on the desk.
+What needs you is never hidden: a failed turn shows red, and in every other state a waiting question adds the orange pulse. The pause and the hold still show under it: the room's summary says whether it's paused or held, apart from its status (which is "waiting" while a question waits).
+
+**One clock, one loop.**
+- All the sparklers are drawn by one animation loop, on one clock (`performance.now()` modulo 2.8 s). The loop runs only while there's a sparkler on the page, and wakes when one appears.
+- Canvases off the screen are skipped. Sparks are capped (150 sparks and 170 embers a sparkler), and the pixel ratio is capped at 2. When the pixel ratio changes (zooming, a window moved to another screen), each canvas takes the new size and its sparks carry on.
+- Turning reduced motion off starts the sparklers again straight away; turning it on stops them.
+- CSS animations take a negative delay from the same clock (`--phb`, `--phn`, `--phm`), so drawing a tile again never restarts its ring. A tile that still shows the same thing isn't drawn again at all, so its sparks carry on.
+- With twelve rooms, eight of them with sparklers, the page draws 60 frames a second (`test/ui-shots.mjs` times them).
+
+**The live logo.** In the top bar, each block of the logo breathes while that kind of work runs anywhere on the desk: blue while something builds, purple while a round plans, mint while something is reviewed.
+
+**The plan's progress.** The slice being built takes the color of what's happening to it: blue while it's built, mint while it's reviewed, grey during the checks. Its segment in the bar pulses.
+
+**The legend.** *What the rings mean*, under the rooms: building, reviewing, planning, needs you.
 
 ## Motion
 

@@ -2,6 +2,7 @@ import { esc, renderMarkdown } from "./md.js";
 import { noteIntent } from "./intent.js";
 import { limitMeters } from "./meters.js";
 import { stripStatus } from "./status.js";
+import { markAnimation, phases, rethemeSparklers, ringFor, ringParts, wakeSparklers, workKind } from "./rings.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -54,10 +55,27 @@ const ICONS = {
 };
 const ic = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] ?? ""}</svg>`;
 const markSvg = () => `<svg viewBox="0 0 512 512" aria-hidden="true"><use href="#mark"/></svg>`;
-/** An agent's monogram: the same neutral tile for every agent; the Codex app's has a window corner. */
-function avatar(agent, size = 30, cls = "") {
+/**
+ * An agent's monogram: the same neutral tile for every agent; the Codex app's has a window corner. While the agent
+ * works, it wears that work's ring (`work`: a request's kind).
+ */
+function avatar(agent, size = 30, cls = "", work = "") {
   if (agent === "toryo" || !agent) return `<span class="avatar ${cls}" data-agent="toryo" style="--size:${size}px" title="Toryo">${markSvg()}</span>`;
-  return `<span class="avatar ${cls}" data-agent="${esc(agent)}" style="--size:${size}px" title="${esc(name(agent))}" aria-hidden="true">${esc(MONOGRAM[agent] ?? String(agent).slice(0, 2))}${agent === "codexapp" ? '<span class="app"></span>' : ""}</span>`;
+  const ring = work ? ringParts({ ring: workKind(work), needs: false }, size, ic) : null;
+  return `<span class="avatar ${cls}" data-agent="${esc(agent)}" ${ring?.attrs ?? ""} style="${ring?.style ?? `--size:${size}px`}" title="${esc(name(agent))}" aria-hidden="true">${esc(MONOGRAM[agent] ?? String(agent).slice(0, 2))}${agent === "codexapp" ? '<span class="app"></span>' : ""}${ring?.inner ?? ""}</span>`;
+}
+/** A room's tile: its initials, and the ring for what it's doing (rings.js). */
+function roomTile(sum, size) {
+  const ring = ringFor(sum);
+  const parts = ringParts(ring, size, ic);
+  return `<span class="tile" ${parts.attrs} data-ring-key="${ring.ring}:${ring.needs}:${esc(roomMono(sum.title))}" style="${parts.style}" aria-hidden="true">${esc(roomMono(sum.title))}${parts.inner}</span>`;
+}
+/** The room header's tile, drawn again only when what it shows changes (so its sparkler carries on). */
+function paintHeadTile(sum) {
+  const old = $("#roomTile");
+  const next = el(roomTile(sum, 44));
+  next.id = "roomTile";
+  if (old.dataset.ringKey !== next.dataset.ringKey) old.replaceWith(next);
 }
 /** A room's monogram: the first letters of its first two words. */
 const roomMono = (title) => String(title ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => [...w][0]).join("").toUpperCase() || "·";
@@ -351,7 +369,8 @@ function renderTop() {
     document.title = "Toryo";
     return;
   }
-  $("#roomTile").textContent = roomMono(r.title);
+  paintHeadTile(S.state?.rooms.find((x) => x.id === r.id) ?? { ...r, title: r.title });
+  wakeSparklers();
   $("#roomTitle").textContent = r.title;
   $("#roomWhere").textContent = p ? `${p.name} · ${p.path}` : "";
   for (const b of $$("#modes button")) b.setAttribute("aria-pressed", String(b.dataset.mode === r.mode));
@@ -382,6 +401,12 @@ function currentSlice(r) {
 /** The top bar's counts: rooms working, and questions waiting for you, across the desk. */
 function renderDesk() {
   if (!S.state) return;
+  const kinds = new Set(S.state.rooms.filter((r) => r.status !== "paused").flatMap((r) => (r.working ?? []).map((w) => workKind(w.kind))));
+  const key = [...kinds].sort().join();
+  if ($("#liveMark").dataset.kinds !== key) {
+    $("#liveMark").dataset.kinds = key;
+    $("#liveMark").style.animation = markAnimation(kinds);
+  }
   const working = S.state.rooms.filter((r) => r.running?.length).length;
   const asks = S.state.rooms.reduce((n, r) => n + (r.questions?.length ?? (r.waiting ? 1 : 0)), 0);
   $("#deskchips").innerHTML = [
@@ -426,6 +451,7 @@ function renderRooms() {
     if (!byProject.has(r.projectId)) byProject.set(r.projectId, []);
     byProject.get(r.projectId).push(r);
   }
+  const before = new Map($$(".roomlink", box).map((b) => [b.dataset.room, b.querySelector(".tile")]));
   box.innerHTML = S.state.config.projects
     .map((p) => {
       const rooms = byProject.get(p.id) ?? [];
@@ -433,11 +459,17 @@ function renderRooms() {
         .map((r) => {
           const st = railState(r);
           return `<button type="button" class="roomlink" data-room="${r.id}" data-state="${r.status}" aria-current="${r.id === S.roomId}" title="${esc(`${r.title}: ${st.says}`)}">
-            <span class="tile" aria-hidden="true">${esc(roomMono(r.title))}</span><span class="ri-text"><span class="ri-name">${esc(r.title)}</span><span class="ri-state" ${st.k ? `data-k="${st.k}"` : ""}>${esc(st.text)}</span></span></button>`;
+            ${roomTile(r, 32)}<span class="ri-text"><span class="ri-name">${esc(r.title)}</span><span class="ri-state" ${st.k ? `data-k="${st.k}"` : ""}>${esc(st.text)}</span></span></button>`;
         })
         .join("")}</div>`;
     })
     .join("");
+  for (const link of $$(".roomlink", box)) {
+    const old = before.get(link.dataset.room);
+    const tile = link.querySelector(".tile");
+    if (old && old.dataset.ringKey === tile.dataset.ringKey) tile.replaceWith(old);
+  }
+  wakeSparklers();
 }
 
 // What a room is doing, in one line. What needs you comes first; then who is working on what; otherwise its state.
@@ -491,16 +523,20 @@ function renderContext() {
     const done = slices.filter((x) => x.approved).length;
     // The slice being built: the one named in the last handoff, or (right after an approval) the next unfinished one.
     const now = r.status === "done" ? -1 : slices.findIndex((x) => x.current && !x.approved) >= 0 ? slices.findIndex((x) => x.current && !x.approved) : slices.findIndex((x) => !x.approved);
+    // And what's happening to it: building, a review, the checks, or nothing right now.
+    const work = S.state?.rooms.find((x) => x.id === r.id)?.working?.[0];
+    const k = work && ["build", "review", "checks"].includes(workKind(work.kind)) ? workKind(work.kind) : "idle";
+    box.setAttribute("style", phases());
     const worked = (plan?.times ?? []).reduce((t, x) => t + (x.active ?? 0), 0);
     html += `<div class="progress"><div class="ph"><strong>${r.build.planPath ? `<a href="#" class="file" data-file="${esc(r.build.planPath)}">${esc(r.build.planPath.split("/").pop())}</a>` : "No plan file"}</strong>${slices.length ? `<span class="muted num">${done} of ${slices.length}</span>` : ""}</div>
-      ${slices.length ? `<div class="segbar" aria-hidden="true">${slices.map((x, i) => `<i data-s="${x.approved ? "done" : i === now ? "now" : "todo"}" title="${esc(`${x.kind ?? "Slice"} ${x.number}: ${x.name}`)}"></i>`).join("")}</div>` : ""}
+      ${slices.length ? `<div class="segbar" aria-hidden="true">${slices.map((x, i) => `<i data-s="${x.approved ? "done" : i === now ? "now" : "todo"}" ${i === now ? `data-k="${k}"` : ""} title="${esc(`${x.kind ?? "Slice"} ${x.number}: ${x.name}`)}"></i>`).join("")}</div>` : ""}
       ${worked ? `<span class="hint">${shortDuration(worked)} of approved work so far</span>` : ""}</div>`;
     if (slices.length) {
       html += `<ol class="slices">${slices
         .map((x, i) => {
           const st = x.approved ? "done" : i === now ? "current" : "todo";
           const took = x.approved && x.took ? `<span class="took" title="${esc(`${shortDuration(x.took.active)} of agent and check time over ${x.took.rounds} review round${x.took.rounds === 1 ? "" : "s"}; ${shortDuration(x.took.wall)} from start to approval, including pauses and waiting`)}">(${shortDuration(x.took.active)})</span>` : x.checks ? `<span class="n">${x.checked}/${x.checks}</span>` : "";
-          return `<li class="slice" data-state="${st}"><span class="mark">${x.approved ? ic("check") : esc(x.number)}</span><span class="name">${esc(x.name)}${st === "current" ? `<br><span class="hint">${r.build.round && x.current ? `Round ${r.build.round} of at most ${r.settings.maxRounds}` : [...S.live.values()].length ? "Being built" : "Up next"}</span>` : ""}</span>${took}</li>`;
+          return `<li class="slice" data-state="${st}" ${st === "current" ? `data-k="${k}"` : ""}><span class="mark">${x.approved ? ic("check") : esc(x.number)}</span><span class="name">${esc(x.name)}${st === "current" ? `<br><span class="hint">${r.build.round && x.current ? `Round ${r.build.round} of at most ${r.settings.maxRounds}` : [...S.live.values()].length ? "Being built" : "Up next"}</span>` : ""}</span>${took}</li>`;
         })
         .join("")}</ol>`;
     } else if (plan?.missing) html += `<p class="sideintro">The plan file doesn't exist yet.</p>`;
@@ -971,7 +1007,7 @@ function turnEl(ev) {
   // Held while it was being prepared: it went back to the queue, unsent (the reason is below).
   else if (ev.state === "deferred") chip = `<span class="status">Not sent yet</span>`;
   else if (ev.status && STATUS[ev.status]) chip = `<span class="status" data-s="${ev.status}" title="${esc(`TORYO: ${ev.status} ${ev.detail ?? ""}`)}">${ev.status === "APPROVED" || ev.status === "DONE" ? ic("check") : ""}${STATUS[ev.status]}</span>`;
-  const head = `<header><span class="who">${avatar(ev.agent, 30)}${esc(name(ev.agent))}</span>${role}<span class="kind">${esc(KIND[ev.kind] ?? ev.kind ?? "")}</span><span class="meta">${meta}</span>${chip}</header>`;
+  const head = `<header><span class="who">${avatar(ev.agent, 30, "", live ? ev.kind : "")}${esc(name(ev.agent))}</span>${role}<span class="kind">${esc(KIND[ev.kind] ?? ev.kind ?? "")}</span><span class="meta">${meta}</span>${chip}</header>`;
   if (live) {
     const activity = S.live.get(ev.id)?.activity ?? [];
     return el(`<article class="turn live" data-k="${kind}" data-id="${ev.id}">${head}
@@ -1114,7 +1150,7 @@ function renderCrew() {
     const session = r.sessions?.[a];
     const resume = session ? (a === "codex" ? `codex resume ${session}` : a === "claude" ? `claude --resume ${session}` : a === "cursor" ? `agent --resume ${session}` : a === "codexapp" ? "" : `grok -r ${session}`) : "";
     html += `<section class="agent" data-active="${Boolean(live)}">
-      <div class="agent-head">${avatar(a, 34)}<span class="name">${name(a)}</span>${role ? `<span class="role" data-role="${role}">${role[0].toUpperCase() + role.slice(1)}</span>` : ""}<span class="state">${state}</span></div>
+      <div class="agent-head">${avatar(a, 34, "", live?.kind ?? "")}<span class="name">${name(a)}</span>${role ? `<span class="role" data-role="${role}">${role[0].toUpperCase() + role.slice(1)}</span>` : ""}<span class="state">${state}</span></div>
       ${a === "codexapp" ? `<div class="model"><span>Thread <span data-thread-name="${esc(session ?? "")}">${esc(threadLabel(S.appThreadList ?? [], session))}</span> · the app's own model and permissions · experimental</span></div>` : ""}
       <div class="model" ${a === "codexapp" ? "hidden" : ""}><span>${esc(ac.model || "default model")}${ac.effort ? ` · ${esc(ac.effort)} effort` : ""}</span>${a === "codex" ? `<span>${esc(ac.permissions ?? "sandboxed")}</span>` : a === "claude" ? `<span>${esc(ac.permissionMode ?? "auto")} permissions</span>` : ""}${det && !det.installed ? `<span style="color:var(--bad)">${missing(det)}</span>` : det?.tested === false ? `<span>adapter untested</span>` : ""}</div>
       ${live ? `<ul class="feed" data-feed="${live.turnId}" data-n="8">${feedItems(live.activity, 8)}</ul>` : ""}
@@ -2077,7 +2113,9 @@ function applyTheme() {
   $("#themeBtn").innerHTML = ic(theme === "dark" ? "moon" : theme === "light" ? "sun" : "system");
   $("#themeBtn").title = `Theme: ${theme === "system" ? "as the system" : theme}. Click to change.`;
   $("#themeBtn").setAttribute("aria-label", $("#themeBtn").title);
+  rethemeSparklers();
 }
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", rethemeSparklers);
 
 document.addEventListener("click", async (e) => {
   const t = e.target;
@@ -2346,6 +2384,8 @@ $("#tabbar [data-view=rooms]").innerHTML = `${ic("rooms")}<span>Rooms</span>`;
 $("#tabbar [data-view=room]").innerHTML = `${ic("chat")}<span>Room</span>`;
 applyTheme();
 applyTabs();
+// A sparkler that appears anywhere (a room's tile, a working agent's monogram) wakes the loop that draws them.
+new MutationObserver(() => wakeSparklers()).observe(document.body, { childList: true, subtree: true });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("#sheet").hidden) closeSheet();
 });

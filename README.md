@@ -84,8 +84,14 @@ Every turn ends with one line, and that line is the only thing Toryo reads. It h
 
 The page follows Toryo's design system ([docs/design-system.md](docs/design-system.md)). Color means what's happening, never who: the logo's purple plans, its blue builds and its mint reviews, and orange is only for what needs you. Agents are told apart by name and a neutral monogram. Light and dark follow your system, or the theme button in the top bar. The fonts ship with the page, so it still loads nothing from the internet.
 
-- **The top bar.** How many rooms are working, and how many questions need you; that count opens the room with the oldest question and shows it to you.
-- **The rooms.** Grouped by project. Each room shows one line about what it's doing: what needs you comes first (*Needs you · Codex asks*), then who is working on what (*Claude building*), otherwise its state (*Paused*, *Stopped*, *Done*, *Idle*). Hover over a room for the same in words.
+- **The top bar.** How many rooms are working, and how many questions need you; that count opens the room with the oldest question and shows it to you. The logo is live: each of its blocks breathes while that kind of work runs anywhere (blue builds, purple plans, mint reviews).
+- **The rooms.** Grouped by project. Each room's tile wears a ring for what it's doing:
+  - **At work:** a sparkler runs round it in the color of the work.
+  - **The checks:** grey dashes march round it.
+  - **A question for you:** it pulses orange.
+  - **Still:** dashed when paused, dotted with a lock when held, mint with a check when done, red when a turn failed.
+
+  The same rings show in the room's header, and on an agent's monogram while it works. *What the rings mean* is under the rooms. With reduced motion, the rings stay but nothing moves. Each room also shows one line about what it's doing: what needs you comes first (*Needs you · Codex asks*), then who is working on what (*Claude building*), otherwise its state (*Paused*, *Stopped*, *Done*, *Idle*). Hover over a room for the same in words.
 - **The room's header.** A sentence about what the room is doing: who is building, reviewing or planning, on which slice, and for how long; and whether a question waits for you. Next to it: the mode, *Pause*, *Stop* and *Room*.
 - **The timeline.** Every message in full (Markdown), with its status, the files it changed, and its tokens. A status takes the color of what happens next: *Ready for review* is mint, because review is next. *Prompt* shows exactly what Toryo sent to that agent. In a build, each slice starts with its marker, and a slice's earlier review rounds fold into one line you can open. Your notes are the dark bubbles on the right.
 - **Live activity.** Commands, edits and remarks stream in while an agent works. *Interrupt with a note* delivers a message mid-turn.

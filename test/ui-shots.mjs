@@ -41,10 +41,19 @@ const repo = join(base, "repo");
 let desk;
 try {
   execFileSync("git", ["init", "-q", repo]);
+  // A second project whose checks take a while, for the checks' ring.
+  const slowRepo = join(base, "slow");
+  execFileSync("git", ["init", "-q", slowRepo]);
   mkdirSync(join(repo, "docs", "plans"), { recursive: true });
   writeFileSync(join(repo, "README.md"), "# demo\n");
   writeFileSync(join(repo, "docs", "plans", "demo.md"), "# Demo\n\n### Slice 1: Schema\n\n### Slice 2: The API\n\n### Slice 3: Docs\n");
   const rules = [
+    // Rooms in every state a ring shows: working, the checks, failed, done.
+    { agent: "codex", match: "Busy build", hang: true },
+    { agent: "codex", match: "Failing build", fail: true },
+    { agent: "codex", match: "Tiny build", reply: "All done.\nTORYO: DONE" },
+    { agent: "codex", match: "Checked build", reply: "Built.\nTORYO: REVIEW Slice 1: It | h.md" },
+    { agent: "claude", match: "every slice of the plan is done", reply: "The whole plan is done. Approved.\nTORYO: APPROVED" },
     { agent: "codex", match: "continue straight into the next unfinished slice", hang: true },
     { agent: "codex", match: "reviewed your last round", reply: "Fixed: the index now covers both columns, and a test checks it.\nTORYO: REVIEW Slice 1: Schema | docs/reviews/slice-1.md" },
     { agent: "codex", match: "Your role: builder", reply: "Built the schema: three tables and their migrations, with tests.\n\n- `users`, `projects` and `runs`\n- One migration per table\n\nTORYO: REVIEW Slice 1: Schema | docs/reviews/slice-1.md" },
@@ -65,7 +74,10 @@ try {
       version: 1,
       notify: { windows: false },
       agents: { codex: { command: [node, FAKE, "codex"] }, claude: { command: [node, FAKE, "claude"] }, codexapp: { exe: join(base, "none") } },
-      projects: [{ id: "demo", name: "Demo", path: repo, rules: "", decisions: "", agents: {}, gates: [{ name: "Tests", command: "true" }] }],
+      projects: [
+        { id: "demo", name: "Demo", path: repo, rules: "", decisions: "", agents: {}, gates: [{ name: "Tests", command: "true" }] },
+        { id: "slow", name: "Slow checks", path: slowRepo, rules: "", decisions: "", agents: {}, gates: [{ name: "Tests", command: "sleep 300" }] },
+      ],
     }),
   );
   const now = Date.now();
@@ -107,7 +119,89 @@ try {
   await until(async () => (await view(plan.id)).live.length === 0 && (await view(plan.id)).events.filter((e) => e.type === "turn" && /Noted/.test(e.text ?? "")).length === 2, "the planners' replies");
   await until(async () => (await view(plan.id)).questions.some((q) => q.kind === "plan-checkpoint"), "the planning checkpoint");
 
+  // A room in every state a ring shows, and several rooms working at once.
+  const room = (body) => post("api/rooms", { mode: "build", members: ["codex", "claude"], builder: "codex", reviewer: "claude", ...body });
+  const busy = [];
+  for (let i = 1; i <= 4; i++) busy.push(await room({ projectId: "demo", task: `Busy build ${i}`, title: `Busy build ${i}` }));
+  const checked = await room({ projectId: "slow", task: "Checked build", title: "Checked build" });
+  const failing = await room({ projectId: "demo", task: "Failing build", title: "Failing build" });
+  const tiny = await room({ projectId: "demo", task: "Tiny build", title: "Tiny build" });
+  const paused = await post("api/rooms", { projectId: "demo", mode: "chat", members: ["codex"], title: "Paused chat" });
+  await post(`api/rooms/${paused.id}/control`, { action: "pause" });
+  const status = async (id) => (await (await fetch(`${url}api/state`)).json()).rooms.find((r) => r.id === id);
+  await until(async () => (await status(checked.id)).working?.[0]?.kind === "gates", "the slow checks");
+  await until(async () => (await status(failing.id)).questions?.some((q) => q.kind === "error"), "the failed turn");
+  await until(async () => (await status(tiny.id)).status === "done", "the finished build");
+  await until(async () => (await Promise.all(busy.map((b) => status(b.id)))).every((r) => r.running.length), "the busy rooms");
+  // Held: Claude is held, and the room's builder is Claude.
+  await post("api/desk", { action: "hold", target: "claude" });
+  const held = await room({ projectId: "demo", task: "Held build", title: "Held build", builder: "claude", reviewer: "codex" });
+  await until(async () => (await status(held.id)).status === "held", "the held room");
+
   const browser = await chromium.launch();
+  // Each room's tile wears the ring for its state; the logo breathes for the building going on; and with several
+  // rooms working at once, the page keeps up (frames timed for three seconds).
+  {
+    const expected = { "History build": "build", "Busy build 1": "build", "Busy build 2": "build", "Busy build 3": "build", "Busy build 4": "build", "API plan": "needs", "Database chat": "needs", "Checked build": "checks", "Failing build": "error", "Tiny build": "done", "Paused chat": "paused", "Held build": "held" };
+    for (const theme of ["light", "dark"]) {
+      const ctx = await browser.newContext({ viewport: { width: 1440, height: 1100 }, colorScheme: theme });
+      const page = await ctx.newPage();
+      page.on("pageerror", (e) => errors.push(String(e)));
+      await page.goto(`${url}#/r/${build.id}`);
+      await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "History build");
+      await page.evaluate(() => document.fonts.ready);
+      const rings = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll(".roomlink")].map((b) => [b.querySelector(".ri-name").textContent, b.querySelector(".tile").dataset.ring])));
+      assert.deepEqual(Object.fromEntries(Object.keys(expected).map((k) => [k, rings[k]])), expected);
+      assert.ok(await page.$(".roomlink .tile[data-ring=build] canvas.sparkler"), "a working room's tile has its sparkler");
+      assert.ok(await page.$(".roomlink .tile[data-ring=done] .badge"), "a finished room's tile has its check");
+      assert.ok(await page.$(".roomlink .tile[data-ring=held] .badge"), "a held room's tile has its lock");
+      assert.ok(await page.$(".turn.live .avatar[data-ring=build] canvas.sparkler"), "the working agent wears its ring");
+      assert.match(await page.$eval("#liveMark", (m) => m.style.animation), /mk-build/);
+      // The sparklers on the screen are being drawn (one loop for all of them).
+      await page.waitForFunction(() => [...document.querySelectorAll(".roomlink canvas.sparkler")].some((c) => c.width !== 300));
+      await page.waitForTimeout(600);
+      await page.screenshot({ path: join(out, `rings-1440-${theme}.png`) });
+      if (theme === "light") {
+        // Drawing the rail again (any room changing) keeps a tile that shows the same thing: the same element, so its
+        // sparkler doesn't start over; and every tile's animations take their delay from the shared clock.
+        await page.evaluate(() => (document.querySelector(".roomlink[aria-current=true] .tile").dataset.mark = "kept"));
+        await post(`api/rooms/${paused.id}/messages`, { text: "Later.", to: "codex", answering: false });
+        await page.waitForTimeout(800);
+        assert.equal(await page.evaluate(() => document.querySelector(".roomlink[aria-current=true] .tile").dataset.mark), "kept");
+        const delays = await page.$eval(".roomlink .tile[data-ring=build]", (t) => ["--phb", "--phn", "--phm"].map((v) => parseFloat(t.style.getPropertyValue(v))));
+        assert.ok(delays.every((d) => d <= 0 && d > -3200), `negative delays from the clock: ${delays}`);
+        const frames = await page.evaluate(() => new Promise((resolve) => {
+          const gaps = [];
+          let last = performance.now();
+          const end = last + 3000;
+          const step = (t) => {
+            gaps.push(t - last);
+            last = t;
+            if (t < end) requestAnimationFrame(step);
+            else resolve(gaps);
+          };
+          requestAnimationFrame(step);
+        }));
+        frames.sort((a, b) => a - b);
+        const p95 = frames[Math.floor(frames.length * 0.95)];
+        const sparklers = await page.$$eval("canvas.sparkler", (c) => c.length);
+        console.log(`${sparklers} sparklers: ${frames.length} frames in 3 s, 95% within ${p95.toFixed(1)} ms`);
+        assert.ok(p95 < 34, `the page keeps up with ${sparklers} sparklers (95% of frames within ${p95.toFixed(1)} ms)`);
+        // The pixel ratio changes (zooming, a window moved to another screen): each sparkler's bitmap follows it,
+        // up to 2, in both directions.
+        const cdp = await page.context().newCDPSession(page);
+        for (const ratio of [2, 3, 1]) {
+          await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1100, deviceScaleFactor: ratio, mobile: false });
+          await page.waitForFunction((r) => {
+            const c = document.querySelector("#roomTile canvas.sparkler");
+            return c.width === Math.round(parseFloat(c.style.width) * Math.min(2, r));
+          }, ratio);
+        }
+        await cdp.send("Emulation.clearDeviceMetricsOverride");
+      }
+      await ctx.close();
+    }
+  }
   const errors = [];
   const shoot = async ({ width, height = 900, theme, motion = "no-preference", room, pane = "room", tab, sheet, file }) => {
     const ctx = await browser.newContext({ viewport: { width, height }, colorScheme: theme, reducedMotion: motion });
@@ -174,6 +268,30 @@ try {
     await shoot({ width: 390, height: 844, theme, room: build.id, pane: "rooms", file: `rooms-390-${theme}` });
   }
   await shoot({ width: 1440, theme: "light", motion: "reduce", room: build.id, file: "build-1440-reduced-motion" });
+  // With reduced motion: the rings stay, solid; no sparkler is drawn and nothing pulses.
+  {
+    const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: "reduce" })).newPage();
+    await page.goto(`${url}#/r/${build.id}`);
+    await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "History build");
+    await page.waitForTimeout(800);
+    const still = await page.evaluate(() => ({
+      rings: document.querySelectorAll(".tile[data-ring=build]").length,
+      shown: [...document.querySelectorAll("canvas.sparkler")].filter((c) => getComputedStyle(c).display !== "none").length,
+      drawn: [...document.querySelectorAll("canvas.sparkler")].filter((c) => c.width !== 300).length,
+      moving: document.getAnimations().filter((a) => a.playState === "running").length,
+    }));
+    assert.ok(still.rings > 0);
+    assert.deepEqual({ shown: still.shown, drawn: still.drawn, moving: still.moving }, { shown: 0, drawn: 0, moving: 0 });
+    // Reduced motion turned off: the sparklers start at once, though nothing on the page changes. (In the finished
+    // build's room, where no timer ticks.)
+    await page.goto(`${url}#/r/${tiny.id}`);
+    await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Tiny build");
+    await page.waitForTimeout(1000);
+    assert.equal(await page.$$eval("canvas.sparkler", (cs) => cs.filter((c) => c.width !== 300).length), 0);
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await page.waitForFunction(() => [...document.querySelectorAll(".roomlink canvas.sparkler")].some((c) => c.width !== 300), null, { timeout: 500 });
+    await page.close();
+  }
   // Sheets: a new room, and the settings.
   for (const [width, theme] of [[1440, "light"], [1440, "dark"], [390, "light"], [320, "dark"]]) {
     await shoot({ width, height: width > 400 ? 900 : 700, theme, room: build.id, sheet: "#newRoomBtn", file: `sheet-new-room-${width}-${theme}` });

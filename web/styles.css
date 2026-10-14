@@ -75,6 +75,72 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .avatar[data-agent="toryo"] svg { width: 70%; height: 70%; }
 .avatar.mini { --size: 20px; }
 
+/* ---------- Activity rings (docs/design-system.md) ----------
+   A room tile, or a working agent's monogram, wears a ring for what's happening: a sparkler runs round a faint
+   track while work goes on (drawn on a canvas, see rings.js), a question pulses in orange, the checks march, and a
+   still ring is paused, held, done or failed. Every animation takes a negative delay from one shared clock. */
+@property --spin { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@property --ob { syntax: "<number>"; inherits: true; initial-value: 1; }
+@property --op { syntax: "<number>"; inherits: true; initial-value: 1; }
+@property --om { syntax: "<number>"; inherits: true; initial-value: 1; }
+.tile, .avatar { --c: transparent; --rad: calc(var(--size) * 0.3); isolation: isolate; }
+:is(.tile, .avatar)::before, :is(.tile, .avatar)::after { content: ""; position: absolute; pointer-events: none; opacity: 0; transition: opacity var(--m-settle); }
+:is(.tile, .avatar)::before { inset: -5px; border-radius: calc(var(--rad) + 5px); box-shadow: 0 0 0 2px var(--c); }
+:is(.tile, .avatar)::after { inset: -10px; border-radius: calc(var(--rad) + 10px); box-shadow: 0 0 0 2px var(--you); }
+:is(.tile, .avatar)[data-ring="build"] { --c: var(--build); }
+:is(.tile, .avatar)[data-ring="review"] { --c: var(--review); }
+:is(.tile, .avatar)[data-ring="plan"] { --c: var(--plan); }
+:is(.tile, .avatar)[data-ring="chat"] { --c: var(--ink-2); }
+:is(.tile, .avatar)[data-ring="needs"] { --c: var(--you); }
+:is(.tile, .avatar)[data-ring="done"] { --c: var(--review); }
+:is(.tile, .avatar)[data-ring="error"] { --c: var(--bad); }
+/* Working: a faint track, the sparkler running round it, and a halo that breathes. */
+:is(.tile, .avatar):is([data-ring="build"], [data-ring="review"], [data-ring="plan"], [data-ring="chat"]) { animation: halo var(--m-breathe) ease-in-out infinite; animation-delay: var(--phb, 0s); }
+:is(.tile, .avatar):is([data-ring="build"], [data-ring="review"], [data-ring="plan"], [data-ring="chat"])::before { opacity: 1; box-shadow: 0 0 0 2px color-mix(in srgb, var(--c) 24%, transparent); }
+.sparkler { position: absolute; pointer-events: none; z-index: 2; }
+/* Needs you: an orange ring pulsing in place. Outside a ring that says something else, the same pulse, wider. */
+:is(.tile, .avatar)[data-ring="needs"]::before { opacity: 1; animation: beacon var(--m-beacon) ease-out infinite; animation-delay: var(--phn, 0s); }
+:is(.tile, .avatar)[data-needs]::after { opacity: 1; animation: beacon-out var(--m-beacon) ease-out infinite; animation-delay: var(--phn, 0s); }
+/* The checks: four grey dashes marching round. */
+:is(.tile, .avatar)[data-ring="checks"]::before { opacity: 1; box-shadow: none; padding: 2px; background: conic-gradient(from var(--spin), var(--check) 0 16%, transparent 0 25%, var(--check) 0 41%, transparent 0 50%, var(--check) 0 66%, transparent 0 75%, var(--check) 0 91%, transparent 0); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; animation: march var(--m-march) linear infinite; animation-delay: var(--phm, 0s); }
+/* Still: paused is dashed, held dotted (with a lock), done solid mint (with a check), failed solid red. */
+:is(.tile, .avatar)[data-ring="paused"]::before { opacity: 1; box-shadow: none; border: 2px dashed var(--muted); }
+:is(.tile, .avatar)[data-ring="held"]::before { opacity: 1; box-shadow: none; border: 2px dotted var(--ink-2); }
+:is(.tile, .avatar):is([data-ring="done"], [data-ring="error"])::before { opacity: 1; }
+.tile .badge { position: absolute; right: -7px; bottom: -7px; z-index: 1; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--surface); box-shadow: 0 0 0 1.5px var(--line-strong); color: var(--ink-2); }
+.tile .badge svg { width: 11px; height: 11px; stroke-width: 2.4; }
+.tile[data-ring="done"] .badge { background: var(--review-ink); color: var(--surface); box-shadow: none; }
+@keyframes halo {
+  0%, 100% { box-shadow: 0 0 10px -3px color-mix(in srgb, var(--c) 28%, transparent); }
+  50% { box-shadow: 0 0 24px 2px color-mix(in srgb, var(--c) 20%, transparent); }
+}
+@keyframes beacon {
+  0% { box-shadow: 0 0 0 2px var(--c), 0 0 0 2px color-mix(in srgb, var(--c) 60%, transparent); }
+  75%, 100% { box-shadow: 0 0 0 2px var(--c), 0 0 0 12px color-mix(in srgb, var(--c) 0%, transparent); }
+}
+@keyframes beacon-out {
+  0% { box-shadow: 0 0 0 2px var(--you), 0 0 0 2px color-mix(in srgb, var(--you) 55%, transparent); }
+  75%, 100% { box-shadow: 0 0 0 2px var(--you), 0 0 0 10px color-mix(in srgb, var(--you) 0%, transparent); }
+}
+@keyframes march { to { --spin: 360deg; } }
+/* The live logo: each block breathes while that kind of work runs anywhere on the desk (see rings.js). */
+@keyframes mk-build { 50% { --ob: 0.42; } }
+@keyframes mk-plan { 50% { --op: 0.42; } }
+@keyframes mk-review { 50% { --om: 0.42; } }
+/* What the rings mean, under the rooms. */
+.legend { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; box-shadow: 0 0 0 2px var(--c); }
+/* The slice being built, in the plan: its mark and its segment in the color of what's happening to it. */
+.slice[data-state="current"][data-k="build"] .mark { box-shadow: 0 0 0 2px color-mix(in srgb, var(--build) 45%, transparent); color: var(--build-ink); }
+.slice[data-state="current"][data-k="review"] .mark { box-shadow: 0 0 0 2px color-mix(in srgb, var(--review) 55%, transparent); color: var(--review-ink); }
+.slice[data-state="current"][data-k="checks"] .mark { box-shadow: 0 0 0 2px var(--check); color: var(--ink-2); }
+.slice[data-state="current"][data-k="idle"] .mark { box-shadow: inset 0 0 0 1.5px var(--line-strong); color: var(--muted); }
+.segbar i[data-s="now"][data-k="build"] { animation: pulse var(--m-march) ease-in-out infinite; animation-delay: var(--phm, 0s); }
+.segbar i[data-s="now"][data-k="review"] { background: var(--review); animation: pulse var(--m-march) ease-in-out infinite; animation-delay: var(--phm, 0s); }
+.segbar i[data-s="now"][data-k="checks"] { background: var(--check); }
+.segbar i[data-s="now"][data-k="idle"] { background: var(--line-strong); }
+
 /* ---------- Rail ---------- */
 .rail { overflow: auto; border-right: 1px solid var(--line); background: var(--surface); padding: 14px 12px 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .rooms { display: grid; gap: 14px; }
@@ -93,6 +159,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .roomlink .ri-state[data-k="bad"] { color: var(--bad-ink); font-weight: 600; }
 .rail > .btn { align-self: flex-start; }
 .railfoot { margin-top: auto; display: grid; gap: 10px; padding: 12px 10px 0; border-top: 1px solid var(--line); }
+.roomlink .tile { margin: 4px; }
 
 /* ---------- Room ---------- */
 .room { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 352px; }
@@ -457,6 +524,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
+  /* Rings stay, without the movement: no sparkler, solid rings, no pulses. */
+  .sparkler { display: none; }
+  :is(.tile, .avatar):is([data-ring="build"], [data-ring="review"], [data-ring="plan"], [data-ring="chat"])::before { box-shadow: 0 0 0 2px var(--c); }
+  #liveMark { animation: none !important; }
 }
 .modecard svg { width: 22px; height: 22px; color: var(--ink-2); }
 .modecard[data-mode="plan"] svg, .modecard[data-new="plan"] svg { color: var(--plan-ink); }

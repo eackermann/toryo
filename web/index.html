@@ -13,17 +13,17 @@
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <symbol id="mark" viewBox="0 0 512 512">
     <g transform="translate(256 256) scale(0.657142857143) translate(-129.903810567666 100)">
-      <g class="mk-build">
+      <g style="opacity: var(--ob, 1)">
         <path fill="#3A9CFD" d="M-173.205,-100 L-86.603,-50 L86.603,-150 L0,-200 Z"/>
         <path fill="#2583F8" d="M-86.603,-50 L-86.603,150 L0,100 L0,0 L86.603,-50 L86.603,-150 Z"/>
         <path fill="#116EE3" d="M-173.205,-100 L-173.205,100 L-86.603,150 L-86.603,-50 Z"/>
       </g>
-      <g class="mk-plan">
+      <g style="opacity: var(--op, 1)">
         <path fill="#B598FA" d="M0,-400 L173.205,-300 L259.808,-350 L86.603,-450 Z"/>
         <path fill="#9F84F1" d="M173.205,-300 L173.205,0 L259.808,-50 L259.808,-350 Z"/>
         <path fill="#7E66DA" d="M0,-400 L0,-200 L86.603,-150 L86.603,-50 L173.205,0 L173.205,-300 Z"/>
       </g>
-      <g class="mk-review">
+      <g style="opacity: var(--om, 1)">
         <path fill="#7CEACD" d="M0,0 L259.808,150 L346.410,100 L259.808,50 L433.013,-50 L259.808,-150 L259.808,-50 L173.205,0 L86.603,-50 Z"/>
         <path fill="#54CFB6" d="M259.808,150 L259.808,250 L346.410,200 L346.410,100 Z"/>
         <path fill="#38C0A6" d="M0,0 L0,100 L259.808,250 L259.808,150 Z"/>
@@ -46,6 +46,13 @@
     <aside class="rail" id="rail" aria-label="Rooms">
       <div class="rooms" id="rooms"></div>
       <button class="btn" id="newRoomBtn" type="button">New room</button>
+      <div class="railfoot">
+        <p class="eyebrow">What the rings mean</p>
+        <div class="legend">
+          <span><i style="--c: var(--build)"></i>Building</span><span><i style="--c: var(--review)"></i>Reviewing</span>
+          <span><i style="--c: var(--plan)"></i>Planning</span><span><i style="--c: var(--you)"></i>Needs you</span>
+        </div>
+      </div>
     </aside>
 
     <main id="view">
