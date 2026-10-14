@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { toryoHome, truncate } from "./util.mjs";
 import { stripStatus } from "./protocol.mjs";
+import { durationWords, sessionWords } from "../web/phases.js";
 
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor", grok: "Grok", codexapp: "Codex app" };
 const name = (a) => NAMES[a] ?? a;
@@ -104,7 +105,9 @@ export class ToryoClient {
     if (!rooms.length) lines.push("No rooms yet.");
     for (const r of rooms.slice(0, 12)) {
       const who = r.running.length ? ` · ${r.running.map(name).join(" and ")} working` : "";
-      lines.push(`• ${r.title} [${r.mode}, ${r.status}${who}] (id ${r.id})`);
+      // The session's length, where the line has room for it; `toryo show` says it phase by phase.
+      const session = r.session?.length >= 60_000 ? ` · ${durationWords(r.session.length)} this session` : "";
+      lines.push(`• ${r.title} [${r.mode}, ${r.status}${who}${session}] (id ${r.id})`);
       for (const q of r.questions ?? (r.waiting ? [r.waiting] : [])) lines.push(`    waiting for you: ${asked(q)}`);
     }
     lines.push(`Agents: ${Object.entries(agents ?? {}).map(([id, a]) => `${name(id)} ${a.installed ? "✓" : "✗"}`).join("  ")}`);
@@ -116,6 +119,7 @@ export class ToryoClient {
     const view = await this.call("GET", `/api/rooms/${summary.id}`);
     const r = view.room;
     const lines = [`${r.title} · ${r.mode} · ${r.status} (id ${r.id})`];
+    if (summary.session) lines.push(sessionWords(summary.session));
     if (r.mode === "build" && r.build)
       lines.push(`Builder ${name(r.crew.builder)}, reviewer ${name(r.crew.reviewer)}. Plan: ${r.build.planPath || "none"}. Current: ${r.build.slice || "-"}, round ${r.build.round}. Approved: ${r.build.approved.join(", ") || "none yet"}.`);
     if (r.mode === "plan" && r.plan) lines.push(`Planning “${r.plan.topic}”, phase: ${r.plan.phase}. Plan file: ${r.plan.planPath}.`);

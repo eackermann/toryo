@@ -65,6 +65,7 @@ Numbers are tabular wherever they change. The three families are bundled as woff
 - **The checks row.** One line per run: passed or failed, then each check with its time. A failed check's output folds out.
 - **Slice markers and folded rounds.** In a build, each slice starts with a marker (its number, its name, and how it's going). The rounds before a slice's last one fold into one line, unless something in them is still open.
 - **Plan progress.** One segment per slice: approved mint, the slice in progress blue, the rest empty. Then each slice, with the time an approved one took.
+- **The session strip.** Under the room's header: a thin lane per phase (planning purple, building blue, reviewing mint, checks grey, other work slate; the *other* lane only when there is some), on one time axis. Waiting for you is an orange tint behind the lanes; paused or held time is hatched. A break of more than 30 minutes with nothing running is drawn as 3% of the time worked, with its length written in it. The totals in words sit on the right, as a quiet button that opens the full list. On a phone: one bar of the totals, and the words below it, 44 px tall. Nothing on it moves. Drawn by `renderSession` from the shared calculation in [`web/phases.js`](../web/phases.js), which the desk uses for its sentence too.
 - **Usage meters.** Neutral until 70%, amber from 70%, red from 90%.
 - **Sheets and toasts.** Sheets rise in the middle of the screen; toasts appear at the top right (at the bottom on a phone).
 

@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+import { DEFAULT_SETTINGS } from "../src/engine.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FAKE = join(root, "test", "fake-agent.mjs");
@@ -60,6 +61,9 @@ try {
     // whose 5-hour limit is over it with no reset time.
     { agent: "codex", match: "Use it all up", codexUsage: { primary: { used_percent: 96, window_minutes: 300, resets_at: Math.round(Date.now() / 1000) + 3600 }, secondary: { used_percent: 95, window_minutes: 10080, resets_at: Math.round(Date.now() / 1000) + 86400 } }, reply: "Used.\nTORYO: REPLY" },
     { agent: "claude", match: "Unknown reset", rateLimit: { status: "allowed", unifiedWindows: { five_hour: { utilization: 0.97 } } }, reply: "OK.\nTORYO: REPLY" },
+    // Step 5u: a turn long enough to watch on the session's strip. Step 5v: a build whose checks it watches.
+    { agent: "codex", match: "Strip turn", progress: "npm test", workMs: 3000, reply: "Done.\nTORYO: REPLY" },
+    { agent: "codex", match: "Strip checks", reply: "Built.\nTORYO: REVIEW Slice 1: It | h.md" },
     // Step 5s: a turn that takes a while to start (preparing), then works, saying what it runs.
     { agent: "codex", match: "Phases for Home", delayMs: 2500, progress: "npm run build", workMs: 4000, reply: "Built.\nTORYO: REPLY" },
     { agent: "codex", match: "Slow review of the (lexer|docs)", delayMs: 6000, reply: "Built it.\nTORYO: REVIEW Slice 1: It | h.md" },
@@ -1171,6 +1175,119 @@ try {
   assert.equal(await page.inputValue('#guardForm fieldset[data-group="openai"] input[name=at][data-type="weekly"]'), "99");
   await page.click("#guardForm [data-close]");
   await until(async () => (await view(usedUp.id)).live.length === 0 && (await view(unknown.id)).live.length === 0);
+
+  // 5u. The session's strip at the top of a room: a lane per phase, the running work growing, each piece a link to
+  // its turn, and the totals in words, which open the whole list, also by keyboard.
+  const stripRoom = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], title: "Strip room", text: "Strip turn.", to: "codex" });
+  await openRoom(stripRoom.id, "Strip room");
+  await page.waitForSelector('#sessionStrip:not([hidden]) .ss-lane[data-lane="other"] .ss-seg');
+  const stripSeg = '#sessionStrip .ss-lane[data-lane="other"] .ss-seg';
+  assert.match(await page.getAttribute(stripSeg, "title"), /^Codex, reply: \d\d:\d\d–now \(\d+ s\)$/);
+  const segWidth = await page.$eval(stripSeg, (a) => a.getBoundingClientRect().width);
+  await until(async () => (await view(stripRoom.id)).live.length === 0);
+  await page.waitForFunction((sel) => !/now/.test(document.querySelector(sel)?.title ?? "now"), stripSeg);
+  assert.ok((await page.$eval(stripSeg, (a) => a.getBoundingClientRect().width)) > segWidth, "it grew while it ran");
+  assert.match(await page.innerText("#sessionStrip .ss-words"), /^Other work \d+ s · \d+ s in all$/);
+  const stripTurn = (await view(stripRoom.id)).events.find((e) => e.type === "turn");
+  // A piece of the strip: its turn, in view.
+  await page.evaluate(() => (document.querySelector("#log").scrollTop = 0));
+  await page.click(stripSeg);
+  await page.waitForFunction((id) => {
+    const c = document.querySelector(`#log [data-id="${id}"]`)?.getBoundingClientRect();
+    const l = document.querySelector("#log").getBoundingClientRect();
+    return c && c.top >= l.top - 1 && c.bottom <= l.bottom + 1;
+  }, stripTurn.id);
+  // By keyboard: the words open the list; each piece in it goes to its turn. News in the room (a pause, then a
+  // resume) redraws the strip without taking the focus from the words.
+  await page.focus("#sessionStrip .ss-words");
+  await post(`api/rooms/${stripRoom.id}/control`, { action: "pause" });
+  await until(async () => (await view(stripRoom.id)).room.paused);
+  await post(`api/rooms/${stripRoom.id}/control`, { action: "resume" });
+  await page.waitForSelector('#sessionStrip .ss-shade[data-k="paused"]');
+  assert.ok(await page.evaluate(() => document.activeElement?.matches("#sessionStrip .ss-words")), "the words keep the focus");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector("#sheet:not([hidden]) .ss-list a[data-seg]");
+  assert.match(await page.innerText("#sheet"), /This session, \d+ s: other work \d+ s(, paused or held \d+ s)?\.[\s\S]*Other work[\s\S]*Codex, reply/);
+  await page.focus("#sheet .ss-list a[data-seg]");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector("#sheet", { state: "hidden" });
+  assert.match(await page.evaluate(() => document.activeElement?.tagName ?? ""), /BODY|A|BUTTON|DIV|ARTICLE/);
+
+  // 5v. Checks on the strip: watched as they start (their first news is their output, which doesn't say what they
+  // are), and in a room opened while they run. Once done, each page has them once, no longer running.
+  const projectGates = (gates) => fetch(`${url}api/projects/ui`, { method: "PATCH", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify({ gates }) });
+  await projectGates([{ name: "Slow check", command: "sleep 4", timeoutMin: 45 }]);
+  const checksRoom = await post("api/rooms", { projectId: "ui", mode: "build", task: "Strip checks", title: "Checks strip", members: ["codex", "claude"], builder: "codex", reviewer: "claude" });
+  await openRoom(checksRoom.id, "Checks strip");
+  const checksSeg = '#sessionStrip .ss-lane[data-lane="checks"] .ss-seg';
+  const runningChecks = (sel) => [...document.querySelectorAll(sel)].some((x) => /^The checks: .*–now/.test(x.title));
+  await page.waitForFunction(runningChecks, checksSeg);
+  const during = await page.context().newPage();
+  during.on("pageerror", (e) => errors.push(String(e)));
+  await during.goto(`${url}#/r/${checksRoom.id}`);
+  await during.waitForFunction(runningChecks, checksSeg);
+  await until(async () => (await view(checksRoom.id)).events.some((e) => e.type === "gate"));
+  for (const p of [page, during])
+    await p.waitForFunction((sel) => {
+      const pieces = [...document.querySelectorAll(sel)];
+      return pieces.length === 1 && /^The checks: \d\d:\d\d–\d\d:\d\d \(\d s\)$/.test(pieces[0].title);
+    }, checksSeg);
+  await during.close();
+  await post(`api/rooms/${checksRoom.id}/control`, { action: "stop" });
+  await projectGates([{ name: "Slow check", command: "true", timeoutMin: 45 }]);
+
+  // 5w. A room with thousands of events: a refresh takes in only what changed and draws the strip once, so the
+  // page doesn't stall. (A desk of its own, the room written straight into its folder.)
+  const home3 = join(base, "home3");
+  const longId = "rlongroom0001";
+  mkdirSync(join(home3, "rooms", longId), { recursive: true });
+  writeFileSync(join(home3, "config.json"), JSON.stringify({ version: 1, notify: { windows: false }, agents: { codex: { command: [node, FAKE, "codex"] } }, projects: [{ id: "ui", name: "ui", path: repo, rules: "", decisions: "", agents: {}, gates: [] }] }));
+  const longStart = Date.now() - 3 * 86_400_000;
+  const stamp = (m) => new Date(longStart + m * 60_000).toISOString();
+  writeFileSync(
+    join(home3, "rooms", longId, "room.json"),
+    JSON.stringify({ id: longId, projectId: "ui", title: "Long room", mode: "chat", createdAt: stamp(0), updatedAt: stamp(3000), crew: { members: ["codex"], builder: "codex", reviewer: "codex" }, sessions: {}, seen: {}, queue: [], flow: "flong", paused: false, stopped: false, done: false, waiting: null, waitingQueue: [], settings: { ...DEFAULT_SETTINGS }, build: null, plan: null, discuss: null, stats: { turns: 0, agents: {} } }),
+  );
+  const longEvents = [];
+  for (let i = 0; i < 1500; i++) {
+    longEvents.push({ id: `t${i}`, type: "turn", agent: "codex", role: "builder", kind: ["build", "review", "plan-proposal"][i % 3], state: "done", at: stamp(2 * i), startedAt: stamp(2 * i), endedAt: stamp(2 * i + 1), text: `Turn ${i}.` });
+    longEvents.push({ id: `s${i}`, type: "system", text: `Note ${i}.`, level: "info", at: stamp(2 * i + 1) });
+  }
+  writeFileSync(join(home3, "rooms", longId, "events.jsonl"), longEvents.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  const port3 = await new Promise((resolve) => {
+    const srv = createServer().listen(0, "127.0.0.1", () => {
+      const p3 = srv.address().port;
+      srv.close(() => resolve(p3));
+    });
+  });
+  const desk3 = spawn(node, [join(root, "bin", "toryo.mjs"), "--port", String(port3)], { env: { ...process.env, TORYO_HOME: home3, TORYO_WEB_DIR: web, FAKE_SCRIPT: join(base, "script.json"), CODEX_HOME: join(base, "codex") }, stdio: ["ignore", "pipe", "inherit"] });
+  try {
+    await new Promise((resolve) => desk3.stdout.on("data", (d) => /Toryo is running/.test(d) && resolve()));
+    const long = await (await browser.newContext({ viewport: { width: 1400, height: 900 } })).newPage();
+    long.on("pageerror", (e) => errors.push(String(e)));
+    await long.goto(`http://localhost:${port3}/#/r/${longId}`);
+    await long.waitForSelector('#sessionStrip:not([hidden]) .ss-lane[data-lane="plan"] .ss-seg');
+    const longWords = /^Building 8 h 20 · Reviewing 8 h 20 · Planning 8 h 20 · /;
+    assert.match(await long.innerText("#sessionStrip .ss-words"), longWords);
+    // Any task over 50 ms from here on is noted; the room's news (a rename) makes the page fetch it again.
+    await long.evaluate(() => {
+      window.longTasks = [];
+      new PerformanceObserver((list) => window.longTasks.push(...list.getEntries().map((e) => e.duration))).observe({ type: "longtask" });
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const refetched = long.waitForResponse((r) => r.url().endsWith(`/api/rooms/${longId}`));
+    await fetch(`http://localhost:${port3}/api/rooms/${longId}/control`, { method: "POST", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify({ action: "rename", title: "Long room, renamed" }) });
+    await refetched;
+    await long.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Long room, renamed");
+    await new Promise((r) => setTimeout(r, 300));
+    const longest = Math.max(0, ...(await long.evaluate(() => window.longTasks)));
+    assert.ok(longest < 1000, `a refresh of a room with 3000 events held the page for ${Math.round(longest)} ms`);
+    assert.match(await long.innerText("#sessionStrip .ss-words"), longWords);
+    await long.close();
+  } finally {
+    desk3.kill("SIGTERM");
+    await new Promise((r) => desk3.once("exit", r));
+  }
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");

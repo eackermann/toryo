@@ -12,6 +12,7 @@ import { UsageBook, groupOf, normalizeGroups, windowLabel } from "./usage.mjs";
 import { defaultDesk, holdAgents, holdKey, holdLabel, readDesk } from "./desk.mjs";
 import { evaluate as evaluateGuard, excepted, expire as expireGuard, guardWindow as parseGuardWindow, holdKeyOf, holdsFor, offerText, policyFor, setPolicy, when } from "./guard.mjs";
 import { noteIntent } from "../web/intent.js";
+import { Timeline } from "../web/phases.js";
 import { firstLine, nowIso, shortId, slugify, truncate } from "./util.mjs";
 
 export const DEFAULT_SETTINGS = {
@@ -90,6 +91,8 @@ export class Engine extends EventEmitter {
     // approvals), kept up to date as events come in, and the desk's own journal (src/guard.mjs, deskControl).
     this.notable = new Map();
     this.deskJournal = [];
+    // Each room's session timeline (web/phases.js), kept event by event: how long it spent on each phase.
+    this.timelines = new Map();
     // While acting on a turn's outcome (#actOnOutcome): rooms whose saves wait for one save at the end, and the turn
     // whose outcome it is (questions asked then remember it, so acting on it again after a restart doesn't ask twice).
     this.outcomeRooms = new Set();
@@ -133,8 +136,12 @@ export class Engine extends EventEmitter {
       if (!room || room.archived) continue;
       this.rooms.set(id, room);
       this.events.set(id, this.store.loadEvents(id));
-      for (const ev of this.events.get(id)) this.#noteNotable(room, ev);
+      for (const ev of this.events.get(id)) {
+        this.#noteNotable(room, ev);
+        this.#timelineOf(room).add(ev);
+      }
       this.#recover(room);
+      this.#markPause(room);
     }
     // Turns whose end was recorded but whose outcome Toryo hadn't acted on when it stopped: act on them now, once,
     // with every room loaded and before anything starts.
@@ -218,6 +225,8 @@ export class Engine extends EventEmitter {
     this.usageTimer = null;
     clearInterval(this.guardTimer);
     this.guardTimer = null;
+    // Checks cut off here run again after the restart (the room keeps them); the session keeps the time they ran.
+    for (const run of this.running.values()) if (run.req.kind === "gates" && this.rooms.has(run.roomId)) this.#checksCut(this.rooms.get(run.roomId), run, "restart");
     for (const run of this.running.values()) {
       run.controller.abort("shutdown");
       run.abandon?.abort();
@@ -771,9 +780,13 @@ export class Engine extends EventEmitter {
           if (room.archived) continue;
           const reasons = [...new Set(room.queue.flatMap((q) => this.blockersFor(q)))].join("; ");
           if (reasons === (room.deskNotice ?? "")) continue;
+          const was = room.deskNotice;
           room.deskNotice = reasons || undefined;
           touched.add(room);
           if (reasons) this.#system(room, `Waiting: ${reasons}. It goes on when that ends.`);
+          // For the session's timeline: when desk-wide controls began holding its work, and when they let go.
+          if (reasons && !was) this.#mark(room, "held");
+          if (!reasons && was) this.#mark(room, "free");
         }
       } while (this.scheduleAgain);
     } finally {
@@ -1014,6 +1027,8 @@ export class Engine extends EventEmitter {
       // page still shows the pause or the hold under it.
       paused: Boolean(room.paused || room.stopped),
       held: room.queue.length > 0 && room.queue.every((q) => this.#heldUp(room).has(q)),
+      // The session so far, phase by phase (until rooms have sessions, a room's whole history).
+      session: this.#session(room),
       updatedAt: room.updatedAt,
       crew: room.crew,
     };
@@ -1300,6 +1315,7 @@ export class Engine extends EventEmitter {
     room.archived = true;
     this.rooms.delete(room.id);
     this.notable.delete(room.id);
+    this.timelines.delete(room.id);
     this.store.saveRoom(room);
     this.emit("state");
   }
@@ -1317,6 +1333,7 @@ export class Engine extends EventEmitter {
     room.mode = "build";
     room.done = false;
     room.stopped = false;
+    this.#markPause(room);
     this.#clearWaiting(room, "(superseded: building started)");
     room.discuss = null;
     this.#newFlow(room);
@@ -1405,6 +1422,7 @@ export class Engine extends EventEmitter {
     room.mode = "plan";
     room.done = false;
     room.stopped = false;
+    this.#markPause(room);
     this.#clearWaiting(room, "(superseded: a new planning round started)");
     room.discuss = null;
     this.#newFlow(room);
@@ -1541,6 +1559,7 @@ export class Engine extends EventEmitter {
     if (room.stopped) {
       room.stopped = false;
       room.paused = false;
+      this.#markPause(room);
       this.#system(room, "Resumed by your message.");
     }
     if (target && !target.eventId) return { event: this.#answerChat(room, target, { text }), routed: { agents: [target.from], why: "your answer to its question" } };
@@ -1554,7 +1573,7 @@ export class Engine extends EventEmitter {
     // Ask (it needs an answer) or Tell (an instruction). Without your choice, a question mark or a question means Ask.
     const ev = this.#append(room, { type: "owner", text, to: routed.agents, why: routed.why, delivery, allowWrite, intent: intent === "ask" || intent === "tell" ? intent : noteIntent(text), answers: closes.length ? closes.map(answerOf) : undefined, deliveredTo: [] });
     for (const q of closes) {
-      this.#patch(room, q, { open: false, answer: text });
+      this.#patch(room, q, { open: false, answer: text, closedAt: nowIso() });
       room.openChat = (room.openChat ?? []).filter((id) => id !== q.id);
     }
 
@@ -1734,7 +1753,7 @@ export class Engine extends EventEmitter {
     const body = accept ? acceptRecommendation(q.recommendation) : String(text ?? "").trim();
     if (!body) throw new UserError("Write an answer first.");
     const ev = this.#append(room, { type: "owner", text: body, to: [q.from], kind: "answer", answers: [answerOf(q)], deliveredTo: [] });
-    this.#patch(room, q, { open: false, answer: body });
+    this.#patch(room, q, { open: false, answer: body, closedAt: nowIso() });
     room.openChat = room.openChat.filter((id) => id !== q.id);
     if (!room.queue.some((r) => r.agent === q.from))
       this.#enqueue(room, { agent: q.from, kind: "chat", access: "read", parallel: true, whileWaiting: true, instruction: prompts.chat({ canWrite: false, others: [] }) });
@@ -1797,7 +1816,7 @@ export class Engine extends EventEmitter {
   #closeQuestion(room, answer, w = room.waiting) {
     if (!w?.eventId) return;
     const q = this.events.get(room.id).find((e) => e.id === w.eventId);
-    if (q) this.#patch(room, q, { open: false, answer });
+    if (q) this.#patch(room, q, { open: false, answer, closedAt: nowIso() });
   }
 
   control(roomId, action, args = {}) {
@@ -1805,12 +1824,14 @@ export class Engine extends EventEmitter {
     switch (action) {
       case "pause":
         room.paused = true;
+        this.#markPause(room);
         this.#system(room, this.#runningIn(room).length ? "Pausing: the current turn finishes, nothing new starts." : "Paused.");
         break;
       case "resume": {
         const wasStopped = room.stopped;
         room.paused = false;
         room.stopped = false;
+        this.#markPause(room);
         this.#system(room, "Resumed.");
         if (wasStopped && room.mode === "build" && room.build && !room.done && !room.queue.length && !this.#allWaiting(room).length)
           this.#enqueueBuilder(room, "build-note", "The owner resumed the run. Continue where you left off, and end with TORYO: REVIEW, OWNER or DONE.");
@@ -1831,6 +1852,7 @@ export class Engine extends EventEmitter {
         room.discuss = null;
         // Whatever is still finishing after the stop belongs to the stopped run and drives nothing.
         this.#newFlow(room, { note: false });
+        this.#markPause(room);
         this.#system(room, "Stopped. Nothing runs until you resume or start something new.");
         for (const run of running) this.#stopRun(room, run);
         // Stop pressed again with the app's turn kept but not being followed (Toryo lost track of it): let it go.
@@ -3113,6 +3135,7 @@ export class Engine extends EventEmitter {
       console.error("[toryo] checks crashed:", error);
       this.running.delete(run.turnId);
       room.activeGate = null;
+      if (!this.shuttingDown) this.#checksCut(room, run, "crashed");
       if (!this.shuttingDown && !this.#stale(room, req))
         this.#wait(room, { kind: "error", from: null, question: `Toryo's checks crashed: ${firstLine(error?.message ?? error)}`, recommendation: "Retry", retryReq: { ...req } });
       this.#save(room);
@@ -3136,10 +3159,13 @@ export class Engine extends EventEmitter {
     room.activeGate = null;
     const b = room.build;
     if (results.cancelled || room.stopped || this.#stale(room, req) || !b) {
+      // Cut short: nothing acts on it, but the session keeps the time it ran.
+      this.#checksCut(room, run, results.cancelled || room.stopped ? "stopped" : "superseded");
       this.#save(room);
       return this.#pump(room);
     }
-    if (results.length) this.#append(room, { type: "gate", results });
+    if (results.length) this.#append(room, { type: "gate", results, startedAt: run.startedAt, runId: run.turnId });
+    run.recorded = true;
     const failed = results.filter((r) => !r.ok);
     if (!failed.length) {
       b.gateRetries = 0;
@@ -3398,6 +3424,7 @@ export class Engine extends EventEmitter {
     this.events.get(room.id).push(event);
     this.store.appendEvent(room.id, event);
     this.#noteNotable(room, event);
+    this.#timelineOf(room).add(event);
     room.updatedAt = event.at;
     this.emit("event", { roomId: room.id, event });
     return event;
@@ -3407,8 +3434,52 @@ export class Engine extends EventEmitter {
     Object.assign(ev, patch);
     this.store.appendEvent(room.id, { id: ev.id, ...patch });
     this.#noteNotable(room, ev);
+    this.#timelineOf(room).add(ev);
     room.updatedAt = nowIso();
     if (emit) this.emit("event", { roomId: room.id, event: ev });
+  }
+
+  /**
+   * A moment for the session's timeline (web/phases.js): paused, resumed, stopped, held (desk-wide controls hold its
+   * work) or free. Not shown in the room, nor sent to agents.
+   */
+  #mark(room, what, extra = {}) {
+    this.#append(room, { type: "mark", what, ...extra });
+  }
+
+  /**
+   * The room's pause on its session's timeline, however it changed (Pause, Stop, Resume, a message to a stopped
+   * room, a new build or plan, a restart that interrupted its turns): a mark when the room goes from working to
+   * paused or stopped, or back. A new build clears a stop but not a pause: the room stays paused, and no mark.
+   */
+  #markPause(room) {
+    const paused = Boolean(room.paused || room.stopped);
+    const was = this.#timelineOf(room).pausedNow();
+    if (paused && !was) this.#mark(room, room.stopped ? "stopped" : "paused");
+    else if (!paused && was) this.#mark(room, "resumed");
+  }
+
+  /** A checks run cut short (stopped, superseded by a new run of the room, crashed, Toryo stopping): the time it ran, for the session. */
+  #checksCut(room, run, why) {
+    if (run.recorded) return;
+    run.recorded = true;
+    this.#mark(room, "checks", { runId: run.turnId, startedAt: run.startedAt, why });
+  }
+
+  #timelineOf(room) {
+    let t = this.timelines.get(room.id);
+    if (!t) this.timelines.set(room.id, (t = new Timeline()));
+    return t;
+  }
+
+  /** The room's session so far: when it began, how long it has lasted, and each phase's total (see web/phases.js). */
+  #session(room) {
+    const live = this.#runningIn(room)
+      .filter((r) => r.req.kind === "gates")
+      .map((r) => ({ id: r.turnId, kind: "gates", agent: "toryo", startedAt: r.startedAt }));
+    const t = this.#timelineOf(room);
+    const v = t.view({ now: this.now(), live, end: room.done && t.last != null ? t.last : null });
+    return { start: new Date(v.start).toISOString(), length: v.length, totals: v.totals, overlap: v.overlap };
   }
 
   #system(room, text, { forAgents = false, level = "info" } = {}) {

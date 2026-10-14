@@ -3,6 +3,7 @@ import { noteIntent } from "./intent.js";
 import { limitMeters } from "./meters.js";
 import { stripStatus } from "./status.js";
 import { markAnimation, phases, rethemeSparklers, ringFor, ringParts, wakeSparklers, workKind } from "./rings.js";
+import { LANES, Timeline, durationWords, phaseList, sessionWords } from "./phases.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -130,6 +131,9 @@ const S = {
   // Questions a send from Home found already answered elsewhere: their cards say so until dismissed.
   homeStale: new Set(),
   deskResult: null,
+  // The open room's session timeline (phases.js), kept event by event, and what it last showed.
+  timeline: null,
+  session: null,
   seen: readSeen(),
   connected: false,
 };
@@ -322,13 +326,24 @@ function refreshRoomSoon() {
   refreshTimer = setTimeout(async () => {
     if (!S.roomId || S.page !== "room") return;
     const n = ++refreshes;
+    // What was running before the fetch: what the desk no longer lists has ended. (Anything that started while the
+    // fetch was on its way is kept: its own news brought it.)
+    const had = new Set(S.live.keys());
     try {
       const v = await fetchView(S.roomId);
       // A later refresh started meanwhile: its picture is newer.
       if (n !== refreshes || v.room.id !== S.roomId) return;
       S.view.room = v.room;
-      for (const l of v.live) if (!S.live.has(l.turnId)) S.live.set(l.turnId, l);
-      for (const ev of v.events) upsertEvent(ev, { quiet: true });
+      // The desk's word on what runs: when each started and what it is (a checks run's first news is its output,
+      // which says neither), keeping the output the page has already shown.
+      const listed = new Set(v.live.map((l) => l.turnId));
+      for (const id of had) if (!listed.has(id)) S.live.delete(id);
+      for (const l of v.live) {
+        const mine = S.live.get(l.turnId);
+        S.live.set(l.turnId, { ...l, activity: mine?.activity.length > l.activity.length ? mine.activity : l.activity });
+      }
+      // Only what changed is taken in, and the strip is drawn once, below, however many events the room has.
+      for (const ev of v.events) if (S.rendered.get(ev.id) !== JSON.stringify(ev)) upsertEvent(ev, { quiet: true });
       renderTop();
       renderContext();
       renderCrew();
@@ -396,6 +411,8 @@ async function loadRoom(id, { keepScroll = false, open = false } = {}) {
     S.view = v;
     if (switching) restoreDraft(v.room);
     S.live = new Map(v.live.map((l) => [l.turnId, l]));
+    S.timeline = new Timeline();
+    for (const ev of v.events) S.timeline.add(ev);
     if (S.page === "room" && location.hash !== `#/r/${id}`) history.replaceState(null, "", `#/r/${id}`);
     renderTop();
     renderRooms();
@@ -454,6 +471,7 @@ function renderTop() {
     return;
   }
   paintHeadTile(S.state?.rooms.find((x) => x.id === r.id) ?? { ...r, title: r.title });
+  renderSession();
   wakeSparklers();
   $("#roomTitle").textContent = r.title;
   $("#roomWhere").textContent = p ? `${p.name} · ${p.path}` : "";
@@ -845,6 +863,13 @@ function renderTimeline(scroll = true) {
 
 function upsertEvent(ev, { quiet = false } = {}) {
   const events = S.view.events;
+  // The session's timeline takes it in (only what it says changes: no rescan); a refresh draws the strip once.
+  if (S.timeline && ["turn", "gate", "question", "owner", "mark", "system"].includes(ev.type)) {
+    S.timeline.add(ev);
+    if (!quiet) renderSession();
+  }
+  // A checks run that ended, with its result or cut short: no longer running.
+  if (ev.runId) S.live.delete(ev.runId);
   const i = events.findIndex((e) => e.id === ev.id);
   const before = i >= 0 ? events[i] : null;
   if (i >= 0) events[i] = ev;
@@ -1207,8 +1232,11 @@ function gateEl(ev) {
 function onActivity({ turnId, agent, item }) {
   let live = S.live.get(turnId);
   if (!live) {
-    live = { turnId, agent, activity: [], startedAt: new Date().toISOString() };
+    // Its first news, before anything else about it (a checks run has no event until it ends): Toryo's own work is
+    // the checks; the desk says when it started, and what anything else is, on the refresh this asks for.
+    live = { turnId, agent, kind: agent === "toryo" ? "gates" : undefined, activity: [], startedAt: item.at ?? new Date().toISOString() };
     S.live.set(turnId, live);
+    refreshRoomSoon();
   }
   live.activity.push(item);
   if (live.activity.length > 80) live.activity.shift();
@@ -2161,6 +2189,114 @@ function roomSheet() {
   );
 }
 
+// ------------------------------------------------------------------ the session's timeline
+
+const LANE_NAMES = { plan: "Planning", build: "Building", review: "Reviewing", checks: "Checks", other: "Other work" };
+
+/**
+ * The strip at the top of the room: one lane per phase on one time axis, long breaks drawn short, waiting for you
+ * shaded, paused or held hatched, and the totals in words, which open the full list (for the keyboard and screen
+ * readers). On a phone, one bar of the totals. Drawn from the room's events as they come, and once a minute.
+ */
+function renderSession() {
+  const box = $("#sessionStrip");
+  const r = room();
+  if (!r || !S.timeline || S.page !== "room") return;
+  const live = [...S.live.values()].filter((l) => l.kind === "gates").map((l) => ({ id: l.turnId, kind: "gates", agent: "toryo", startedAt: l.startedAt }));
+  const v = S.timeline.view({ live, end: r.done && S.timeline.last != null ? S.timeline.last : null });
+  S.session = v;
+  if (!v.segments.length) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const x = sessionAxis(v);
+  const span = (a, b, min = 0) => `left:${x(a).toFixed(3)}%;width:${Math.max(min, x(b) - x(a)).toFixed(3)}%`;
+  const lanes = LANES.filter((lane) => lane !== "other" || v.totals.other > 0);
+  const list = phaseList(v.totals);
+  const words = `${list.filter((p) => LANES.includes(p.key)).map((p) => `${LANE_NAMES[p.key]} ${durationWords(p.ms)}`).join(" · ") || "Nothing run yet"} · ${durationWords(v.length)} in all`;
+  const worked = LANES.reduce((n, l) => n + v.totals[l], 0) || 1;
+  // Built once, then changed in place, each part only when it changed: the words keep the focus while news comes in.
+  if (!box.firstElementChild) {
+    box.innerHTML = `<div class="ss-track" role="img"></div><div class="ss-bar" aria-hidden="true"></div>
+      <button type="button" class="ss-words" data-session-list title="The session, phase by phase"></button>`;
+  }
+  const track = $(".ss-track", box);
+  track.setAttribute("aria-label", sessionWords(v));
+  setHtml(track, `${v.waiting.map(([a, b]) => `<i class="ss-shade" data-k="waiting" style="${span(a, b)}"></i>`).join("")}
+      ${[...v.paused, ...v.held].map(([a, b]) => `<i class="ss-shade" data-k="paused" style="${span(a, b)}"></i>`).join("")}
+      ${lanes
+        .map((lane) => `<div class="ss-lane" data-lane="${lane}">${v.segments
+          .filter((s) => s.lane === lane)
+          .map((s) =>
+            // A link to its turn or checks; work with nothing in the room yet (checks running) or ever (checks cut short) isn't one.
+            s.inRoom === false
+              ? `<i class="ss-seg" style="${span(s.from, s.to, 0.5)}" title="${esc(segmentWords(s))}"></i>`
+              : `<a href="#" class="ss-seg" data-seg="${esc(s.id)}" tabindex="-1" style="${span(s.from, s.to, 0.5)}" title="${esc(segmentWords(s))}"></a>`,
+          )
+          .join("")}</div>`)
+        .join("")}
+      ${v.breaks.map((b) => `<span class="ss-break" style="${span(b.from, b.to)}" title="${esc(`${durationWords(b.to - b.from)} ${b.why === "waiting" ? "waiting for you" : "with nothing running"}`)}">${esc(durationWords(b.to - b.from))}</span>`).join("")}`);
+  setHtml($(".ss-bar", box), LANES.filter((l) => v.totals[l] > 0).map((l) => `<i data-lane="${l}" style="width:${((v.totals[l] / worked) * 100).toFixed(2)}%"></i>`).join(""));
+  setHtml($(".ss-words", box), `${esc(words)}${v.overlap ? `<span class="muted"> (phases overlap)</span>` : ""}`);
+}
+
+/** Sets an element's HTML only when it differs from what it was last given. */
+const lastHtml = new WeakMap();
+function setHtml(node, html) {
+  if (lastHtml.get(node) === html) return;
+  lastHtml.set(node, html);
+  node.innerHTML = html;
+}
+
+/**
+ * Time to a position on the strip, in percent. Breaks (long stretches with nothing running) are drawn as 3% of the
+ * time worked each, so the work stays readable however long the room has waited.
+ */
+function sessionAxis(v) {
+  const removed = v.breaks.reduce((n, b) => n + (b.to - b.from), 0);
+  const active = Math.max(1, v.length - removed);
+  const short = active * 0.03;
+  const total = active + short * v.breaks.length;
+  return (t) => {
+    let pos = 0;
+    let cur = v.start;
+    for (const b of v.breaks) {
+      if (t <= b.from) break;
+      pos += b.from - cur;
+      if (t < b.to) return ((pos + (short * (t - b.from)) / (b.to - b.from)) / total) * 100;
+      pos += short;
+      cur = b.to;
+    }
+    return (Math.min(total, pos + Math.max(0, t - cur)) / total) * 100;
+  };
+}
+
+/** One piece of work on the strip, in words: who, what, when, how long. */
+function segmentWords(s) {
+  const who = s.agent === "toryo" ? "The checks" : `${name(s.agent)}, ${(KIND[s.kind] ?? s.kind ?? "").toLowerCase()}`;
+  const slice = s.slice ? `, ${s.slice}${s.round > 1 ? ` round ${s.round}` : ""}` : "";
+  return `${who}${slice}: ${clock(new Date(s.from).toISOString())}–${s.running ? "now" : clock(new Date(s.to).toISOString())} (${durationWords(s.to - s.from)})${s.ok === false ? ", failed" : ""}${s.estimated ? ", start estimated" : ""}${s.cut ? CUT[s.cut] ?? ", cut short" : ""}`;
+}
+const CUT = { stopped: ", stopped before the end", superseded: ", cut short when the room moved on", crashed: ", crashed", restart: ", cut off when Toryo stopped (run again after)" };
+
+/** The session as a list: each phase's total, then every piece of work, each a link to it in the room. */
+function sessionSheet() {
+  const v = S.session;
+  if (!v) return;
+  const list = phaseList(v.totals);
+  openSheet(`${sheetHead("This session", durationWords(v.length))}
+    <p>${esc(sessionWords(v))}${v.overlap ? " Phases can overlap (a reply while building, say), so the totals can add up to more than the session." : ""}</p>
+    <ul class="ss-list">${list.map((p) => `<li><b>${esc(p.words[0].toUpperCase() + p.words.slice(1))}</b> ${esc(durationWords(p.ms))}</li>`).join("")}</ul>
+    ${LANES.filter((lane) => v.segments.some((s) => s.lane === lane))
+      .map((lane) => `<h3 class="eyebrow">${LANE_NAMES[lane]}</h3><ul class="ss-list">${v.segments
+        .filter((s) => s.lane === lane)
+        .map((s) => `<li>${s.inRoom === false ? esc(segmentWords(s)) : `<a href="#" data-seg="${esc(s.id)}">${esc(segmentWords(s))}</a>`}</li>`)
+        .join("")}</ul>`)
+      .join("")}
+    ${v.breaks.length ? `<h3 class="eyebrow">Breaks</h3><ul class="ss-list">${v.breaks.map((b) => `<li>${esc(`${clock(new Date(b.from).toISOString())}–${clock(new Date(b.to).toISOString())}: ${durationWords(b.to - b.from)} ${b.why === "waiting" ? "waiting for you" : "with nothing running"}`)}</li>`).join("")}</ul>` : ""}`);
+}
+
 // ------------------------------------------------------------------ Home
 
 /**
@@ -2898,6 +3034,17 @@ document.addEventListener("click", async (e) => {
       return loadRoom(id, { open: true });
     }
     if (hit("#home button[data-act]")) return homeAct(hit("#home button[data-act]"));
+    if (hit("[data-session-list]")) return sessionSheet();
+    if (hit("[data-seg]")) {
+      // A piece of the session: its turn (or checks) in the room's timeline.
+      e.preventDefault();
+      const id = hit("[data-seg]").dataset.seg;
+      if (!$("#sheet").hidden) closeSheet();
+      if (!S.view?.events.some((x) => x.id === id)) return;
+      setRoomTab("relay");
+      S.focusOn = id;
+      return renderTimeline();
+    }
     if (hit("[data-open-question]")) {
       // From Home: the room, at that question.
       S.focusOn = hit("[data-open-question]").dataset.openQuestion;
@@ -3212,6 +3359,14 @@ setInterval(() => {
   for (const t of $$("[data-since]")) t.textContent = since(t.dataset.since);
   for (const t of $$("[data-ago]")) t.textContent = ago(t.dataset.ago);
 }, 1000);
+
+// The session's strip, between news: every ten seconds while something runs (its words count seconds at first), else
+// once a minute.
+let sessionTicks = 0;
+setInterval(() => {
+  sessionTicks += 1;
+  if (S.session?.segments.some((s) => s.running) || sessionTicks % 6 === 0) renderSession();
+}, 10_000);
 
 // Usage meters change with time alone: a limit resets, a reading ages. Redraw them without waiting for news.
 setInterval(() => {

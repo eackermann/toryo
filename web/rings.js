@@ -2,14 +2,10 @@
 // happening. The state is decided here from the room's summary; the rings themselves are CSS (styles.css), and the
 // sparkler that runs round anything at work is drawn on a canvas, by one animation loop for the whole page.
 
-/** What kind of work a running request is, as a ring: building, reviewing, planning, the checks, or a reply. */
-export function workKind(kind) {
-  if (kind === "gates") return "checks";
-  if (/^build/.test(kind ?? "")) return "build";
-  if (/^review|^plan-check/.test(kind ?? "")) return "review";
-  if (/^plan-/.test(kind ?? "")) return "plan";
-  return "chat";
-}
+import { workKind } from "./phases.js";
+
+// What kind of work a running request is, as a ring: one mapping, shared with the session's timeline (phases.js).
+export { workKind };
 
 /**
  * A room's ring, from its summary: { ring, needs }. `needs` adds the orange pulse outside a ring that says something
