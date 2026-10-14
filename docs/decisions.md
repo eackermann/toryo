@@ -208,3 +208,16 @@ The crew's implementation choices:
 - A question to an agent that isn't working and isn't the builder is answered at once, beside the work.
 - The answer turn's own status line is ignored, so answering never changes a verdict.
 - The CLI takes `--ask` or `--tell`, and MCP's `toryo_say` takes `intent`.
+
+## 2026-10-13: The approved prototype is Toryo's look, built in a new Slice 4
+
+The owner decided:
+- **The look.** On 13 Oct the owner approved a clickable prototype as the look for Toryo: Home, rooms, and the design system it shows. Slice 4 copies it into the repository as `design/prototype/toryo-desk.html`; its sample data is made up and stays that way. Its Home shows how the Home slices will look; what Home shows and does still follows the plan.
+- **A new slice.** *Slice 4: Design system and re-skin* goes right after Slice 3, to be built as soon as Slice 3 is approved. The later slices move up by one (4–17 become 5–18), so slice numbers in the entries above are one lower than in the plan now.
+- **Color means activity, never identity.** Activity colors come from the logo: purple plans, blue builds, mint reviews. Orange is only for "needs you", amber for usage limits getting close, and the neutrals come from the wordmark's navy and the tagline's slate. Per-agent colors go: agents get neutral monograms.
+- **Nothing from the internet.** The fonts (Lexend, Figtree, JetBrains Mono) are bundled with the page with their licences.
+- **Review size.** If the slice is too big for one review, it's reviewed in two parts: (a) tokens, type, components, layout and docs; (b) the activity rings, the sparkler and the live logo.
+
+Why: it's the design the owner chose for Toryo.
+
+The order: when the plan changed, safe question targeting (now Slice 5) was already built and in its last review round, so it finishes that review first. The owner confirmed it: once Slice 5 is approved, Slice 4 is built next, then Slice 6 onwards.

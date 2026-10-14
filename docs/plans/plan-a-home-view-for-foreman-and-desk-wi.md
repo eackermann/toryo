@@ -149,15 +149,15 @@ Fix recommendation extraction and acceptance in the shared parser/formatter used
 
 ### Guard shared folders after Home and before worktrees
 
-Implement this in two reviews. The cheap guard in Slice 9 records one builder per canonical folder, including a Codex app builder, refuses a second one, names the occupying room, and shows the result on Home and in `toryo status`. Keep the build reservation through its build/check/review cycle, pause, hold, and restart. Stop releases it only after writers actually drain; an outstanding or uncertain app submission still counts. The first slice does not also implement arbitrary reader/writer coordination.
+Implement this in two reviews. The cheap guard in Slice 10 records one builder per canonical folder, including a Codex app builder, refuses a second one, names the occupying room, and shows the result on Home and in `toryo status`. Keep the build reservation through its build/check/review cycle, pause, hold, and restart. Stop releases it only after writers actually drain; an outstanding or uncertain app submission still counts. The first slice does not also implement arbitrary reader/writer coordination.
 
 Canonical identity is the real repository worktree root, retaining the project subdirectory separately. Project aliases, symlinks, and overlapping subdirectories must not evade the guard. Distinct linked worktrees are distinct editable folders even though their Git common directory matches.
 
-Slice 10 adds short reservations for plan-author writes, writable chat, and active read-only reviews. Distinguish the long-lived builder claim from momentary access to the files: a planning author may borrow a quiet gap while the same build keeps its builder claim. Atomically reserve that gap only when no turn (including preparation or outstanding app work), check, setup, or review is using the folder. While the author writes, queue new work in that folder; let the build continue afterward. Give an eligible waiting author the next gap before starting more queued build work, rather than waiting for a multi-day build to finish. Desk/agent holds still apply; do not reserve a gap for an author that cannot run.
+Slice 11 adds short reservations for plan-author writes, writable chat, and active read-only reviews. Distinguish the long-lived builder claim from momentary access to the files: a planning author may borrow a quiet gap while the same build keeps its builder claim. Atomically reserve that gap only when no turn (including preparation or outstanding app work), check, setup, or review is using the folder. While the author writes, queue new work in that folder; let the build continue afterward. Give an eligible waiting author the next gap before starting more queued build work, rather than waiting for a multi-day build to finish. Desk/agent holds still apply; do not reserve a gap for an author that cannot run.
 
 After the write, record the actual changed paths and send the occupying build room a visible note listing them, delivered to its agents before their next turn. Preserve the note across restart and avoid duplicates. Read-only reviews retain their reservation for their whole turn. Writable chat uses the same short reservation, never concurrent access to a builder's files. An observed intervening change invalidates a review of those changed files and marks it out of date before it can authorize return; the note does not silently approve a new plan or start a new build.
 
-Add the explicit “I'm using this folder” reservation for independent owner/app/editor work in Slice 10, with status/release through Home, CLI, and MCP. Toryo cannot detect every external process or keystroke, so do not claim that a guard freezes the filesystem. Restore/reconcile known reservations before recovered dispatch; an abandoned app observer does not prove the app stopped writing.
+Add the explicit “I'm using this folder” reservation for independent owner/app/editor work in Slice 11, with status/release through Home, CLI, and MCP. Toryo cannot detect every external process or keystroke, so do not claim that a guard freezes the filesystem. Restore/reconcile known reservations before recovered dispatch; an abandoned app observer does not prove the app stopped writing.
 
 ### Create from the current tree without committing it
 
@@ -260,9 +260,9 @@ Phone access uses MCP/Remote Control away from home and the existing authenticat
 
 ## Reviewable slices
 
-Preserve the owner's delivery order and insert the newly requested small plan-review slice immediately after safe question targeting, so its buttons and re-check cycle use the same stale-question protection. The sequence is usage observations; graceful holds and desk pause; the app-thread boundary; safe question targeting; plan checks and changes; the usage guard with phone controls; Home overview; Home answers and buttons; then the two shared-folder slices and worktrees.
+Preserve the owner's delivery order and insert the newly requested small plan-review slice immediately after safe question targeting, so its buttons and re-check cycle use the same stale-question protection. The owner then added the design system and re-skin right after the app-thread boundary (13 Oct): the page takes its approved look before the Home slices build on it. The sequence is usage observations; graceful holds and desk pause; the app-thread boundary; the design system and re-skin; safe question targeting; plan checks and changes; the usage guard with phone controls; Home overview; Home answers and buttons; then the two shared-folder slices and worktrees.
 
-There are seventeen executable slices. Slice 5 delivers the plan-review improvement early. The desk-control milestone is Slice 6 and core Home finishes at Slice 8. The cheap one-builder guard is Slice 9; coordinating plan/chat writes and reviews is a separate Slice 10. Worktree foundations and the full create/setup/review/return/delete workflow occupy Slices 11-17. Deferred features retain their reasoning in Later at the end, without numbered headings or completion gates for this release.
+There are eighteen executable slices. Slice 4 re-skins the page with the approved design system. Slice 6 delivers the plan-review improvement early. The desk-control milestone is Slice 7 and core Home finishes at Slice 9. The cheap one-builder guard is Slice 10; coordinating plan/chat writes and reviews is a separate Slice 11. Worktree foundations and the full create/setup/review/return/delete workflow occupy Slices 12-18. Deferred features retain their reasoning in Later at the end, without numbered headings or completion gates for this release.
 
 Run appropriate targeted tests while developing each slice, then the repository's required syntax and full-suite checks before its handoff. Re-read concurrent changes before editing. Each slice updates README only for behavior that actually ships and writes a review handoff in `docs/reviews/`. The graceful-policy foundation and the preparation/send boundary remain separate reviews.
 
@@ -290,7 +290,36 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** No unsent request passes a newly applied restriction, observing accepted app work is independent of sending permission, and uncertainty cannot free a thread or cause automatic duplicate submission.
 
-### Slice 4: Target questions safely across every existing client
+### Slice 4: Design system and re-skin
+
+**Scope.** Re-skin the current page to the prototype the owner approved on 13 Oct. Copy it into the repository as `design/prototype/toryo-desk.html`; its sample data is made up and stays that way. Its dashed *Prototype* bar (*Play the relay*, *Reset*) is a demo control and isn't built. Its Home shows how the Home slices will look; what Home shows and does still follows this plan's Home section.
+- **Tokens and docs.** Light and dark tokens, as in the prototype's `:root`, in their own file under `web/`, and `docs/design-system.md` (principles, ring states, colors, type, components, motion).
+- **Color means activity, never identity.** Activity colors come from the logo: purple plans, blue builds, mint reviews. Orange is only for "needs you", amber only for usage limits getting close. The neutrals come from the wordmark's navy and the tagline's slate. Per-agent colors go: agents get neutral monograms, and the Codex app's has a small window corner.
+- **Activity rings** on every room tile (the rail, the room header, later Home) and on a working agent's picture, driven by the room's real state:
+  - Building, reviewing and planning: a faint track with a sparkler running round it on a canvas. It has a hot point with a turning glint, sparks thrown in every direction that sometimes fork, a fading trail that cools from white to the activity color, and embers drifting off. One `requestAnimationFrame` loop runs every sparkler on one shared clock (`performance.now()` mod 2.8 s). Off-screen canvases are skipped, particles are capped, and `devicePixelRatio` is capped at 2.
+  - Checks: four grey dashes marching round. Needs you: an orange ring pulsing in place. Working while a question waits: the sparkler inside, the orange pulse outside.
+  - Paused: dashed. Held: dotted, with a lock. Done: solid mint with a check. Failed (needs a retry): solid red. Idle: no ring.
+  - CSS animations take a negative `animation-delay` from the same clock, so re-rendering never restarts them. With reduced motion: solid rings, no canvas, no pulses.
+  - The logo in the top bar is live: each block breathes while that kind of work runs anywhere.
+- **The page, restyled as in the prototype:**
+  - the top bar, with the mark and wordmark, the working and "need you" counts, the theme and Settings;
+  - the rail, with rooms grouped by project, each tile with a one-line state, and the ring legend;
+  - the room header, with a state sentence, the mode switch, and Pause, Stop and Room;
+  - the timeline: turn cards whose status chip takes the color of what happens next, role chips, the checks row, slice markers, a slice's earlier rounds folded into one line, your notes as bubbles, and question cards with *Use the recommendation*;
+  - the composer;
+  - the side panel, with Plan, Crew and Ledger tabs, the segmented plan progress bar and the time each slice took;
+  - sheets and toasts.
+  - Below 1180 px the side panel becomes tabs in the room; below 760 px the page is one column with a bottom tab bar.
+- **Fonts and favicon.** Lexend (headings and numbers), Figtree (text) and JetBrains Mono (commands), bundled as woff2 under `web/` with their OFL licence files. They're served like the other page files, so the page still loads nothing from the internet; if they can't be downloaded, the fallback stacks are used and the owner is told. The favicon is the logo mark.
+- **Kept.** Every existing behaviour and control, and the element ids the tests and the browser check rely on (or the tests change in the same slice). Zero dependencies, and plain words for the owner.
+
+If it's too big for one review, it's reviewed in two parts: (a) tokens, type, components, layout and docs; (b) the activity rings, the sparkler and the live logo.
+
+**Verification.** The test suite and the browser check pass, updated for any changed markup. Screenshots at 1440, 1024 and 390 px, in light and dark, and with reduced motion. AA contrast in both themes, visible keyboard focus, and no sideways scrolling at 320 and 390 px. The page stays smooth with several rooms working at once, and makes no request outside the desk.
+
+**Done when.** The page has the approved look in both themes and at every width, each ring shows its room's real state, every existing control still works, and the design system is documented for the Home slices to reuse.
+
+### Slice 5: Target questions safely across every existing client
 
 **Scope.** Finish explicit room/question targeting on the server, CLI, MCP, and current room page before the phone milestone. Cover open chat questions, multiple workflow questions, retries, and planning synthesis. Add shared checkpoint acceptance that records the displayed recommendations and default author, to be reused by Home later. Keep any sole-question CLI convenience safe by resolving and posting its ID; reject ambiguous selection. Home layout and desk-control buttons are outside this slice.
 
@@ -298,7 +327,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** The existing phone answer path and room UI cannot answer a replacement question or start duplicate synthesis, and Home can reuse these operations without introducing another answer implementation.
 
-### Slice 5: Check ready plans and re-check requested changes
+### Slice 6: Check ready plans and re-check requested changes
 
 **Scope.** Reuse the current plan-check/revise flow to add Ask Claude (or other non-author planners) to check the plan alongside Start building, Read, and Ask for changes. Send read-only findings to the author automatically and return to Ready after their response. Add the persisted Re-check after changes setting, on by default, with one reviewer pass per owner change request and no recursive pass after the author addresses that review. Add one-click forwarding of a ready-plan discussion with a non-author as a change request to the author. Bind actions to the question/plan revision, persist the bounded cycle, and reuse the shared engine actions through page/API/CLI/MCP. Correct recommendation wrapper parsing and acceptance formatting, including the reported trailing `)?` bug. No new planning service or open-ended review loop.
 
@@ -306,7 +335,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** A ready plan can be checked without starting a build, owner-requested changes receive the configured single automatic check, findings reach the author, and the plan returns to Ready with truthful review state. Chat discussions can be handed to the author explicitly and recommendation acceptance adds no wrapper punctuation.
 
-### Slice 6: Threshold guard, reset release, and phone controls
+### Slice 7: Threshold guard, reset release, and phone controls
 
 **Scope.** Add per-window thresholds, enabled/disabled and auto-release settings, reset expiry, guard pause until reset, events, and notifications. Expose graceful desk/agent/guard operations and state through API, CLI, and MCP. Release must report remaining guards and offer the ready-to-run timed override command and equivalent MCP arguments. Initialize new and existing desks at the accepted enabled 90%/90% thresholds with auto-release and one notice, preserving existing explicit settings. Exclude provider-exhaustion handling, one-turn exceptions, forecasts, and Home controls from this milestone.
 
@@ -314,7 +343,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** Threshold holds and reset release work unattended, ordinary retries cannot bypass the guard, and the owner can control the feature from MCP. The accepted defaults and migration behavior are applied, while explicit saved choices remain intact; provider-exhaustion recovery and one-turn exceptions are outside this milestone.
 
-### Slice 7: Home overview and recent activity
+### Slice 8: Home overview and recent activity
 
 **Scope.** Add a bounded overview and feed, `#/` navigation, the Home tab, and responsive read views for questions, work, usage, blocked rooms, and Recent. Report preparing, app queue time, actual work time, and last-output age separately. Reuse SSE and refresh the overview after reconnect; do not download full transcripts.
 
@@ -322,23 +351,23 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** Home answers who, where, what, how long, and why waiting on both phone and desktop, while existing room links and workflows remain available.
 
-### Slice 8: Home answers and control buttons
+### Slice 9: Home answers and control buttons
 
-**Scope.** Reuse Slice 4's question-targeted operations and Slice 5's plan actions for Home answers, ready-plan checks/change requests, and compact planning acceptance; the full form remains in its room. Wire the already-tested pause, hold/release, guard settings, and guard-pause operations. Release shows the explicit Pause this guard until reset button for remaining applicable windows. Show the activation notice until acknowledged. Preserve drafts/focus. No new answer routing, review loop, one-turn permission, or guard engine belongs in this slice.
+**Scope.** Reuse Slice 5's question-targeted operations and Slice 6's plan actions for Home answers, ready-plan checks/change requests, and compact planning acceptance; the full form remains in its room. Wire the already-tested pause, hold/release, guard settings, and guard-pause operations. Release shows the explicit Pause this guard until reset button for remaining applicable windows. Show the activation notice until acknowledged. Preserve drafts/focus. No new answer routing, review loop, one-turn permission, or guard engine belongs in this slice.
 
 **Verification.** Test answering while held, named author/recommendations, stale cards after another client answers, family/app-only/headless-only controls, Release with several remaining guards and the corresponding buttons, unknown-reset explanations, refresh while typing, and failed submissions. Check keyboard and phone operation at the specified widths. Ensure Home uses the same actions, results, and question IDs already verified through CLI/MCP; refresh must not erase an explicit guard disable choice or show the activation notice repeatedly.
 
 **Done when.** The owner can answer and control the desk from Home without losing drafts or clearing unrelated restrictions, Release offers a direct override action where appropriate, and core Home is complete without the deferred one-turn feature.
 
-### Slice 9: Refuse a second builder in the same folder
+### Slice 10: Refuse a second builder in the same folder
 
-**Scope.** Add a canonical-folder builder reservation, including the Codex app. Refuse a second shared Build, name the occupying room, and offer to wait or use a worktree once available. Keep the reservation through the build/check/review cycle, pause, hold, and restart; release only when work has ended or Stop has actually drained writers. Show the owner and waiting room on Home, in the room header, and in `toryo status`/API/MCP. This is only the cheap one-builder guard; plan/chat write coordination, external reservations, and stale reviews belong to Slice 10.
+**Scope.** Add a canonical-folder builder reservation, including the Codex app. Refuse a second shared Build, name the occupying room, and offer to wait or use a worktree once available. Keep the reservation through the build/check/review cycle, pause, hold, and restart; release only when work has ended or Stop has actually drained writers. Show the owner and waiting room on Home, in the room header, and in `toryo status`/API/MCP. This is only the cheap one-builder guard; plan/chat write coordination, external reservations, and stale reviews belong to Slice 11.
 
 **Verification.** Race two Build starts in one temporary folder and admit one. Cover project aliases, symlinks/nested paths, distinct folders, same-room builder/reviewer handoff, holds/pauses, recovery before dispatch, Stop with a late result, and known outstanding/uncertain fake-app work. Assert the refusal names the occupying room and presents wait/worktree choices consistently on Home and in status. Never inspect or start the real app.
 
 **Done when.** Toryo refuses a known second builder in the same folder and names the blocker without implementing a general file-access scheduler in this slice.
 
-### Slice 10: Coordinate plan and chat writes between turns
+### Slice 11: Coordinate plan and chat writes between turns
 
 **Scope.** Add short read/write reservations alongside the builder claim. Plan authors and writable chat wait for a quiet gap with no turn, preparation, outstanding app submission, setup, check, or review in that folder; an eligible waiting writer takes the next gap before new build work starts. Let the build keep its long-lived claim and resume afterward. Notify its room of the actual changed files, with durable delivery before the next turn. Add the owner-managed I'm using this folder reservation, protect active reviews from concurrent writes, and mark observed stale reviews out of date. Reuse existing snapshot/change lists and workspace status; no worktree creation yet.
 
@@ -346,7 +375,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** Shared plans need not wait days for a build to finish, known writers/readers do not overlap, and the build learns exactly which files changed before proceeding. External activity remains an explicit limitation rather than a claimed filesystem lock.
 
-### Slice 11: Make snapshots workspace-aware and lossless for supported trees
+### Slice 12: Make snapshots workspace-aware and lossless for supported trees
 
 **Scope.** Introduce persisted workspace identity with main-folder defaults for existing rooms. Key snapshot caches, indexes, locks, and references by actual workspace; pin each room's base independently. Replace silent large-file omission with complete capture or an explicit failure. Preserve working contents, modes, links, binaries, deletions, and non-ignored untracked files. Detect source changes during capture and unsupported repository features. Keep project index/HEAD untouched. Object independence from source garbage collection is the separate near-term bug fix listed under Later, not part of this slice.
 
@@ -354,7 +383,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** A supported snapshot faithfully reproduces the starting files and has stable workspace provenance; an incomplete capture cannot be used to create or apply a worktree. Existing snapshot consumers remain compatible.
 
-### Slice 12: Create and bind a room worktree
+### Slice 13: Create and bind a room worktree
 
 **Scope.** Add the Build workspace choice, default own-worktree for new headless crews, and native linked-worktree provisioning under TORYO_HOME/worktrees from the pinned snapshot. Keep existing rooms in place and app crews in main. Persist branch/path metadata and recover partial creation, including dirty and unborn projects without a project commit. Stage the starting snapshot in the room's private index so plain git diff starts empty; main staging stays untouched. Bind every room operation to its workspace, including files, plan readers, snapshots, read-only mounts, and fresh sessions on a folder change. Fix src/protocol.mjs so the Repository briefing names the room cwd, explains the staged baseline, and explicitly forbids main-folder edits. Add main-folder Edit/Write/NotebookEdit deny rules to Claude's write turns and use existing filesystem protection where supported; preserve Codex's workspace confinement. Show folder/branch/shared-room information in Home, header, CLI, and MCP.
 
@@ -362,7 +391,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** A room uses its declared workspace in both prompts and execution, Claude's write path protects main, inherited changes are staged only in the private worktree index, and no missing folder or old session silently redirects work to main. Setup, reviewed return, and cleanup remain visibly pending until their slices ship.
 
-### Slice 13: Copy configured files and run setup before the first turn
+### Slice 14: Copy configured files and run setup before the first turn
 
 **Scope.** Add project copy patterns and setup configuration, a preview of matched paths, and a durable setup step using the checks' output/status UI. Copy approved ignored files privately without adding them to snapshots or returned changes. Block the first agent turn until setup succeeds. Expose settings and retry/output actions through shared API/CLI/MCP operations. Integrate graceful desk/room pause, Stop, and interrupted-setup recovery.
 
@@ -370,7 +399,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** A first turn cannot outrun setup, the owner can see and retry failures, and private copied files never become part of a normal return operation.
 
-### Slice 14: Serialize project checks and expose room environment values
+### Slice 15: Serialize project checks and expose room environment values
 
 **Scope.** Run setup and checks one at a time per project across its rooms/worktrees, unless a project setting explicitly enables parallel execution. Show which room is using the slot and queue other steps. Supply TORYO_ROOM_ID, TORYO_WORKSPACE_PATH, and a stable persisted TORYO_PORT_OFFSET to room commands. The project chooses whether to use the offset; it is not a port reservation. Managed dev servers, general resource declarations, and test-database naming belong to Later.
 
@@ -378,7 +407,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** Project setup/check concurrency follows the explicit setting and every command receives its room context. The UI states that ports/databases still need project-specific handling instead of promising service isolation.
 
-### Slice 15: Review the full room contribution and preview return conflicts
+### Slice 16: Review the full room contribution and preview return conflicts
 
 **Scope.** Add final snapshot R, full B → R review, current-main snapshot M, and a three-way return preview computed outside main. Display both the room's contribution and the proposed destination changes, with complete large-text/binary access. Add stale-review/preview identities, conflict presentation, and regeneration after explicit isolated resolution. Use the same preview through UI, CLI, and MCP; this slice has no Apply mutation.
 
@@ -386,7 +415,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** The owner can inspect the full contribution and all conflicts from phone or desktop without any write to main, with honest handling of binaries and large diffs.
 
-### Slice 16: Apply an approved preview as uncommitted changes
+### Slice 17: Apply an approved preview as uncommitted changes
 
 **Scope.** Add the explicit preview-bound Apply operation, destination reservation, final checks, worktree-only writes, durable backups/journal, and interrupted-apply recovery. Preserve main staging/HEAD and reject stale approvals before writes. Record delivery and subsequent contribution baselines to prevent duplicate application. Add no commit action; returning files remains a complete no-commit workflow. Do not restart or deploy anything.
 
@@ -394,7 +423,7 @@ Run appropriate targeted tests while developing each slice, then the repository'
 
 **Done when.** Only an explicitly approved, current preview can change main, no-commit projects need no exception, conflicts leave main untouched, and failures show a recoverable, truthful file state rather than silent partial success.
 
-### Slice 17: Measure and clean up room worktrees
+### Slice 18: Measure and clean up room worktrees
 
 **Scope.** Add bounded asynchronous disk measurements, measured-at/partial states, and the room-delete choice to keep or remove its worktree/branch. Show unapplied work and optional branch commits before discard. Verify ownership, drain Toryo-managed turns/setup/checks, preserve history/apply receipts, and retain cleanup recovery records. Complete the phone, CLI, and MCP cleanup flows and document the full worktree workflow.
 
