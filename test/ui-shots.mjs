@@ -7,7 +7,8 @@
  *   PLAYWRIGHT_CORE=/path/to/node_modules/playwright-core node test/ui-shots.mjs [folder]
  *
  * The pictures go to the folder given (a temporary one otherwise): a build in its second slice, with the first
- * slice's earlier round folded; a question asked in chat; and a planning round waiting for your call.
+ * slice's earlier round folded; a question asked in chat; a planning round waiting for your call; and a plan that's
+ * ready, talked over with Claude since.
  */
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -63,6 +64,10 @@ try {
     { agent: "codex", match: "step 1 of 4", reply: "Codex proposal: three slices.\n- Q: Keep the old API working? (Recommended: yes, for one release)\nTORYO: PROPOSAL" },
     { agent: "claude", match: "step 1 of 4", reply: "Claude proposal: two slices.\n- Q: Ship a command line too? (Recommended: no, later)\nTORYO: PROPOSAL" },
     { match: "step 2 of 4", reply: "Critique: the other proposal covers migrations better.\nTORYO: CRITIQUE" },
+    // A plan Codex writes and Claude approves, then talked over with Claude.
+    { agent: "codex", match: "step 3 of 4", write: { path: "docs/plans/export.md", content: "# Export\n\n### Slice 1: The format\n\n### Slice 2: The command\n" }, reply: "Written: two slices, the format first.\nTORYO: REVIEW docs/plans/export.md" },
+    { agent: "claude", match: "step 4 of 4", reply: "Checked: every decision is there, and each slice can be tested on its own.\nTORYO: APPROVED" },
+    { agent: "claude", match: "Is anything missing", reply: "One thing: the plan doesn't say how someone reading an old export learns that the format changed. A line in slice 1 would do.\nTORYO: REPLY" },
     { reply: "Noted.\nTORYO: REPLY" },
   ];
   writeFileSync(join(base, "script.json"), JSON.stringify({ rules, log: join(base, "calls.jsonl") }));
@@ -118,6 +123,14 @@ try {
   await post(`api/rooms/${plan.id}/messages`, { text: "Thinking it over.", to: "everyone", answering: false });
   await until(async () => (await view(plan.id)).live.length === 0 && (await view(plan.id)).events.filter((e) => e.type === "turn" && /Noted/.test(e.text ?? "")).length === 2, "the planners' replies");
   await until(async () => (await view(plan.id)).questions.some((q) => q.kind === "plan-checkpoint"), "the planning checkpoint");
+  // A plan that's ready, which you've talked over with Claude since: its card, and Claude's reply offering to send
+  // that discussion to Codex.
+  const ready = await post("api/rooms", { projectId: "demo", mode: "plan", topic: "Export", members: ["codex", "claude"], title: "Export plan", planPath: "docs/plans/export.md" });
+  await until(async () => (await view(ready.id)).questions.some((q) => q.kind === "plan-checkpoint"), "the export plan's checkpoint");
+  await post(`api/rooms/${ready.id}/control`, { action: "accept-checkpoint", questionId: (await view(ready.id)).questions[0].id, synthesizer: "codex" });
+  await until(async () => (await view(ready.id)).questions.some((q) => q.kind === "plan-ready"), "the export plan ready");
+  await post(`api/rooms/${ready.id}/messages`, { text: "Is anything missing before we build?", to: "claude", answering: false });
+  await until(async () => (await view(ready.id)).live.length === 0 && (await view(ready.id)).events.some((e) => e.type === "turn" && /old export/.test(e.text ?? "")), "Claude's reply");
 
   // A room in every state a ring shows, and several rooms working at once.
   const room = (body) => post("api/rooms", { mode: "build", members: ["codex", "claude"], builder: "codex", reviewer: "claude", ...body });
@@ -142,7 +155,7 @@ try {
   // Each room's tile wears the ring for its state; the logo breathes for the building going on; and with several
   // rooms working at once, the page keeps up (frames timed for three seconds).
   {
-    const expected = { "History build": "build", "Busy build 1": "build", "Busy build 2": "build", "Busy build 3": "build", "Busy build 4": "build", "API plan": "needs", "Database chat": "needs", "Checked build": "checks", "Failing build": "error", "Tiny build": "done", "Paused chat": "paused", "Held build": "held" };
+    const expected = { "History build": "build", "Busy build 1": "build", "Busy build 2": "build", "Busy build 3": "build", "Busy build 4": "build", "API plan": "needs", "Export plan": "needs", "Database chat": "needs", "Checked build": "checks", "Failing build": "error", "Tiny build": "done", "Paused chat": "paused", "Held build": "held" };
     for (const theme of ["light", "dark"]) {
       const ctx = await browser.newContext({ viewport: { width: 1440, height: 1100 }, colorScheme: theme });
       const page = await ctx.newPage();
@@ -261,6 +274,8 @@ try {
     await shoot({ width: 1440, theme, room: build.id, tab: "crew", file: `crew-1440-${theme}` });
     await shoot({ width: 1440, theme, room: chat.id, file: `chat-1440-${theme}` });
     await shoot({ width: 1440, theme, room: plan.id, file: `plan-1440-${theme}` });
+    await shoot({ width: 1440, theme, room: ready.id, file: `ready-plan-1440-${theme}` });
+    await shoot({ width: 390, height: 844, theme, room: ready.id, file: `ready-plan-390-${theme}` });
     await shoot({ width: 1024, theme, room: build.id, file: `build-1024-${theme}` });
     await shoot({ width: 1024, theme, room: build.id, tab: "plan", file: `plan-tab-1024-${theme}` });
     await shoot({ width: 390, height: 844, theme, room: build.id, file: `build-390-${theme}` });
@@ -300,6 +315,7 @@ try {
   for (const width of [320, 390]) {
     await shoot({ width, height: 700, theme: "light", room: build.id, tab: "crew", file: `crew-${width}` });
     await shoot({ width, height: 700, theme: "light", room: plan.id, file: `plan-${width}` });
+    await shoot({ width, height: 700, theme: "light", room: ready.id, file: `ready-plan-${width}` });
   }
   await browser.close();
   assert.deepEqual(errors, []);

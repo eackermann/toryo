@@ -119,7 +119,7 @@ With reduced motion, nothing moves: rings are solid, no canvas is drawn, nothing
 |---|---|
 | Over 1180 px | The rooms, the room's timeline, and its plan, crew and ledger beside it |
 | 760 to 1180 px | The rooms and the room. Plan, crew and ledger become tabs in the room, next to the relay |
-| Under 760 px | One column with a tab bar for the rooms and the room. The room's header gets compact |
+| Under 760 px | One column with a tab bar for the rooms and the room. The room's header gets compact. A question's buttons fill the card's width, at least 44 px tall, so they're easy to tap |
 
 Nothing scrolls sideways at 320 and 390 pixels. Keyboard focus is always visible: a two-pixel blue outline.
 

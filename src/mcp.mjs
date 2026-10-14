@@ -47,6 +47,23 @@ const TOOLS = [
     },
   },
   {
+    name: "toryo_plan",
+    description:
+      "Act on a plan that's ready to build. action check: the other planners (or `checkers`) check it, read-only, and the author addresses what they find. action forward: the owner's discussion with one planner since the plan was ready (`from`; can be left out when there's only one other planner) goes to the author as a change request. `question` is the id of the plan's Ready card (toryo_status lists it); it can be left out when only one plan is ready.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        room: { type: "string" },
+        action: { type: "string", enum: ["check", "forward"] },
+        question: { type: "string" },
+        from: { type: "string", enum: ["codex", "claude", "cursor", "grok", "codexapp"] },
+        checkers: { type: "array", items: { type: "string", enum: ["codex", "claude", "cursor", "grok", "codexapp"] } },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "toryo_control",
     description: "Pause, resume or stop a room.",
     inputSchema: {
@@ -122,6 +139,9 @@ export function runMcpServer(client = new ToryoClient()) {
             break;
           case "toryo_answer":
             text = await client.answer(a.room, a.text ?? "", { accept: Boolean(a.accept), question: a.question });
+            break;
+          case "toryo_plan":
+            text = await client.plan(a.room, a.action, { question: a.question, from: a.from, checkers: a.checkers });
             break;
           case "toryo_control":
             text = await client.control(a.room, a.action);

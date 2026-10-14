@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -6,7 +7,7 @@ import { lastAppMessage } from "./agents/codexapp.mjs";
 import { readOnlyPaths, readOnlySupport } from "./agents/readonly.mjs";
 import { runGates } from "./gates.mjs";
 import { parseSlices, shortDuration, sliceMatches, sliceTimes } from "./plan.mjs";
-import { catchUp, parseQuestions, parseStatus, preamble, prompts, rulesKey, rulesUpdate, stripStatus } from "./protocol.mjs";
+import { acceptRecommendation, catchUp, parseQuestions, parseStatus, preamble, prompts, rulesKey, rulesUpdate, splitRecommendation, stripStatus } from "./protocol.mjs";
 import { UsageBook, normalizeGroups } from "./usage.mjs";
 import { defaultDesk, holdAgents, holdKey, holdLabel, readDesk } from "./desk.mjs";
 import { noteIntent } from "../web/intent.js";
@@ -21,6 +22,8 @@ export const DEFAULT_SETTINGS = {
   gates: true,
   // A new session for the reviewer at each new slice, with a ledger of open findings and your decisions.
   freshReviewer: true,
+  // After you ask for changes to a ready plan, the other planners check the revision once.
+  recheckAfterChanges: true,
 };
 
 const BUILDER_KINDS = new Set(["build", "build-fix", "build-next", "build-nudge", "build-answer", "build-gate", "build-note"]);
@@ -897,8 +900,12 @@ export class Engine extends EventEmitter {
       pending: [...participants],
       synthesizer: null,
       planPath: `docs/plans/${slugify(topic, 40)}.md`,
-      revisions: 0,
       checks: {},
+      // Each time the author finishes writing or revising the plan; a Ready card is for one revision.
+      revision: 0,
+      // The check cycle in progress (see #startPlanChecks), and how the plan was last checked (see #reviewSentence).
+      cycle: null,
+      review: null,
       startedAt: nowIso(),
     };
     this.#append(room, { type: "owner", text: topic.trim(), to: participants, kind: "topic", deliveredTo: [] });
@@ -1150,7 +1157,7 @@ export class Engine extends EventEmitter {
       this.#closeQuestion(room, "Start building", w);
       return this.startBuild(roomId, { planPath: w.planPath || room.plan?.planPath });
     }
-    const body = accept ? `Go with your recommendation${w.recommendation ? `: ${w.recommendation.replace(/[.\s]+$/, "")}` : ""}.` : String(text ?? "").trim();
+    const body = accept ? acceptRecommendation(w.recommendation) : String(text ?? "").trim();
     if (!body) throw new UserError("Write an answer first.");
     const ev = this.#append(room, { type: "owner", text: body, to: w.from ? [w.from] : room.crew.members, kind: "answer", answers: [answerOf(w)], deliveredTo: [] });
     this.#resolveWaiting(room, w, body);
@@ -1190,8 +1197,7 @@ export class Engine extends EventEmitter {
         this.#pump(room);
         break;
       case "plan-ready":
-        this.#enqueue(room, { agent: room.plan.synthesizer, kind: "plan-revise", access: "write", instruction: prompts.planRevise({ planPath: room.plan.planPath }) });
-        room.plan.phase = "revision";
+        this.#planChange(room, "owner");
         break;
       case "plan-owner":
         // A planner working in parallel may carry on while another planner's question waits.
@@ -1210,7 +1216,7 @@ export class Engine extends EventEmitter {
 
   /** Answer one question an agent asked in chat: the answer goes to that agent, and it replies. */
   #answerChat(room, q, { text, accept }) {
-    const body = accept ? `Go with your recommendation${q.recommendation ? `: ${q.recommendation.replace(/[.\s]+$/, "")}` : ""}.` : String(text ?? "").trim();
+    const body = accept ? acceptRecommendation(q.recommendation) : String(text ?? "").trim();
     if (!body) throw new UserError("Write an answer first.");
     const ev = this.#append(room, { type: "owner", text: body, to: [q.from], kind: "answer", answers: [answerOf(q)], deliveredTo: [] });
     this.#patch(room, q, { open: false, answer: body });
@@ -1293,6 +1299,12 @@ export class Engine extends EventEmitter {
         this.#system(room, "Resumed.");
         if (wasStopped && room.mode === "build" && room.build && !room.done && !room.queue.length && !this.#allWaiting(room).length)
           this.#enqueueBuilder(room, "build-note", "The owner resumed the run. Continue where you left off, and end with TORYO: REVIEW, OWNER or DONE.");
+        // A plan's check cycle you stopped: the plan is ready again, saying the cycle didn't finish.
+        if (wasStopped && room.mode === "plan" && room.plan?.cycle && !room.queue.length && !this.#allWaiting(room).length) {
+          room.plan.review = { revision: room.plan.revision, by: [], verdict: "stopped", stage: room.plan.cycle.stage };
+          room.plan.cycle = null;
+          this.#planReady(room);
+        }
         break;
       }
       case "stop": {
@@ -1409,6 +1421,43 @@ export class Engine extends EventEmitter {
         return this.startPlan(roomId, { topic: args.topic, participants: args.participants });
       case "synthesize":
         return this.synthesize(roomId, args);
+      case "plan-check": {
+        // Ask the other planners (or some of them) to check the ready plan.
+        const w = this.#readyQuestion(room, args.questionId);
+        const all = this.#checkers(room);
+        if (!all.length) throw new UserError("There's no other planner in this round to check the plan.");
+        const checkers = args.checkers?.length ? [...new Set(args.checkers)] : all;
+        if (!checkers.every((a) => all.includes(a))) throw new UserError("Only the other planners can check the plan: not its author, and not an agent outside the round.");
+        this.#takeWaiting(room, w);
+        this.#closeQuestion(room, `You asked ${this.#names(checkers)} to check the plan.`, w);
+        this.#startPlanChecks(room, "check", checkers);
+        break;
+      }
+      case "forward-discussion": {
+        // Your discussion of the ready plan with another planner, to the author as a change request.
+        const w = this.#readyQuestion(room, args.questionId);
+        const picked = this.#discussion(room, w, args);
+        const author = room.plan.synthesizer;
+        const with_ = [...new Set(picked.filter((e) => e.type === "turn").map((e) => e.agent))];
+        // Who said it: your notes, your answers to a planner's questions (and which question), and the planners' replies.
+        const speaker = (e) => {
+          if (e.type === "turn") return this.label(e.agent);
+          const answered = (e.answers ?? []).map((a) => `${this.label(a.from)}: “${a.question}”`);
+          return answered.length ? `The owner (answering ${answered.join("; ")})` : `The owner (to ${this.#names(e.to ?? [])})`;
+        };
+        // A planner's message without its status line, but with the question it asked you, if it asked one.
+        const said = (e) => (e.type === "turn" ? [stripStatus(e.text).trim(), e.status === "OWNER" && e.detail ? `(Question for the owner: ${e.detail})` : ""].filter(Boolean).join("\n\n") : e.text);
+        const quote = (t) => String(t).trim().split("\n").map((l) => (l.trim() ? `> ${l}` : ">")).join("\n");
+        const text = [
+          `A change request: the owner forwards ${with_.length ? `a discussion with ${this.#names(with_)}` : "these notes"} about the plan, for you to act on.${with_.length ? ` What the owner says there is the owner's; ${this.#names(with_)}'s replies are a planner's suggestions, which count as decisions only where the owner agreed with them.` : ""}`,
+          ...picked.map((e) => `**${speaker(e)}** [${e.id}]:\n${quote(said(e))}`),
+        ].join("\n\n");
+        this.#takeWaiting(room, w);
+        this.#closeQuestion(room, `You sent ${with_.length ? `your discussion with ${this.#names(with_)}` : "your notes"} to ${this.label(author)} as a change request.`, w);
+        this.#append(room, { type: "owner", kind: "change-request", text, to: [author], forwarded: picked.map((e) => ({ id: e.id, from: e.type === "owner" ? "owner" : e.agent })), deliveredTo: [] });
+        this.#planChange(room, "forwarded");
+        break;
+      }
       case "accept-checkpoint":
         return this.acceptCheckpoint(roomId, args);
       case "chat-mode":
@@ -2131,8 +2180,14 @@ export class Engine extends EventEmitter {
     // The owner's notes to this agent, numbered N1, N2… so a building turn can say what became of each.
     const notes = [];
     const members = room.crew.members;
+    // A discussion the owner forwarded to this agent as a change request: it reads it there, not twice.
+    const forwarded = new Set(events.filter((e) => e.type === "owner" && e.kind === "change-request" && (e.to ?? []).includes(agent)).flatMap((e) => (e.forwarded ?? []).map((f) => f.id)));
     for (const ev of events) {
       if (seen.has(ev.id)) continue;
+      if (forwarded.has(ev.id)) {
+        ids.push(ev.id);
+        continue;
+      }
       if (ev.type === "owner" && ev.cancelled) {
         ids.push(ev.id);
         continue;
@@ -2215,7 +2270,8 @@ export class Engine extends EventEmitter {
     }
     // What the relay acts on: the turn's own status, or, for a reply to the owner's note that keeps its
     // earlier status (TORYO: REPLY), the turn that reply was for.
-    let outcome = { kind: req.kind, final: req.final, status: ev.status, detail: ev.detail, evId: ev.id };
+    // (A plan check asked for its verdict alone stays so, also when an answer to your note carries it on.)
+    let outcome = { kind: req.kind, final: req.final, verdictOnly: req.verdictOnly || undefined, status: ev.status, detail: ev.detail, evId: ev.id };
     // A building turn for your notes carries on from the turn before it, unless it resubmitted (REVIEW, DONE, OWNER).
     // (note-reply: the same, for turns queued before 13 Oct.) An answer to your question always carries on as before.
     if (req.kind === "build-notes" || req.kind === "note-reply") outcome = ev.status && ev.status !== "REPLY" ? { ...req.after, status: ev.status, detail: ev.detail, evId: ev.id } : req.after;
@@ -2236,7 +2292,7 @@ export class Engine extends EventEmitter {
 
   /** Move the relay on from a turn's outcome (its own, or, after a turn for your notes, the one it carried). */
   #carryOn(room, req, outcome, ev = null) {
-    const actual = { ...req, kind: outcome.kind, final: outcome.final };
+    const actual = { ...req, kind: outcome.kind, final: outcome.final, verdictOnly: outcome.verdictOnly };
     const source = (ev && outcome.evId === ev.id ? ev : this.events.get(room.id).find((e) => e.id === outcome.evId)) ?? ev ?? {};
     if (FREE_KINDS.has(actual.kind)) return this.#afterChat(room, { ...source, status: outcome.status, detail: outcome.detail }, actual);
     if (room.mode === "build" && room.build) return this.#afterBuild(room, source, actual, outcome.status, outcome.detail ?? "");
@@ -2367,7 +2423,7 @@ export class Engine extends EventEmitter {
     if (ev.status === "OWNER") {
       // Asked once, even if this outcome is acted on again after a restart.
       const asked = this.events.get(room.id).find((e) => e.type === "question" && e.kind === "chat-owner" && e.turnId === ev.id);
-      const q = asked ?? this.#append(room, { type: "question", kind: "chat-owner", from: req.agent, question: ev.detail || firstLine(ev.text), recommendation: recommendationIn(ev.text), open: true, turnId: ev.id });
+      const q = asked ?? this.#append(room, { type: "question", kind: "chat-owner", from: req.agent, question: questionIn(ev.detail, ev.text), recommendation: recommendationIn(ev.text, ev.detail), open: true, turnId: ev.id });
       if (q.open && !(room.openChat ??= []).includes(q.id)) room.openChat.push(q.id);
       if (!asked) this.#notify(`${this.label(req.agent)} has a question`, ev.detail || firstLine(ev.text));
     }
@@ -2428,7 +2484,7 @@ export class Engine extends EventEmitter {
         return this.#checksThenReview(room, true);
       }
       if (status === "OWNER")
-        return this.#wait(room, { kind: "build-owner", from: req.agent, question: detail || firstLine(ev.text), recommendation: recommendationIn(ev.text) });
+        return this.#wait(room, { kind: "build-owner", from: req.agent, question: questionIn(detail, ev.text), recommendation: recommendationIn(ev.text, detail) });
       if (b.nudges < room.settings.maxNudges) {
         b.nudges++;
         this.#system(room, `${B} stopped without a status line. Nudge ${b.nudges} of ${room.settings.maxNudges}: keep going through the plan.`);
@@ -2461,7 +2517,7 @@ export class Engine extends EventEmitter {
       }
       if (status === "CHANGES") return this.#changesRequested(room, R);
       if (status === "OWNER")
-        return this.#wait(room, { kind: "review-owner", from: req.agent, final: req.final, question: detail || firstLine(ev.text), recommendation: recommendationIn(ev.text) });
+        return this.#wait(room, { kind: "review-owner", from: req.agent, final: req.final, question: questionIn(detail, ev.text), recommendation: recommendationIn(ev.text, detail) });
       if (req.kind === "review" || req.kind === "review-answer")
         return this.#enqueue(room, { agent: req.agent, kind: "review-status", access: "read", final: req.final, instruction: prompts.statusOnly({ allowed: ["TORYO: APPROVED", "TORYO: CHANGES", "TORYO: OWNER <question>"] }) });
       this.#system(room, `${R} gave no status; treating its review as changes requested.`, { level: "warn" });
@@ -2565,11 +2621,16 @@ export class Engine extends EventEmitter {
     const plan = room.plan;
     const others = (a) => plan.participants.filter((p) => p !== a);
     if (status === "OWNER") {
-      return this.#wait(room, { kind: "plan-owner", from: req.agent, question: detail || firstLine(ev.text), recommendation: recommendationIn(ev.text), retryReq: { ...req } });
+      return this.#wait(room, { kind: "plan-owner", from: req.agent, question: questionIn(detail, ev.text), recommendation: recommendationIn(ev.text, detail), retryReq: { ...req } });
     }
+    // A check that ends without a verdict (no status line, or another one) is asked once for it alone, and stays open.
+    const verdict = status === "APPROVED" || status === "CHANGES";
+    if (req.kind === "plan-check" && !verdict && !req.verdictOnly)
+      return this.#enqueue(room, { agent: req.agent, kind: "plan-check", access: "read", parallel: true, verdictOnly: true, instruction: prompts.planVerdict() });
     if (PLAN_PARALLEL.has(req.kind)) {
       plan.pending = plan.pending.filter((a) => a !== req.agent);
-      if (req.kind === "plan-check") plan.checks[req.agent] = status;
+      // Still none after that: the check is recorded as having no verdict, never as an approval.
+      if (req.kind === "plan-check") plan.checks[req.agent] = verdict ? status : "NONE";
       if (plan.pending.length) return;
       if (req.kind === "plan-proposal") {
         if (plan.participants.length < 2) return this.#checkpoint(room);
@@ -2582,27 +2643,148 @@ export class Engine extends EventEmitter {
       }
       if (req.kind === "plan-critique") return this.#checkpoint(room);
       if (req.kind === "plan-check") {
-        const wantsChanges = Object.values(plan.checks).some((s) => s === "CHANGES");
-        if (wantsChanges && plan.revisions < 1) {
-          plan.revisions++;
+        // Every check is in. Findings go to the author, who addresses them once; otherwise the plan is ready again.
+        const cycle = plan.cycle ?? { why: "written", checkers: Object.keys(plan.checks) };
+        const changed = cycle.hash != null && this.#planHash(room) !== cycle.hash;
+        if (changed) this.#system(room, `The plan file changed while ${this.#names(cycle.checkers)} checked it, so the check is about an earlier version.`);
+        const asking = cycle.checkers.filter((a) => plan.checks[a] === "CHANGES");
+        const silent = cycle.checkers.filter((a) => plan.checks[a] !== "CHANGES" && plan.checks[a] !== "APPROVED");
+        if (asking.length) {
           plan.phase = "revision";
-          return this.#enqueue(room, { agent: plan.synthesizer, kind: "plan-revise", access: "write", instruction: prompts.planRevise({ planPath: plan.planPath }) });
+          plan.cycle = { ...cycle, stage: "address", asking, silent, stale: changed || undefined };
+          return this.#enqueue(room, { agent: plan.synthesizer, kind: "plan-revise", access: "write", instruction: prompts.planAddress({ planPath: plan.planPath, checkers: this.#names(asking) }) });
         }
+        // Approved only when every checker said so.
+        const approved = cycle.checkers.filter((a) => plan.checks[a] === "APPROVED");
+        plan.review = { revision: plan.revision, by: cycle.checkers, approved, silent, verdict: silent.length ? "incomplete" : "approved", stale: changed || undefined };
+        plan.cycle = null;
         return this.#planReady(room);
       }
     }
-    if (req.kind === "plan-synthesis" || req.kind === "plan-revise") this.#adoptPlanPath(room, detail);
-    if (req.kind === "plan-synthesis") {
-      const checkers = others(plan.synthesizer);
-      if (!checkers.length) return this.#planReady(room);
-      plan.phase = "check";
-      plan.pending = [...checkers];
-      plan.checks = {};
-      for (const agent of checkers)
-        this.#enqueue(room, { agent, kind: "plan-check", access: "read", parallel: true, instruction: prompts.planCheck({ author: this.label(plan.synthesizer), planPath: plan.planPath }) });
-      return;
+    if (req.kind === "plan-synthesis" || req.kind === "plan-revise") {
+      this.#adoptPlanPath(room, detail);
+      plan.revision = (plan.revision ?? 0) + 1;
     }
-    if (req.kind === "plan-revise") return this.#planReady(room);
+    if (req.kind === "plan-synthesis") {
+      plan.review = null;
+      const checkers = others(plan.synthesizer);
+      if (checkers.length) return this.#startPlanChecks(room, "written", checkers);
+      plan.review = { revision: plan.revision, by: [], verdict: "none" };
+      return this.#planReady(room);
+    }
+    if (req.kind === "plan-revise") {
+      const cycle = plan.cycle;
+      if (cycle?.stage === "revise") {
+        // After your change: the other planners check the revision once, if the room says so.
+        if (room.settings.recheckAfterChanges !== false && cycle.checkers.length) return this.#startPlanChecks(room, cycle.why, cycle.checkers);
+        plan.review = { revision: plan.revision, by: [], verdict: cycle.checkers.length ? "off" : "none" };
+      } else if (cycle?.stage === "address") {
+        // The author answered the check: ready again, with no further check (the cycle is bounded).
+        plan.review = { revision: plan.revision, by: cycle.checkers, asking: cycle.asking, silent: cycle.silent, verdict: "addressed", stale: cycle.stale };
+      } else plan.review = { revision: plan.revision, by: [], verdict: "unchecked" };
+      plan.cycle = null;
+      return this.#planReady(room);
+    }
+  }
+
+  /** Agents' names, in words: "Claude", "Claude and Cursor". */
+  #names(agents) {
+    return (agents ?? []).map((a) => this.label(a)).join(" and ");
+  }
+
+  /** The planners who can check the plan: all but its author. */
+  #checkers(room) {
+    const plan = room.plan;
+    return plan.participants.filter((p) => p !== plan.synthesizer);
+  }
+
+  /** A fingerprint of the plan file, to tell whether it changed while it was being checked. */
+  #planHash(room) {
+    try {
+      return createHash("sha256").update(this.readProjectFile(room.projectId, room.plan.planPath).content).digest("hex").slice(0, 16);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The other planners check the plan, read-only, all at once. Their findings go to the author, who addresses them once
+   * (no check of that), and the plan is ready again. `why`: it was just written; you asked for changes, or forwarded
+   * a discussion (a re-check of the revision); or you asked for a check.
+   */
+  #startPlanChecks(room, why, checkers) {
+    const plan = room.plan;
+    plan.phase = "check";
+    plan.cycle = { why, stage: "check", checkers, hash: this.#planHash(room) };
+    plan.pending = [...checkers];
+    plan.checks = {};
+    const author = this.label(plan.synthesizer);
+    const instruction = why === "owner" || why === "forwarded" ? prompts.planRecheck({ author, planPath: plan.planPath }) : prompts.planCheck({ author, planPath: plan.planPath });
+    for (const agent of checkers) this.#enqueue(room, { agent, kind: "plan-check", access: "read", parallel: true, instruction });
+  }
+
+  /** You asked for changes to a ready plan (or forwarded a discussion as a change request): the author revises first. */
+  #planChange(room, why) {
+    const plan = room.plan;
+    plan.phase = "revision";
+    plan.cycle = { why, stage: "revise", checkers: this.#checkers(room) };
+    this.#enqueue(room, { agent: plan.synthesizer, kind: "plan-revise", access: "write", instruction: prompts.planChange({ planPath: plan.planPath }) });
+  }
+
+  /** The Ready card's question, if it's the one named: actions on an older card are refused. */
+  #readyQuestion(room, questionId) {
+    if (room.mode !== "plan" || !room.plan) throw new UserError("This room has no planning round.");
+    const w = this.#allWaiting(room).find((x) => x.kind === "plan-ready" && (!questionId || x.eventId === questionId));
+    if (!w) throw new UserError(questionId ? "That plan has moved on: it's being revised or checked, or a newer version is ready." : "The plan isn't ready.", 409);
+    return w;
+  }
+
+  /**
+   * The discussion you forward to the author: the messages named (your notes and answers, and other planners'
+   * replies), or else your exchange with one planner since the plan was ready, your answers to its questions included.
+   */
+  #discussion(room, w, { agent, eventIds }) {
+    const events = this.events.get(room.id);
+    const author = room.plan.synthesizer;
+    // Your notes and your answers (to a planner's question), and the other planners' finished replies.
+    const forwardable = (e) => (e.type === "owner" && (!e.kind || e.kind === "answer") && !e.cancelled) || (e.type === "turn" && e.state === "done" && e.agent !== author && Boolean(e.text?.trim()));
+    let picked;
+    if (eventIds?.length) {
+      picked = [...new Set(eventIds)].map((id) => events.find((e) => e.id === id));
+      if (picked.some((e) => !e)) throw new UserError("Some of those messages aren't in this room.");
+      if (!picked.every(forwardable)) throw new UserError("Only your notes and answers, and the other planners' replies, can be forwarded to the author.");
+      picked.sort((a, b) => events.indexOf(a) - events.indexOf(b));
+    } else {
+      if (!agent || agent === author || !room.plan.participants.includes(agent)) throw new UserError("Say which planner's discussion to forward: one of the planners other than the author.");
+      const since = events.findIndex((e) => e.id === w.eventId);
+      picked = events.filter((e, i) => i > since && forwardable(e) && (e.type === "turn" ? e.agent === agent : (e.to ?? []).includes(agent)));
+    }
+    if (!picked.length) throw new UserError(`There's nothing to forward: no discussion with ${this.label(agent)} since the plan was ready.`);
+    return picked;
+  }
+
+  /** How the plan was last checked, in a sentence for the Ready card: who checked which version, and what came of it. */
+  #reviewSentence(room) {
+    const r = room.plan.review;
+    const earlier = r?.stale ? " That check was of an earlier version: the plan file changed while it ran." : "";
+    // Checkers who gave no verdict, even when asked for it alone: said as it is, never counted as approving.
+    const silent = r?.silent?.length ? ` ${this.#names(r.silent)} checked it but didn't say whether ${r.silent.length > 1 ? "they approve" : "it approves"}.` : "";
+    switch (r?.verdict) {
+      case "approved":
+        return `${this.#names(r.by)} checked it and approved.${earlier}`;
+      case "incomplete":
+        return `${r.approved?.length ? `${this.#names(r.approved)} checked it and approved.` : ""}${silent}${earlier}`.trim();
+      case "addressed":
+        return `${this.#names(r.asking ?? r.by)} asked for changes, and ${this.label(room.plan.synthesizer)} addressed them.${silent}${earlier}`;
+      case "off":
+        return "Nobody has checked it since your change: Re-check after changes is off in this room.";
+      case "none":
+        return "There's no other planner here to check it.";
+      case "stopped":
+        return `The ${r.stage === "check" ? "check" : "revision"} was stopped before it finished.`;
+      default:
+        return "Nobody has checked it since it last changed.";
+    }
   }
 
   /** If the author wrote the plan somewhere else and says so in its status line, follow it. */
@@ -2643,14 +2825,17 @@ export class Engine extends EventEmitter {
   #planReady(room) {
     const plan = room.plan;
     plan.phase = "ready";
+    const checkers = this.#checkers(room);
     this.#wait(room, {
       kind: "plan-ready",
       from: plan.synthesizer,
-      question: `The plan is written at ${plan.planPath}. Start building with it, or tell ${this.label(plan.synthesizer)} what to change.`,
+      question: `The plan is written at ${plan.planPath}. ${this.#reviewSentence(room)} Start building with it, ${checkers.length ? `ask ${this.#names(checkers)} to check it, ` : ""}or tell ${this.label(plan.synthesizer)} what to change.`,
       recommendation: "Start building",
       // Accepting the recommendation starts the build; a written answer asks for changes.
       action: "start-build",
       planPath: plan.planPath,
+      checkers,
+      revision: plan.revision,
     });
   }
 
@@ -2658,7 +2843,7 @@ export class Engine extends EventEmitter {
     // Acting on a turn's outcome again after a restart: the question it asked may already be in the timeline. Ask once.
     const source = this.outcomeSource;
     const asked = source && this.events.get(room.id).find((e) => e.type === "question" && e.open && e.source === source && e.kind === w.kind);
-    const q = asked ?? this.#append(room, { type: "question", kind: w.kind, from: w.from, question: w.question, recommendation: w.recommendation ?? "", questions: w.questions, planPath: w.planPath, open: true, source: source ?? undefined });
+    const q = asked ?? this.#append(room, { type: "question", kind: w.kind, from: w.from, question: w.question, recommendation: w.recommendation ?? "", questions: w.questions, planPath: w.planPath, checkers: w.checkers, revision: w.revision, open: true, source: source ?? undefined });
     // Questions never replace each other (two planners can ask at once): later ones wait their turn.
     if (![room.waiting, ...(room.waitingQueue ?? [])].some((x) => x?.eventId === q.id)) {
       if (room.waiting) (room.waitingQueue ??= []).push({ ...w, eventId: q.id });
@@ -2746,9 +2931,15 @@ function answerOf(q) {
   return { id: q.eventId ?? q.id, from: q.from ?? null, question: q.question };
 }
 
-function recommendationIn(text) {
-  const m = String(text ?? "").match(/\b(?:I\s+)?recommend(?:ed|ation)?\b[:\s-]*(.+)/i);
-  return m ? truncate(m[1].replace(/\*\*/g, "").trim(), 300) : "";
+/** The recommendation that comes with a question: in its status line first, else in the message. */
+function recommendationIn(text, detail = "") {
+  const rec = splitRecommendation(detail).recommendation || splitRecommendation(text).recommendation;
+  return truncate(rec, 300);
+}
+
+/** A question as the agent asked it, without the recommendation wrapped into it ("Do X (Recommended: Y)?" → "Do X?"). */
+function questionIn(detail, text) {
+  return (detail ? splitRecommendation(detail).question : "") || firstLine(text);
 }
 
 function sanitizeSettings(s) {
@@ -2756,7 +2947,7 @@ function sanitizeSettings(s) {
   if (s.maxRounds != null) out.maxRounds = clamp(Number(s.maxRounds), 1, 20);
   if (s.maxNudges != null) out.maxNudges = clamp(Number(s.maxNudges), 0, 10);
   if (s.turnTimeoutMin != null) out.turnTimeoutMin = clamp(Number(s.turnTimeoutMin), 5, 24 * 60);
-  for (const k of ["autoContinue", "snapshots", "gates", "freshReviewer"]) if (k in s) out[k] = Boolean(s[k]);
+  for (const k of ["autoContinue", "snapshots", "gates", "freshReviewer", "recheckAfterChanges"]) if (k in s) out[k] = Boolean(s[k]);
   return out;
 }
 

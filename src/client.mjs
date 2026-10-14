@@ -132,6 +132,44 @@ export class ToryoClient {
     return `Answered in “${q.room.title}”${q.question ? `: ${truncate(q.question, 120)}` : ""}.`;
   }
 
+  /**
+   * Act on a plan that's ready: `check` asks the other planners (or `checkers`) to check it; `forward` sends your
+   * discussion with one planner (`from`) to the author as a change request. The plan is the one whose Ready card is
+   * named (`question`), else the only ready one (in the room named, or in any room).
+   */
+  async plan(ref, action, { question, from, checkers } = {}) {
+    if (!["check", "forward"].includes(action)) throw new Error("Usage: toryo plan check|forward [--room R] [--question ID] [--from claude]");
+    const rooms = ref ? [await this.resolveRoom(ref)] : (await this.state()).rooms;
+    if (!rooms.length) throw new Error("There are no rooms yet.");
+    if (!rooms.some((r) => Array.isArray(r.questions))) throw new Error("Toryo was started before this update, so it can't do that yet. Restart it first: toryo quit && toryo");
+    const ready = rooms.flatMap((r) => (r.questions ?? []).filter((q) => q.kind === "plan-ready").map((q) => ({ ...q, room: r })));
+    const where = ref ? ` in “${rooms[0].title}”` : "";
+    const q = question ? ready.find((x) => x.id === question) : ready.length === 1 ? ready[0] : null;
+    if (!q) {
+      if (question) throw new Error(`No ready plan has the card “${question}”: the plan has moved on, or the id is wrong.`);
+      if (!ready.length) throw new Error(`No plan is ready${where}.`);
+      throw new Error([`${ready.length} plans are ready${where}. Say which one by its id:`, ...ready.map((x) => `  “${x.room.title}”: ${x.question} [id ${x.id}]`)].join("\n"));
+    }
+    const { room: r } = await this.call("GET", `/api/rooms/${q.room.id}`);
+    const author = r.plan?.synthesizer;
+    // A desk started before plans could be checked from here doesn't know these actions.
+    const act = (body) =>
+      this.call("POST", `/api/rooms/${r.id}/control`, body).catch((error) => {
+        throw /^Unknown action/.test(error.message) ? new Error("Toryo was started before this update, so it can't do that yet. Restart it first: toryo quit && toryo") : error;
+      });
+    if (action === "check") {
+      await act({ action: "plan-check", questionId: q.id, checkers });
+      const who = checkers?.length ? checkers : (r.plan?.participants ?? []).filter((a) => a !== author);
+      return `Asked ${who.map(name).join(" and ")} to check the plan in “${r.title}”.`;
+    }
+    // Forward: the planner you talked to, or the only other planner.
+    const others = (r.plan?.participants ?? []).filter((a) => a !== author);
+    const agent = from ?? (others.length === 1 ? others[0] : null);
+    if (!agent) throw new Error(`Say whose discussion to forward: --from ${others.join(" or --from ")}.`);
+    await act({ action: "forward-discussion", questionId: q.id, agent });
+    return `Sent your discussion with ${name(agent)} to ${name(author)} as a change request, in “${r.title}”.`;
+  }
+
   async control(ref, action) {
     const r = await this.resolveRoom(ref);
     await this.call("POST", `/api/rooms/${r.id}/control`, { action });

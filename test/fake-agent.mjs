@@ -31,12 +31,16 @@ const script = JSON.parse(readFileSync(process.env.FAKE_SCRIPT, "utf8"));
 const countsFile = `${process.env.FAKE_SCRIPT}.counts.json`;
 const counts = existsSync(countsFile) ? JSON.parse(readFileSync(countsFile, "utf8")) : {};
 
-const prompt = await new Promise((resolve) => {
-  let data = "";
-  process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (d) => (data += d));
-  process.stdin.on("end", () => resolve(data));
-});
+// Codex and Claude take the prompt on stdin; Cursor takes it as its last argument (and speaks Claude's format).
+const prompt =
+  kind === "cursor"
+    ? args.at(-1)
+    : await new Promise((resolve) => {
+        let data = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", (d) => (data += d));
+        process.stdin.on("end", () => resolve(data));
+      });
 
 let session;
 if (kind === "codex") {

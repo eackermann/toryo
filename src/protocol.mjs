@@ -13,16 +13,75 @@ export function parseQuestions(text) {
   for (const line of String(text ?? "").split(/\r?\n/)) {
     const m = line.match(/^\s*[-*\d.)]*\s*(?:\*\*)?Q(?:uestion)?(?:\*\*)?\s*[:.]\s*(.+?)\s*$/i);
     if (!m) continue;
-    let q = m[1];
-    let rec = "";
-    const r = q.match(/\(\s*(?:\*\*)?Recommended(?:\*\*)?\s*[:.]\s*(.+)\)\s*$/i);
-    if (r) {
-      rec = r[1].trim();
-      q = q.slice(0, r.index).trim();
-    }
-    out.push({ question: q.replace(/\*\*/g, "").trim(), recommendation: rec });
+    const { question, recommendation } = splitRecommendation(m[1], { parenthesizedOnly: true });
+    out.push({ question: question.replace(/\*\*/g, "").trim(), recommendation });
   }
   return out;
+}
+
+/**
+ * A question and the recommendation that comes with it: "Do X and Y? (Recommended: yes to both)", "Do X and Y
+ * (Recommended: yes to both)?", or "… I recommend Z." A recommendation in parentheses is read up to its own closing
+ * parenthesis, so parentheses, quotes and punctuation inside it stay, and the wrapper around it doesn't: the question
+ * keeps what came after it ("?"), the recommendation doesn't. Without parentheses, it runs to the end of the line,
+ * less any closing parenthesis left over from a wrapper.
+ */
+export function splitRecommendation(text, { parenthesizedOnly = false } = {}) {
+  const s = String(text ?? "");
+  const open = /\(\s*(?:\*\*)?Recommend(?:ed|ation)(?:\*\*)?\s*[:.\-–—]\s*/i.exec(s);
+  if (open) {
+    // Its own closing parenthesis: counting the ones it opens, and none inside `code` or quotes.
+    let depth = 0;
+    let end = -1;
+    for (let i = open.index; i < s.length; i++) {
+      const quoted = quoteEnd(s, i);
+      if (quoted > 0) i = quoted;
+      else if (s[i] === "(") depth++;
+      else if (s[i] === ")" && --depth === 0) {
+        end = i;
+        break;
+      }
+    }
+    const inner = s.slice(open.index + open[0].length, end < 0 ? s.length : end);
+    const before = s.slice(0, open.index).trimEnd();
+    const after = end < 0 ? "" : s.slice(end + 1);
+    // "Delimiter? (Recommended: …)?": one question mark, not two.
+    const question = (/[?.!]$/.test(before) && /^[\s?.!]*$/.test(after) ? before : `${before}${after}`).trim();
+    return { question, recommendation: inner.replace(/\*\*/g, "").trim() };
+  }
+  if (parenthesizedOnly) return { question: s.trim(), recommendation: "" };
+  const m = /\b(?:I\s+)?recommend(?:ed|ation)?\b\s*[:\-–—]?\s*(.+)/i.exec(s);
+  if (!m) return { question: s.trim(), recommendation: "" };
+  let rec = m[1].replace(/\*\*/g, "").trim();
+  // A wrapper's leftovers: a closing parenthesis it never opened, and what followed it ("yes to both)?").
+  const unopened = () => (rec.match(/\)/g) ?? []).length > (rec.match(/\(/g) ?? []).length;
+  while (unopened() && /\)[\s?.!]*$/.test(rec)) rec = rec.replace(/\)[\s?.!]*$/, "").trim();
+  return { question: s.trim(), recommendation: rec };
+}
+
+const QUOTES = { "`": "`", '"': '"', "“": "”", "'": "'", "‘": "’" };
+const WORD = /[\p{L}\p{N}]/u;
+
+/**
+ * Where the quotation opening at `i` ends, or -1 if there's none there: `code`, "text" (where \" doesn't end it),
+ * 'text' and ‘text’. An apostrophe inside a word (don't, the owners' choice) opens nothing, a single quote followed
+ * by a letter (it's) closes nothing, and a quote that's never closed is just a character.
+ */
+function quoteEnd(s, i) {
+  const close = QUOTES[s[i]];
+  if (!close || (s[i] === "'" && WORD.test(s[i - 1] ?? ""))) return -1;
+  for (let j = i + 1; j < s.length; j++) {
+    if (s[j] === "\\" && close !== "`") j++;
+    else if (s[j] === close && !((close === "'" || close === "’") && WORD.test(s[j + 1] ?? ""))) return j;
+  }
+  return -1;
+}
+
+/** Taking a recommendation, in words: "Go with your recommendation: yes to both." (one full stop, no wrapper). */
+export function acceptRecommendation(rec) {
+  const r = String(rec ?? "").trim().replace(/[\s.]+$/, "");
+  if (!r) return "Go with your recommendation.";
+  return `Go with your recommendation: ${r}${/[!?]$/.test(r) ? "" : "."}`;
 }
 
 export const DEFAULT_DECISIONS =
@@ -151,6 +210,22 @@ ${author} wrote the plan to ${planPath}. Check it against the discussion and the
 End with TORYO: APPROVED or TORYO: CHANGES.`,
 
   planRevise: ({ planPath }) => `The plan check is above. Revise ${planPath} to address it (or explain why not), keeping decisions recorded. End with: TORYO: REVIEW ${planPath}`,
+
+  // A ready plan: the owner's change request, or a discussion the owner forwarded, is above.
+  planChange: ({ planPath }) => `The owner asked for changes to the plan (above). Revise ${planPath} accordingly, keeping decisions recorded. End with: TORYO: REVIEW ${planPath}`,
+
+  // The other planners' check of the author's revision: once, read-only.
+  planRecheck: ({ author, planPath }) => `## Check the revised plan
+The owner asked for changes to the plan, and ${author} revised ${planPath} (both above). Check the revision: does it do what the owner asked, without losing anything decided before? Is anything contradictory, untestable, or too big for one review round? Don't rewrite it; list concrete fixes. Don't change files.
+
+End with TORYO: APPROVED or TORYO: CHANGES.`,
+
+  // A plan check that ended without a verdict: asked once, for the verdict alone.
+  planVerdict: () =>
+    "Your check of the plan ended without a verdict. Reply with only the status line for it: TORYO: APPROVED if the plan can stand as it is, or TORYO: CHANGES if your findings need the author to act. Don't change files.",
+
+  // The author's one answer to that check (no check follows it).
+  planAddress: ({ planPath, checkers }) => `${checkers} checked the plan, and their findings are above. Address them in ${planPath} (or explain why not), keeping decisions recorded. End with: TORYO: REVIEW ${planPath}`,
 
   chat: ({ canWrite, others }) =>
     `Reply to the owner${others.length ? `; ${others.join(" and ")} may reply too` : ""}. ${canWrite ? "You may change files in the repository if the owner asked for it." : "Don't change files in the repository in this conversation turn."} If you need a decision only the owner can make, end with TORYO: OWNER <question>; otherwise end with TORYO: REPLY.`,

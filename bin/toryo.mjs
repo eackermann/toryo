@@ -24,7 +24,7 @@ const flag = (name, fallback) => {
   const v = args[i + 1];
   return v && !v.startsWith("--") ? v : true;
 };
-const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["to", "port", "host", "project", "plan", "room", "builder", "reviewer", "handoff-file", "slice", "thread", "question"].includes(args[i - 1].slice(2))));
+const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1].startsWith("--") && ["to", "port", "host", "project", "plan", "room", "builder", "reviewer", "handoff-file", "slice", "thread", "question", "from", "checker"].includes(args[i - 1].slice(2))));
 const command = positional[0];
 
 const HELP = `Toryo: a relay desk for coding agents.
@@ -43,6 +43,10 @@ From any terminal (or an agent) while Toryo runs
   toryo answer [--room R] [--question ID] "text"    or    toryo answer [--question ID] --accept
                                 with several questions open (in that room, or in any room without --room),
                                 --question picks one; status lists their ids
+  toryo plan check [--room R] [--question ID] [--checker claude]
+                                a plan that's ready: the other planners check it (or the one named)
+  toryo plan forward [--room R] [--question ID] [--from claude]
+                                your discussion with that planner goes to the plan's author as a change request
   toryo pause|resume|stop [room]
   toryo start chat|plan|build "text" [--plan docs/plans/x.md] [--project name]
   toryo start build "text" --review-first [--builder codexapp] [--reviewer claude] [--handoff-file f.md] [--slice name]
@@ -96,6 +100,11 @@ try {
     case "answer":
       console.log(await client.answer(roomArg(), positional.slice(1).join(" "), { accept: Boolean(flag("accept", false)), question: typeof flag("question", null) === "string" ? flag("question", null) : undefined }));
       process.exit(0);
+    case "plan": {
+      const str = (n) => (typeof flag(n, null) === "string" ? flag(n, null) : undefined);
+      console.log(await client.plan(roomArg(), positional[1], { question: str("question"), from: str("from"), checkers: str("checker") ? [str("checker")] : undefined }));
+      process.exit(0);
+    }
     case "pause":
     case "resume":
     case "stop":

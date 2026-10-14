@@ -250,6 +250,7 @@ function connect() {
   });
   es.addEventListener("event", (e) => {
     const { roomId, event } = JSON.parse(e.data);
+    keepLiveCopy(roomId, event);
     if (roomId === S.roomId && S.view) upsertEvent(event);
   });
   es.addEventListener("activity", (e) => {
@@ -269,14 +270,40 @@ function connect() {
   });
 }
 
+/**
+ * A room fetched whole is a picture of it when the desk answered, and updates that arrive live meanwhile can be newer
+ * (a question answered from a terminal, a Ready card closed). While a fetch is on its way, the live updates are kept
+ * and laid over what it brings back, with any events it missed, so an older copy never replaces a newer one. Each
+ * update also arrives live, so whatever is laid over is at worst a moment old, and the next update corrects it.
+ */
+const liveCopies = { fetching: 0, events: new Map() };
+function keepLiveCopy(roomId, event) {
+  if (liveCopies.fetching) liveCopies.events.set(event.id, { roomId, event });
+}
+async function fetchView(id) {
+  liveCopies.fetching++;
+  try {
+    const v = await api("GET", `/api/rooms/${id}`);
+    const known = new Set(v.events.map((e) => e.id));
+    v.events = v.events.map((e) => liveCopies.events.get(e.id)?.event ?? e);
+    for (const { roomId, event } of liveCopies.events.values()) if (roomId === id && !known.has(event.id)) v.events.push(event);
+    return v;
+  } finally {
+    if (--liveCopies.fetching === 0) liveCopies.events.clear();
+  }
+}
+
 let refreshTimer = null;
+let refreshes = 0;
 function refreshRoomSoon() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(async () => {
     if (!S.roomId) return;
+    const n = ++refreshes;
     try {
-      const v = await api("GET", `/api/rooms/${S.roomId}`);
-      if (v.room.id !== S.roomId) return;
+      const v = await fetchView(S.roomId);
+      // A later refresh started meanwhile: its picture is newer.
+      if (n !== refreshes || v.room.id !== S.roomId) return;
       S.view.room = v.room;
       for (const l of v.live) if (!S.live.has(l.turnId)) S.live.set(l.turnId, l);
       for (const ev of v.events) upsertEvent(ev, { quiet: true });
@@ -306,7 +333,7 @@ function onState() {
 
 async function loadRoom(id, { keepScroll = false } = {}) {
   try {
-    const v = await api("GET", `/api/rooms/${id}`);
+    const v = await fetchView(id);
     const switching = S.roomId !== id;
     S.roomId = id;
     S.view = v;
@@ -556,7 +583,8 @@ function renderContext() {
       .map((l, i) => `<li data-state="${i < at ? "done" : i === at ? "now" : "todo"}">${l}</li>`)
       .join("")}</ol>
       <div class="facts"><div>Plan file: <a href="#" class="file mono" data-file="${esc(r.plan.planPath)}">${esc(r.plan.planPath)}</a></div>
-      <div>Planners: <b>${r.plan.participants.map(name).join(", ")}</b></div></div>`;
+      <div>Planners: <b>${r.plan.participants.map(name).join(", ")}</b></div>
+      <div>After your changes: <b>${r.plan.participants.length < 2 ? "no other planner to check them" : r.settings.recheckAfterChanges !== false ? "the other planners check them once" : "no check (Re-check after changes is off)"}</b></div></div>`;
   } else {
     html += `<p class="sideintro">A conversation with <b>${r.crew.members.map(name).join(", ")}</b>. Use Plan for a structured planning round, Build for the build-and-review relay.</p>
       ${r.discuss ? `<div class="facts"><div>Discussion: round <b>${r.discuss.round}</b> of ${r.discuss.rounds}</div></div>` : ""}`;
@@ -773,7 +801,11 @@ function upsertEvent(ev, { quiet = false } = {}) {
   const log = $("#log");
   const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
   // In a build, a turn starting or ending can open a slice or a round, or fold the one before: draw it all again.
-  if (room()?.mode === "build" && ev.type === "turn" && (!before || before.state !== ev.state)) {
+  // While a plan is ready, a turn ending or the Ready card opening or closing moves the button that forwards a discussion.
+  const turnMoved = ev.type === "turn" && (!before || before.state !== ev.state);
+  const readyMoved = ev.type === "question" && ev.kind === "plan-ready" && before?.open !== ev.open;
+  const planReady = events.some((e) => e.type === "question" && e.kind === "plan-ready" && e.open);
+  if ((room()?.mode === "build" && turnMoved) || readyMoved || (turnMoved && planReady)) {
     const top = log.scrollTop;
     renderTimeline(false);
     requestAnimationFrame(() => scrollLog(stick ? undefined : top));
@@ -821,7 +853,7 @@ function renderEvent(ev) {
 
 function ownerEl(ev) {
   const to = (ev.to ?? []).map(name);
-  const label = { topic: "Planning topic", decisions: "Your decisions", answer: "Your answer" }[ev.kind] ?? "";
+  const label = { topic: "Planning topic", decisions: "Your decisions", answer: "Your answer", "change-request": "Change request" }[ev.kind] ?? "";
   // A note no agent has yet can still be changed or withdrawn, unless it answered a question (it stays as sent).
   const queued = !ev.kind && !ev.answers?.length && !ev.cancelled && !ev.deliveredTo?.length && !Object.keys(ev.readBy ?? {}).length;
   const node = el(`<div class="owner" data-id="${ev.id}" data-cancelled="${Boolean(ev.cancelled)}">
@@ -1023,10 +1055,12 @@ function turnEl(ev) {
     .map(([id]) => `<option value="${id}">${name(id)}</option>`)
     .join("");
   const usage = ev.usage ? `${tokens((ev.usage.input ?? 0) + (ev.usage.cached ?? 0))} in · ${tokens(ev.usage.output)} out${ev.cost ? ` · $${ev.cost.toFixed(2)} at API rates` : ""}` : "";
+  const fwd = forwardFrom(ev);
   return el(`<article class="turn ${ev.state === "failed" ? "failed" : ""}" data-k="${kind}" data-id="${ev.id}">${head}
     ${text.trim() ? `<div class="body md ${long && !expanded ? "clamped" : ""}">${renderMarkdown(text)}</div>` : ev.state === "deferred" ? "" : `<div class="hint">(no message)</div>`}
     ${long ? `<div><button type="button" class="btn small quiet" data-expand="${ev.id}">${expanded ? "Show less" : "Show the whole message"}</button></div>` : ""}
     ${ev.error ? `<div class="error">${esc(ev.error)}</div>` : ""}
+    ${fwd ? `<div class="actions forward"><button type="button" class="btn small" data-forward="${fwd.questionId}" data-agent="${esc(ev.agent)}" title="Your messages with ${esc(name(ev.agent))} since the plan was ready, and its replies, go to ${esc(name(fwd.author))}, who revises the plan">${ic("plan")}Send this discussion to ${esc(name(fwd.author))} as a change request</button></div>` : ""}
     <footer>
       ${ev.files?.length ? `<button type="button" class="linkbtn" data-diff="${ev.id}">${ev.files.length} file${ev.files.length > 1 ? "s" : ""} changed</button>` : ev.snapAfter ? `<span>No file changes</span>` : ""}
       ${handoff ? `<span class="handoff">${ic("file")}<a href="#" class="file mono" data-file="${esc(handoff)}">${esc(handoff)}</a></span>` : ""}
@@ -1042,6 +1076,22 @@ function feedItems(activity, n) {
   const items = activity.slice(-n);
   if (!items.length) return `<li>starting…</li>`;
   return items.map((a) => `<li data-kind="${esc(a.kind)}" title="${esc(a.text)}">${a.kind === "command" ? "$ " : a.kind === "edit" ? "✎ " : a.kind === "say" ? "› " : ""}${esc(a.text)}</li>`).join("");
+}
+
+/**
+ * While a plan waits on its Ready card, your exchange since then with a planner other than its author can go to the
+ * author as a change request: the button is on that planner's latest reply. Who wrote the plan and who else plans
+ * come from the card (`from`, `checkers`), which arrives with the timeline, never from a room that may be older.
+ */
+function forwardFrom(ev) {
+  if (ev.state !== "done" || !ev.text?.trim()) return null;
+  const events = S.view.events;
+  const at = events.findIndex((e) => e.type === "question" && e.kind === "plan-ready" && e.open);
+  const card = events[at];
+  const mine = events.findIndex((e) => e.id === ev.id);
+  if (!card || mine < at || !card.from || !(card.checkers ?? []).includes(ev.agent)) return null;
+  if (events.slice(mine + 1).some((e) => e.type === "turn" && e.agent === ev.agent && e.state === "done")) return null;
+  return { questionId: card.id, author: card.from };
 }
 
 function questionEl(ev) {
@@ -1064,11 +1114,15 @@ function questionEl(ev) {
       </div>
       <div class="actions"><button class="btn you" type="submit">${ic("check")}Write the plan</button>${qs.length && qs.every((q) => q.recommendation?.trim()) ? `<button class="btn" type="button" data-accept-checkpoint title="Every question answered with its recommendation, as shown">Accept all recommendations</button>` : ""}<button class="btn quiet" type="button" data-focus-everyone>Discuss more first</button></div></form>`);
   }
-  if (ev.kind === "plan-ready")
+  if (ev.kind === "plan-ready") {
+    // The other planners can check it without a build starting (cards from before this had no checkers: no button).
+    const checkers = (ev.checkers ?? []).map(name).join(" and ");
     return el(`<div class="decision" data-id="${ev.id}">${who}<p class="q">${esc(ev.question)}</p>
       <div class="actions"><button class="btn you" type="button" data-start-build="${esc(ev.planPath ?? "")}">${ic("build")}Start building with this plan</button>
       <button class="btn" type="button" data-file="${esc(ev.planPath ?? "")}">Read the plan</button>
+      ${checkers ? `<button class="btn" type="button" data-plan-check>${ic("review")}Ask ${esc(checkers)} to check it</button>` : ""}
       <button class="btn quiet" type="button" data-answer-focus="${esc(ev.from ?? "")}">Ask for changes</button></div></div>`);
+  }
   if (ev.kind === "app-lost")
     return el(`<div class="decision" data-id="${ev.id}">${who}<p class="q">${esc(ev.question)}</p>
       <div class="actions"><button class="btn you" type="button" data-accept>Follow it again</button><button class="btn" type="button" data-app-release>Stop waiting for it</button></div></div>`);
@@ -1173,7 +1227,7 @@ function renderCrew() {
 
   const s = r.settings;
   html += `<div class="card"><p class="eyebrow">This room</p>
-    <div class="hint">${s.autoContinue ? "Continues after approval" : "Asks after each approval"} · ${s.maxRounds} rounds per slice · ${s.gates !== false ? "checks before review" : "no checks"}</div>
+    <div class="hint">${r.mode === "plan" ? (s.recheckAfterChanges !== false ? "The other planners check your changes" : "No check after your changes") : `${s.autoContinue ? "Continues after approval" : "Asks after each approval"} · ${s.maxRounds} rounds per slice · ${s.gates !== false ? "checks before review" : "no checks"}`}</div>
     <div><button type="button" class="btn small" data-room-settings>Room settings, rename or delete</button></div></div>`;
 
   html += `<div class="card"><p class="eyebrow">Safeguards</p>
@@ -1992,6 +2046,8 @@ function roomSheet() {
       <label class="opt"><input type="checkbox" name="gates" ${st.gates !== false ? "checked" : ""}> Run the project's checks before each review${proj?.gates?.length ? ` (${proj.gates.map((g) => esc(g.name || g.command)).join(", ")})` : " (none set; add them in Settings)"}</label>
       <label class="opt"><input type="checkbox" name="snapshots" ${st.snapshots !== false ? "checked" : ""}> Snapshot the tree every turn, for the “files changed” diffs</label>
       <label class="opt"><input type="checkbox" name="freshReviewer" ${st.freshReviewer !== false ? "checked" : ""}> Fresh reviewer for each new slice, with a ledger of open findings and your decisions (the final review always gets one)</label></div>
+    <div class="field"><span class="lbl">Planning</span>
+      <label class="opt"><input type="checkbox" name="recheckAfterChanges" ${st.recheckAfterChanges !== false ? "checked" : ""}> Re-check after changes: when you ask for changes to a ready plan, the other planners check the revision once, and the author addresses what they find</label></div>
     <div class="pair"><label class="field"><span class="lbl">Review rounds per slice before asking you</span><input type="number" name="maxRounds" min="1" max="20" value="${st.maxRounds}"></label>
       <label class="field"><span class="lbl">Nudges when a builder stops without a status</span><input type="number" name="maxNudges" min="0" max="10" value="${st.maxNudges}"></label></div>
     <label class="field"><span class="lbl">Longest turn before Toryo gives up (minutes)</span><input type="number" name="turnTimeoutMin" min="5" max="1440" value="${st.turnTimeoutMin ?? 240}"></label>
@@ -2008,6 +2064,7 @@ function roomSheet() {
         snapshots: f.has("snapshots"),
         gates: f.has("gates"),
         freshReviewer: f.has("freshReviewer"),
+        recheckAfterChanges: f.has("recheckAfterChanges"),
         maxRounds: Number(f.get("maxRounds")),
         maxNudges: Number(f.get("maxNudges")),
         turnTimeoutMin: Number(f.get("turnTimeoutMin")),
@@ -2207,6 +2264,16 @@ document.addEventListener("click", async (e) => {
       return $("#msg").focus();
     }
     if (hit("[data-start-build]")) return startBuildSheet(hit("[data-start-build]").dataset.startBuild);
+    if (hit("[data-plan-check]") || hit("[data-forward]")) {
+      // Both name the Ready card they came from, and a second click waits for the first: an older card is refused.
+      const b = hit("[data-plan-check]") ?? hit("[data-forward]");
+      const body = b.dataset.forward ? { action: "forward-discussion", questionId: b.dataset.forward, agent: b.dataset.agent } : { action: "plan-check", questionId: b.closest("[data-id]")?.dataset.id };
+      b.disabled = true;
+      return api("POST", `/api/rooms/${r.id}/control`, body).catch((error) => {
+        b.disabled = false;
+        fail(error);
+      });
+    }
     if (hit("[data-action=swap]")) return api("POST", `/api/rooms/${r.id}/control`, { action: "swap" }).catch(fail);
     if (hit("[data-fresh]")) return api("POST", `/api/rooms/${r.id}/control`, { action: "fresh", agent: hit("[data-fresh]").dataset.fresh }).catch(fail);
     if (hit("[data-note-edit]")) return editNote(hit("[data-note-edit]").closest("[data-id]"));

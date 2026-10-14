@@ -150,8 +150,8 @@ async function route(engine, method, parts, url, body) {
     if (b === "notes" && c && method === "PATCH") return engine.editNote(id, c, { text: body.text });
     if (b === "notes" && c && method === "DELETE") return engine.editNote(id, c, { cancel: true });
     if (b === "control" && method === "POST") {
-      // These act on one question too (a failed turn, a planning round's checkpoint): they must name it.
-      if (["retry", "synthesize", "accept-checkpoint"].includes(body.action) && !body.questionId)
+      // These act on one question too (a failed turn, a planning round's checkpoint, a ready plan): they must name it.
+      if (["retry", "synthesize", "accept-checkpoint", "plan-check", "forward-discussion"].includes(body.action) && !body.questionId)
         throw new UserError("Say which question this is for (questionId). The room lists its open questions with their ids.");
       return engine.control(id, body.action, body);
     }

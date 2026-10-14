@@ -50,6 +50,11 @@ try {
     { agent: "claude", match: "step 1 of 4", reply: "Claude proposal.\n- Q: Ship a CLI too? (Recommended: no)\nTORYO: PROPOSAL" },
     { match: "step 2 of 4", reply: "Critique.\nTORYO: CRITIQUE" },
     { agent: "claude", match: "Both of you", reply: "TORYO: OWNER Which host?" },
+    // A plan Codex writes and Claude approves (step 5q), then a change forwarded from your talk with Claude.
+    { agent: "codex", match: "step 3 of 4", write: { path: "docs/plans/ui.md", content: "# Exports\n\n### Slice 1: One\n" }, reply: "Written.\nTORYO: REVIEW docs/plans/ui.md" },
+    { agent: "claude", match: "step 4 of 4|Check the revised plan", reply: "Fine.\nTORYO: APPROVED" },
+    { agent: "claude", match: "Anything missing", reply: "Slice 1 needs a test.\nTORYO: REPLY" },
+    { agent: "codex", match: "The owner asked for changes to the plan", write: { path: "docs/plans/ui.md", content: "# Exports\n\n### Slice 1: One, tested\n" }, reply: "Added it.\nTORYO: REVIEW docs/plans/ui.md" },
     { agent: "codex", match: "Slow build of the parser", delayMs: 6000, reply: "Built the parser.\nTORYO: OWNER Ship it?" },
     { agent: "codex", match: "Slow review of the (lexer|docs)", delayMs: 6000, reply: "Built it.\nTORYO: REVIEW Slice 1: It | h.md" },
     { agent: "claude", hang: true },
@@ -709,6 +714,118 @@ try {
   await page.waitForFunction(() => document.querySelector("#roomTitle")?.textContent === "Slow room");
   assert.equal(await editorOf(page).count(), 0);
   assert.match(await queued.locator(".md").innerText(), /Version C/);
+
+  // 5q. A ready plan. Its card asks Claude to check it, once however fast you click; your talk with Claude since goes
+  // to Codex, the author, from Claude's reply; the room keeps Re-check after changes. On a phone, the card's buttons
+  // fill its width and are tall enough to tap.
+  const exports = await post("api/rooms", { projectId: "ui", mode: "plan", topic: "Exports", members: ["codex", "claude"], title: "Ready plan", planPath: "docs/plans/ui.md" });
+  await openRoom(exports.id, "Ready plan");
+  await page.waitForSelector("[data-checkpoint] [data-accept-checkpoint]");
+  await page.selectOption("#cqWho", "codex");
+  await page.click("[data-accept-checkpoint]");
+  const checkBtn = page.locator(".decision [data-plan-check]");
+  await checkBtn.waitFor();
+  assert.equal((await checkBtn.innerText()).trim(), "Ask Claude to check it");
+  const firstCard = (await questions(exports.id)).find((q) => q.kind === "plan-ready");
+  assert.match(firstCard.question, /Claude checked it and approved\./);
+  const sentChecks = [];
+  const onCheck = (r) => /"action":"plan-check"/.test(r.postData() ?? "") && sentChecks.push(r);
+  page.on("request", onCheck);
+  await checkBtn.dblclick();
+  await until(async () => (await questions(exports.id)).some((q) => q.kind === "plan-ready" && q.id !== firstCard.id), "the plan ready again after the check");
+  page.off("request", onCheck);
+  assert.equal(sentChecks.length, 1, "a double click asks once");
+  const calls = () => readFileSync(join(base, "calls.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(calls().filter((c) => /step 4 of 4/.test(c.prompt)).length, 2, "the first check and the one you asked for");
+  // Your talk with Claude about the ready plan, sent to Codex from Claude's reply.
+  const talk = (await post(`api/rooms/${exports.id}/messages`, { text: "Anything missing?", to: "claude", answering: false })).event;
+  const fwd = page.locator(".turn [data-forward]");
+  // Drawn as the reply arrives, even before the page's copy of the room knows who wrote the plan: the card says.
+  await fwd.waitFor({ timeout: 10_000 });
+  assert.equal(await fwd.count(), 1, "on Claude's latest reply only");
+  assert.equal((await fwd.innerText()).trim(), "Send this discussion to Codex as a change request");
+  // Your note shows it was answered (it grows a line, and the timeline moves): click once that's settled.
+  await page.waitForSelector(`.owner[data-id="${talk.id}"] .outcome`);
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const forwards = [];
+  const onForward = (r) => /"action":"forward-discussion"/.test(r.postData() ?? "") && forwards.push(r);
+  page.on("request", onForward);
+  await fwd.click();
+  await page.waitForFunction(() => [...document.querySelectorAll(".owner .to")].some((x) => /^Change request · You → Codex/.test(x.textContent)));
+  page.off("request", onForward);
+  assert.equal(forwards.length, 1);
+  await page.waitForFunction(() => !document.querySelector(".turn [data-forward]"), null, { timeout: 5000 });
+  await until(async () => (await questions(exports.id)).some((q) => q.kind === "plan-ready" && /Claude checked it and approved/.test(q.question)) && calls().some((c) => /Check the revised plan/.test(c.prompt)), "the forwarded change revised and checked");
+  const request = (await view(exports.id)).events.find((e) => e.kind === "change-request");
+  assert.deepEqual(request.forwarded.map((x) => x.from), ["owner", "claude"]);
+  // The setting, on by default; turned off, the plan panel says so.
+  await page.click("#roomBtn");
+  const recheck = page.locator('#roomForm input[name="recheckAfterChanges"]');
+  assert.equal(await recheck.isChecked(), true);
+  await recheck.uncheck();
+  await page.click('#roomForm button[type="submit"]');
+  await until(async () => (await view(exports.id)).room.settings.recheckAfterChanges === false, "the setting saved");
+  await page.waitForFunction(() => /After your changes: no check \(Re-check after changes is off\)/.test(document.querySelector(".side")?.innerText ?? ""));
+  // On a phone: the Ready card's buttons, and the one under Claude's reply, fit and are tall enough to tap.
+  await post(`api/rooms/${exports.id}/messages`, { text: "Anything missing now?", to: "claude", answering: false });
+  await fwd.waitFor({ timeout: 10_000 });
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.waitForTimeout(200);
+    const phone = await page.evaluate(() => {
+      const measure = (card, sel) => {
+        card.scrollIntoView();
+        const box = card.getBoundingClientRect();
+        return [...card.querySelectorAll(sel)].map((b) => {
+          const r = b.getBoundingClientRect();
+          return { text: b.innerText.trim(), height: r.height, inside: r.left >= box.left - 0.5 && r.right <= box.right + 0.5 };
+        });
+      };
+      const card = [...document.querySelectorAll(".decision")].find((d) => d.querySelector("[data-plan-check]"));
+      return { wide: document.documentElement.scrollWidth, buttons: [...measure(card, ".actions .btn"), ...measure(document.querySelector("[data-forward]").closest(".turn"), "[data-forward]")] };
+    });
+    assert.ok(phone.wide <= width, `${width}px: nothing scrolls sideways (${phone.wide}px)`);
+    assert.equal(phone.buttons.length, 5);
+    for (const b of phone.buttons) {
+      assert.ok(b.inside, `${width}px, ${b.text}: inside its card`);
+      assert.ok(b.height >= 44, `${width}px, ${b.text}: tall enough to tap (${b.height}px)`);
+    }
+  }
+  await page.setViewportSize({ width: 1400, height: 900 });
+
+  // 5r. A room fetched again while a question is answered elsewhere: the fetch, sent before the answer and back after
+  // everything since, doesn't bring the answered question back (a note would otherwise be tied to it, and refused).
+  const lateRoom = await post("api/rooms", { projectId: "ui", mode: "chat", members: ["codex"], text: "Ask me.", to: "codex", title: "Late refresh" });
+  await until(async () => (await questions(lateRoom.id)).length === 1 && (await view(lateRoom.id)).live.length === 0);
+  const [lateQ] = await questions(lateRoom.id);
+  await openRoom(lateRoom.id, "Late refresh");
+  let fetchedLate;
+  const snapshot = new Promise((r) => (fetchedLate = r));
+  let letGo;
+  const lateHeld = new Promise((r) => (letGo = r));
+  let firstFetch = true;
+  await page.route(`**/api/rooms/${lateRoom.id}`, async (route) => {
+    if (!firstFetch || route.request().method() !== "GET") return route.continue();
+    firstFetch = false;
+    // The desk's answer as it was now, handed to the page only later.
+    const res = await route.fetch();
+    fetchedLate();
+    await lateHeld;
+    await route.fulfill({ response: res });
+  });
+  // Any change to the room makes the page fetch it again; here, a new name.
+  await post(`api/rooms/${lateRoom.id}/control`, { action: "rename", title: "Late refresh room" });
+  await snapshot;
+  await post(`api/rooms/${lateRoom.id}/answer`, { questionId: lateQ.id, text: "From the phone." });
+  await page.waitForSelector(`.decision.closed[data-id="${lateQ.id}"]`);
+  // Codex replies (with another question), the page fetches the room again meanwhile, and then all is quiet: the
+  // held answer, older than all that, arrives last.
+  await until(async () => (await view(lateRoom.id)).live.length === 0 && (await questions(lateRoom.id)).some((q) => q.id !== lateQ.id), "Codex's next question");
+  await page.waitForTimeout(600);
+  letGo();
+  await page.waitForTimeout(800);
+  assert.ok(await page.$(`.decision.closed[data-id="${lateQ.id}"]`), "the answered question stays answered");
+  await page.unroute(`**/api/rooms/${lateRoom.id}`);
 
   // 6. A page file changes on disk under the running desk: the page says to restart Toryo (a reload can't help).
   appendFileSync(join(web, "styles.css"), "\n/* edited by a build room */\n");

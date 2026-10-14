@@ -1,62 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { ToryoClient } from "../src/client.mjs";
-import { createServer } from "../src/server.mjs";
-import { setup, turns, waitFor } from "./helpers.mjs";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-async function withServer(rules, fn) {
-  const t = await setup(rules);
-  const app = createServer({ engine: t.engine, webDir: join(root, "web"), port: 0 });
-  const addr = await app.listen();
-  writeFileSync(join(t.home, "server.json"), JSON.stringify({ port: addr.port, pid: process.pid }));
-  const post = async (path, body) => {
-    const res = await fetch(`http://127.0.0.1:${addr.port}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-toryo": "1" }, body: JSON.stringify(body) });
-    return { status: res.status, body: await res.json() };
-  };
-  try {
-    await fn({ ...t, post, client: new ToryoClient(t.home) });
-  } finally {
-    await app.close();
-    t.cleanup();
-  }
-}
-
-/** The MCP server over stdio, as Claude Code or Codex runs it: call(tool, args) gives the tool's reply. */
-function mcp(home) {
-  const child = spawn(process.execPath, [join(root, "bin", "toryo.mjs"), "mcp"], { env: { ...process.env, TORYO_HOME: home } });
-  const replies = new Map();
-  let buf = "";
-  let next = 1;
-  child.stdout.on("data", (d) => {
-    buf += d;
-    let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      const m = JSON.parse(buf.slice(0, i));
-      replies.set(m.id, m);
-      buf = buf.slice(i + 1);
-    }
-  });
-  const send = (m) => child.stdin.write(JSON.stringify(m) + "\n");
-  send({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
-  return {
-    async call(name, args) {
-      const id = next++;
-      send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
-      await waitFor(() => replies.has(id), { label: `MCP ${name}` });
-      const r = replies.get(id).result;
-      return { text: r.content[0].text, error: Boolean(r.isError) };
-    },
-    close: () => child.kill(),
-  };
-}
+import { mcp, setup, turns, waitFor, withServer } from "./helpers.mjs";
 
 const open = (engine, id) => engine.summary(engine.rooms.get(id)).questions;
 const idle = (engine, id) => !engine.summary(engine.rooms.get(id)).running.length && !engine.rooms.get(id).queue.length;

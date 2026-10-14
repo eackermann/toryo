@@ -243,6 +243,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
 .turn .body.clamped { max-height: 340px; overflow: hidden; }
 .turn .body.clamped::after { content: ""; position: absolute; inset: auto 0 0 0; height: 64px; background: linear-gradient(transparent, var(--surface)); pointer-events: none; }
 .turn .error { color: var(--bad-ink); font-size: 13.5px; }
+/* Under a planner's reply while the plan is ready: send your discussion to the author. A long name wraps, never overflows. */
+.turn .forward .btn { max-width: 100%; white-space: normal; text-align: left; }
 .turn > footer { display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); padding-top: 8px; border-top: 1px solid var(--line); }
 .turn > footer .sep { flex: 1; }
 .turn > footer select { padding-block: 3px; font-size: 12.5px; }
@@ -518,6 +520,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--ink); }
   .sheet { padding: 18px 16px; }
   .scrim { padding: 8px; }
   .toasts { top: auto; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
+  /* A question's buttons, and forwarding a discussion: the width of the card and tall enough to tap. */
+  .decision .actions .btn, .turn .forward .btn { flex: 1 1 100%; min-height: 44px; white-space: normal; text-align: center; }
 }
 @media (max-width: 420px) {
   .wordmark { display: none; }
