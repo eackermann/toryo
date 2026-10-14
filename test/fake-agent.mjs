@@ -21,7 +21,7 @@
  * ({ primary, secondary }, as Codex logs them) is written to the session log under CODEX_HOME, where Toryo
  * reads Codex's usage.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 
@@ -32,7 +32,21 @@ if (args.includes("--version")) {
 }
 const script = JSON.parse(readFileSync(process.env.FAKE_SCRIPT, "utf8"));
 const countsFile = `${process.env.FAKE_SCRIPT}.counts.json`;
-const counts = existsSync(countsFile) ? JSON.parse(readFileSync(countsFile, "utf8")) : {};
+// Shared by fakes running at once (rooms side by side): read again if caught half-written, and written whole, by
+// renaming a finished copy into place, so no fake ever reads it half-written.
+const counts = (() => {
+  if (!existsSync(countsFile)) return {};
+  let last;
+  for (let i = 0; i < 20; i++) {
+    try {
+      return JSON.parse(readFileSync(countsFile, "utf8"));
+    } catch (error) {
+      last = error; // being replaced: once more
+    }
+  }
+  // Still unreadable: a broken file, said, never taken for "no rule has answered yet".
+  throw last;
+})();
 
 // Codex and Claude take the prompt on stdin; Cursor takes it as its last argument (and speaks Claude's format).
 const prompt =
@@ -66,7 +80,8 @@ for (let i = 0; i < script.rules.length; i++) {
   rule = r;
   break;
 }
-writeFileSync(countsFile, JSON.stringify(counts));
+writeFileSync(`${countsFile}.${process.pid}`, JSON.stringify(counts));
+renameSync(`${countsFile}.${process.pid}`, countsFile);
 if (script.log) appendFileSync(script.log, JSON.stringify({ kind, args, prompt, session, rule: rule?.match ?? null, at: Date.now() }) + "\n");
 
 if (rule?.failEarly) {

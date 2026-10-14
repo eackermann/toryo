@@ -119,8 +119,8 @@ test("writers wait for a review already reading; a writable chat too; and a revi
     const build = e.createRoom({ projectId: "repo", mode: "build", members: ["codex", "claude"], task: "Build", title: "Build", settings: { gates: false, autoContinue: false } });
     await waitFor(() => calls.length === 1, { label: "the builder" });
     calls[0].end();
-    await waitFor(() => sum(e, build.id).working.some((w) => w.kind === "review"), { label: "the review" });
-    // Someone edits a file in the folder meanwhile (an editor, outside Toryo).
+    // The review under way (its first snapshot taken), someone edits a file in the folder (an editor, outside Toryo).
+    await waitFor(() => turns(e, build.id).find((x) => x.kind === "review")?.snapBefore, { label: "the review" });
     writeFileSync(join(t.repo, "edited-meanwhile.txt"), "x");
     // A chat allowed to change files, in another room: it waits for the review to end.
     const chat = e.createRoom({ projectId: "repo", mode: "chat", members: ["codex"], title: "Chat" });

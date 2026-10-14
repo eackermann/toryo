@@ -929,6 +929,8 @@ export class Engine extends EventEmitter {
     }
     // Rooms saved before runs were tracked: what they have queued belongs to their current run.
     room.flow ??= shortId("f");
+    // Rooms from before workspaces work in their project's own folder.
+    if (!room.workspace && this.project(room.projectId)) room.workspace = this.#mainWorkspace(this.project(room.projectId));
     // A build in progress from before folders were claimed: it claims its folder from when it started, so the
     // earliest of two such builds in one folder goes on and the other waits for it.
     const project = this.project(room.projectId);
@@ -1359,6 +1361,7 @@ export class Engine extends EventEmitter {
       plan: null,
       discuss: null,
       stats: { turns: 0, agents: {} },
+      workspace: this.#mainWorkspace(project),
     };
     this.rooms.set(room.id, room);
     this.events.set(room.id, []);
@@ -2524,7 +2527,7 @@ export class Engine extends EventEmitter {
 
     const dir = this.store.turnDir(room.id, turnId);
     const snapOn = room.settings.snapshots !== false && this.snapshots;
-    const before = snapOn ? await this.snapshots.take(project, `before ${turnId} ${req.agent} ${req.kind}`) : null;
+    const before = snapOn ? await this.#snapshot(room, project, `before ${turnId} ${req.agent} ${req.kind}`) : null;
     if (before) this.#patch(room, ev, { snapBefore: before.commit });
     if (req.kind === "review" && before && this.snapshots) {
       // Tell the reviewer exactly which tree it is reviewing, and how to diff it against its last review.
@@ -2631,7 +2634,7 @@ export class Engine extends EventEmitter {
       run.uncertain = true;
       this.#save(room);
     }
-    const after = snapOn ? await this.snapshots.take(project, `after ${turnId} ${req.agent} ${req.kind}`) : null;
+    const after = snapOn ? await this.#snapshot(room, project, `after ${turnId} ${req.agent} ${req.kind}`) : null;
     // What the turn changed, and whether that's known (snapshots on, both taken, and compared): unknown isn't nothing.
     const listed = before && after ? await this.snapshots.changes(project, before.commit, after.commit, { strict: true }) : null;
     const filesKnown = listed !== null;
@@ -3973,6 +3976,45 @@ export class Engine extends EventEmitter {
     const waiting = [];
     if (holding) for (const r of this.rooms.values()) if (r !== room && !r.archived && r.mode === "build" && r.build && !r.done && waitsFor(r) === room) waiting.push({ id: r.id, title: r.title });
     return { path: id.root, holding, waitsFor: holding ? null : { id: blocker.id, title: blocker.title }, waiting };
+  }
+
+  // ---------------------------------------------------------------- workspaces and snapshots
+
+  /**
+   * The workspace a room works in, kept with the room: its id ("main": the project's own folder, which every room
+   * has until rooms get folders of their own), the folder's top (see #folderOf), and the project's place inside it.
+   */
+  #mainWorkspace(project) {
+    const folder = this.#folderOf(project);
+    let real = project.path;
+    try {
+      real = realpathSync(project.path);
+    } catch {
+      /* as given */
+    }
+    return { id: "main", kind: "main", root: folder.root, subdir: relative(folder.root, real) || "" };
+  }
+
+  /** The workspace a room's snapshots are taken of: null for the project's own folder. */
+  #workspaceOf(room) {
+    const ws = room.workspace;
+    return !ws || ws.id === "main" ? null : { id: ws.id, path: ws.path };
+  }
+
+  /** A snapshot of the room's workspace for a turn. One that can't be taken is said in the room, once per reason. */
+  async #snapshot(room, project, label) {
+    const ws = this.#workspaceOf(room);
+    const snap = await this.snapshots.take(project, label, ws);
+    if (snap) {
+      if (room.snapshotProblem) room.snapshotProblem = undefined;
+      return snap;
+    }
+    const why = this.snapshots.failure?.(project, ws) ?? "the reason isn't known";
+    if (room.snapshotProblem !== why) {
+      room.snapshotProblem = why;
+      this.#system(room, `Toryo couldn't take a snapshot of this room's folder: ${why}. The files its turns change can't be listed or compared until it can.`, { level: "warn" });
+    }
+    return null;
   }
 
   /** What keeps a room busy, in words: turns and checks running, work queued, a Codex app turn it still keeps. */
