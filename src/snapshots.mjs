@@ -40,30 +40,37 @@ export class Snapshots {
     return join(this.root, `${project.id}.git`);
   }
 
-  /** The project's shadow repository, made if needed, borrowing the project's objects. Null outside Git. */
-  async ensure(project) {
-    if (this.ready.has(project.id)) return this.ready.get(project.id);
+  /**
+   * The project's shadow repository, made if needed, borrowing the project's objects. Null outside Git. Made once,
+   * however many of the project's workspaces ask at the same time: two `git init`s of one folder trip over each other,
+   * and the one that lost would leave the project without snapshots until the desk restarts.
+   */
+  ensure(project) {
+    if (!this.ready.has(project.id))
+      this.ready.set(
+        project.id,
+        this.#ensure(project).catch((error) => {
+          this.ready.delete(project.id);
+          throw error;
+        }),
+      );
+    return this.ready.get(project.id);
+  }
+
+  async #ensure(project) {
     const top = await run("git", ["-C", project.path, "rev-parse", "--show-toplevel"], { env: quiet() });
-    if (top.code !== 0) {
-      this.ready.set(project.id, null);
-      return null;
-    }
+    if (top.code !== 0) return null;
     const dir = this.gitDir(project);
     if (!existsSync(join(dir, "HEAD"))) {
       const init = await run("git", ["init", "--bare", "-q", dir]);
-      if (init.code !== 0) {
-        this.ready.set(project.id, null);
-        return null;
-      }
+      if (init.code !== 0) return null;
     }
     const common = await run("git", ["-C", project.path, "rev-parse", "--path-format=absolute", "--git-common-dir"], { env: quiet() });
     if (common.code === 0) {
       mkdirSync(join(dir, "objects", "info"), { recursive: true });
       writeFileSync(join(dir, "objects", "info", "alternates"), join(common.stdout.trim(), "objects") + "\n");
     }
-    const info = { dir, top: top.stdout.trim() };
-    this.ready.set(project.id, info);
-    return info;
+    return { dir, top: top.stdout.trim() };
   }
 
   /**

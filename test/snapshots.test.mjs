@@ -151,6 +151,37 @@ test("two workspaces of one project (its folder and a linked worktree) keep thei
   }
 });
 
+test("a project's first snapshots, taken in several of its workspaces at once, make its shadow repository once", async () => {
+  const s = scratch();
+  try {
+    const path = repo(s.base, "main");
+    const rooms = [1, 2, 3, 4, 5].map((n) => {
+      const wt = join(s.base, `room-${n}`);
+      git(path, "worktree", "add", "-q", "-b", `room-${n}`, wt);
+      return { id: `room-${n}`, path: wt };
+    });
+    const snaps = new Snapshots(s.home);
+    const project = { id: "main", path };
+    // A slow `git init`, as on a busy machine: every capture asks for the shadow repository before it's there. Two
+    // `git init`s of one folder at once trip over each other, and the one that lost said the project wasn't in Git.
+    const bin = join(s.base, "bin");
+    mkdirSync(bin);
+    const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    writeFileSync(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" init "*) sleep 0.3;; esac\nexec "${real}" "$@"\n`, { mode: 0o755 });
+    const before = process.env.PATH;
+    process.env.PATH = `${bin}:${before}`;
+    try {
+      const all = await Promise.all([snaps.capture(project, "main"), ...rooms.map((w) => snaps.capture(project, "room", w))]);
+      assert.deepEqual(all.map((r) => r.reason ?? "ok"), Array(6).fill("ok"));
+      assert.equal(snaps.failure(project), null);
+    } finally {
+      process.env.PATH = before;
+    }
+  } finally {
+    s.done();
+  }
+});
+
 test("files changing while a snapshot is taken: taken again; changing every time, refused with the reason", async () => {
   const s = scratch();
   try {
